@@ -1,0 +1,261 @@
+# dev_core/portfolio_risk_gate.py
+"""
+Portfolio-level hard risk gate.
+
+Purpose:
+- Enforce net exposure limits, turnover limits, and drawdown-based add blocks
+  *after* strategy outputs weights but *before* orders are emitted.
+
+Env:
+  PORTFOLIO_USE_RISK_GATE=1
+
+  # Net exposure: net = sum(long_w) - sum(short_w)
+  PORTFOLIO_MAX_NET_EXPOSURE=0.60
+
+  # Turnover cap per rebalance: sum(abs(target_w - current_w)) across all symbols
+  PORTFOLIO_MAX_TURNOVER=0.60
+
+  # Drawdown-based add block: if dd >= threshold, block any increase in gross exposure
+  PORTFOLIO_DD_ADD_BLOCK=0.08
+
+  # Drawdown-based gross cap multiplier: if dd >= threshold, gross cap becomes
+  # PORTFOLIO_GROSS_CAP * multiplier
+  PORTFOLIO_DD_GROSS_MULT=0.70
+
+Notes:
+- This module does NOT emit orders. It only clamps desired targets.
+- It annotates desired[sym]["reason"]["risk_gate"] for explainability.
+"""
+
+import os
+from typing import Any, Dict, Tuple
+
+from dev_core.drawdown_state import get_current_drawdown
+
+USE = os.environ.get("PORTFOLIO_USE_RISK_GATE", "1") == "1"
+
+MAX_NET = float(os.environ.get("PORTFOLIO_MAX_NET_EXPOSURE", "0.60"))
+MAX_TURNOVER = float(os.environ.get("PORTFOLIO_MAX_TURNOVER", "0.60"))
+
+DD_ADD_BLOCK = float(os.environ.get("PORTFOLIO_DD_ADD_BLOCK", "0.08"))
+DD_GROSS_MULT = float(os.environ.get("PORTFOLIO_DD_GROSS_MULT", "0.70"))
+
+GROSS_CAP = float(os.environ.get("PORTFOLIO_GROSS_CAP", "1.00"))
+
+
+def _side_sign(side: str) -> float:
+    s = str(side or "FLAT").upper()
+    if s == "LONG":
+        return 1.0
+    if s == "SHORT":
+        return -1.0
+    return 0.0
+
+
+def _cur_signed_weight(cur_row: Dict[str, Any]) -> float:
+    if not cur_row:
+        return 0.0
+    w = float(cur_row.get("weight", 0.0) or 0.0)
+    sgn = _side_sign(cur_row.get("side", "FLAT"))
+    return float(w) * float(sgn)
+
+
+def _tgt_signed_weight(tgt_row: Dict[str, Any]) -> float:
+    if not tgt_row:
+        return 0.0
+    w = float(tgt_row.get("weight", 0.0) or 0.0)
+    sgn = _side_sign(tgt_row.get("side", "FLAT"))
+    return float(w) * float(sgn)
+
+
+def _gross(desired: Dict[str, Dict[str, Any]]) -> float:
+    g = 0.0
+    for v in (desired or {}).values():
+        try:
+            g += abs(float(v.get("weight", 0.0) or 0.0))
+        except Exception:
+            pass
+    return float(g)
+
+
+def _net(desired: Dict[str, Dict[str, Any]]) -> float:
+    n = 0.0
+    for v in (desired or {}).values():
+        try:
+            n += _tgt_signed_weight(v)
+        except Exception:
+            pass
+    return float(n)
+
+
+def _turnover(desired: Dict[str, Dict[str, Any]], state: Dict[str, Dict[str, Any]]) -> float:
+    syms = set()
+    for s in (desired or {}).keys():
+        syms.add(str(s))
+    for s in (state or {}).keys():
+        syms.add(str(s))
+
+    tot = 0.0
+    for sym in syms:
+        cur = state.get(sym)
+        tgt = desired.get(sym)
+        cur_w = abs(_cur_signed_weight(cur))
+        tgt_w = abs(_tgt_signed_weight(tgt))
+        tot += abs(float(tgt_w) - float(cur_w))
+    return float(tot)
+
+
+def _annotate(desired: Dict[str, Dict[str, Any]], info: Dict[str, Any]) -> None:
+    for sym in list((desired or {}).keys()):
+        try:
+            desired[sym].setdefault("reason", {})
+            if not isinstance(desired[sym]["reason"], dict):
+                desired[sym]["reason"] = {"raw": desired[sym]["reason"]}
+            desired[sym]["reason"]["risk_gate"] = dict(info)
+        except Exception:
+            pass
+
+
+def apply_portfolio_risk_gate(
+    con,
+    desired: Dict[str, Dict[str, Any]],
+    state: Dict[str, Dict[str, Any]],
+    now_ms: int,
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """
+    Returns (desired_clamped, gate_info)
+    """
+    if not USE:
+        return desired, {"enabled": False}
+
+    out = dict(desired or {})
+    info: Dict[str, Any] = {"enabled": True}
+
+    # drawdown snapshot
+    dd = 0.0
+    try:
+        dd = float(get_current_drawdown(con))
+    except Exception:
+        dd = 0.0
+    info["drawdown"] = float(dd)
+
+    # drawdown-based gross cap
+    eff_gross_cap = float(GROSS_CAP)
+    if dd >= float(DD_ADD_BLOCK):
+        eff_gross_cap = float(GROSS_CAP) * float(DD_GROSS_MULT)
+    info["gross_cap"] = float(GROSS_CAP)
+    info["eff_gross_cap"] = float(eff_gross_cap)
+
+    # Enforce drawdown add-block: do not allow increasing gross exposure vs current state
+    cur_gross = 0.0
+    try:
+        for sym, cur in (state or {}).items():
+            cur_gross += abs(_cur_signed_weight(cur))
+    except Exception:
+        cur_gross = 0.0
+    info["cur_gross"] = float(cur_gross)
+
+    tgt_gross = _gross(out)
+    info["tgt_gross_pre"] = float(tgt_gross)
+
+    if dd >= float(DD_ADD_BLOCK) and tgt_gross > cur_gross + 1e-12:
+        # scale DOWN targets so gross <= current gross
+        if tgt_gross > 1e-12:
+            scale = float(cur_gross) / float(tgt_gross)
+            for sym in list(out.keys()):
+                try:
+                    out[sym]["weight"] = float(out[sym].get("weight", 0.0) or 0.0) * float(scale)
+                except Exception:
+                    pass
+            info["dd_add_block"] = True
+            info["dd_add_scale"] = float(scale)
+        else:
+            info["dd_add_block"] = True
+            info["dd_add_scale"] = 0.0
+
+    # Enforce effective gross cap (post dd scaling)
+    tgt_gross2 = _gross(out)
+    info["tgt_gross_post_dd"] = float(tgt_gross2)
+    if tgt_gross2 > float(eff_gross_cap) and tgt_gross2 > 1e-12:
+        scale = float(eff_gross_cap) / float(tgt_gross2)
+        for sym in list(out.keys()):
+            try:
+                out[sym]["weight"] = float(out[sym].get("weight", 0.0) or 0.0) * float(scale)
+            except Exception:
+                pass
+        info["gross_scale"] = float(scale)
+
+    # Enforce max net exposure by scaling the overweight side only
+    net = _net(out)
+    info["net_pre"] = float(net)
+    info["max_net"] = float(MAX_NET)
+
+    if float(MAX_NET) > 0.0 and abs(net) > float(MAX_NET) + 1e-12:
+        # If net too long -> scale LONG weights down
+        # If net too short -> scale SHORT weights down
+        if net > 0:
+            side_to_scale = "LONG"
+            denom = 0.0
+            for sym, tgt in out.items():
+                if str(tgt.get("side", "FLAT")).upper() == "LONG":
+                    denom += float(tgt.get("weight", 0.0) or 0.0)
+            if denom > 1e-12:
+                target_long_sum = denom - (abs(net) - float(MAX_NET))
+                scale = max(0.0, float(target_long_sum) / float(denom))
+                for sym, tgt in out.items():
+                    if str(tgt.get("side", "FLAT")).upper() == "LONG":
+                        tgt["weight"] = float(tgt.get("weight", 0.0) or 0.0) * float(scale)
+                info["net_scale_side"] = side_to_scale
+                info["net_scale"] = float(scale)
+        else:
+            side_to_scale = "SHORT"
+            denom = 0.0
+            for sym, tgt in out.items():
+                if str(tgt.get("side", "FLAT")).upper() == "SHORT":
+                    denom += float(tgt.get("weight", 0.0) or 0.0)
+            if denom > 1e-12:
+                target_short_sum = denom - (abs(net) - float(MAX_NET))
+                scale = max(0.0, float(target_short_sum) / float(denom))
+                for sym, tgt in out.items():
+                    if str(tgt.get("side", "FLAT")).upper() == "SHORT":
+                        tgt["weight"] = float(tgt.get("weight", 0.0) or 0.0) * float(scale)
+                info["net_scale_side"] = side_to_scale
+                info["net_scale"] = float(scale)
+
+    info["net_post"] = float(_net(out))
+
+    # Enforce turnover cap by scaling *deltas* (keeps direction, reduces churn)
+    to = _turnover(out, state or {})
+    info["turnover_pre"] = float(to)
+    info["max_turnover"] = float(MAX_TURNOVER)
+
+    if float(MAX_TURNOVER) > 0.0 and to > float(MAX_TURNOVER) + 1e-12:
+        # Scale targets toward current state: tgt = cur + k*(tgt-cur)
+        k = float(MAX_TURNOVER) / float(to) if to > 1e-12 else 0.0
+        syms = set()
+        for s in (out or {}).keys():
+            syms.add(str(s))
+        for s in (state or {}).keys():
+            syms.add(str(s))
+
+        for sym in syms:
+            cur = state.get(sym)
+            tgt = out.get(sym)
+            if not tgt:
+                continue
+
+            cur_abs = abs(_cur_signed_weight(cur))
+            tgt_abs = abs(_tgt_signed_weight(tgt))
+            new_abs = float(cur_abs) + float(k) * (float(tgt_abs) - float(cur_abs))
+            if new_abs < 1e-12 or str(tgt.get("side", "FLAT")).upper() == "FLAT":
+                tgt["side"] = "FLAT"
+                tgt["weight"] = 0.0
+            else:
+                tgt["weight"] = float(max(0.0, new_abs))
+
+        info["turnover_scale_k"] = float(k)
+
+    info["turnover_post"] = float(_turnover(out, state or {}))
+
+    _annotate(out, info)
+    return out, info

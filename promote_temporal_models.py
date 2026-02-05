@@ -1,0 +1,184 @@
+"""
+A.10 Temporal model promotion script (guarded, audited).
+
+Promotes temporal_models entries to CHAMPION role
+ONLY if A.7 shadow evaluation gates passed.
+
+Semantics:
+- Uses keyed promotion (symbol / class / global + horizon)
+- Does NOT mutate model blobs or model_kind
+- Safe dry-run by default
+
+Usage:
+  DRY_RUN=1 python promote_temporal_models.py
+  PROMOTE_TEMPORAL=1 python promote_temporal_models.py
+"""
+
+import os
+import json
+import time
+import socket
+
+from dev_core.storage import (
+    connect,
+    init_db,
+    acquire_job_lock,
+    release_job_lock,
+)
+from dev_core.promotion_audit import audit
+
+# ------------------------------------------------------------
+# Flags
+# ------------------------------------------------------------
+
+DRY_RUN = os.environ.get("DRY_RUN", "1") == "1"
+ALLOW_PROMOTE = os.environ.get("PROMOTE_TEMPORAL", "0") == "1"
+
+MIN_N = int(os.environ.get("TEMPORAL_PROMOTE_MIN_N", "200"))
+MAX_MODEL_AGE_DAYS = int(os.environ.get("TEMPORAL_PROMOTE_MAX_AGE_DAYS", "30"))
+
+JOB_NAME = "promote_temporal_models"
+OWNER = os.environ.get(
+    "JOB_OWNER",
+    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", socket.gethostname())),
+)
+PID = os.getpid()
+
+
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
+
+def main() -> int:
+    init_db()
+
+    if not acquire_job_lock(JOB_NAME, OWNER, PID):
+        print("[BLOCKED] another promotion job is running")
+        return 2
+
+    now_ms = _now_ms()
+    max_age_ms = MAX_MODEL_AGE_DAYS * 86400 * 1000
+
+    promoted = []
+    skipped = []
+
+    try:
+        con = connect()
+        try:
+            rows = con.execute(
+                """
+                SELECT
+                  e.key_type,
+                  e.key,
+                  e.horizon_s,
+                  e.rmse,
+                  e.baseline_rmse,
+                  e.directional_acc,
+                  e.baseline_directional_acc,
+                  e.n,
+                  json_extract(e.detail_json, '$.latest_model_ts_ms') AS model_ts_ms
+                FROM temporal_shadow_eval e
+                WHERE e.pass_all = 1
+                  AND e.n >= ?
+                """,
+                (int(MIN_N),),
+            ).fetchall()
+
+            for (
+                key_type,
+                key,
+                horizon_s,
+                rmse,
+                baseline_rmse,
+                da,
+                b_da,
+                n,
+                model_ts_ms,
+            ) in rows or []:
+
+                if not model_ts_ms:
+                    skipped.append({"key": key, "reason": "missing_model_ts"})
+                    continue
+
+                age_ms = now_ms - int(model_ts_ms)
+                if age_ms > max_age_ms:
+                    skipped.append({"key": key, "reason": "model_too_old"})
+                    continue
+
+                promote_key = f"{key_type}:{key}:{int(horizon_s)}"
+                promoted.append(promote_key)
+
+                if DRY_RUN:
+                    print("[DRY-RUN] would promote", promote_key)
+                    continue
+
+                if not ALLOW_PROMOTE:
+                    continue
+
+                # Keyed champion write (temporal_models is source of truth)
+                con.execute(
+                    """
+                    UPDATE temporal_models
+                    SET ts_ms = ?
+                    WHERE key_type=?
+                      AND key=?
+                      AND horizon_s=?
+                    """,
+                    (
+                        int(model_ts_ms),
+                        str(key_type),
+                        str(key),
+                        int(horizon_s),
+                    ),
+                )
+
+                audit(
+                    actor="auto",
+                    action="promote_temporal",
+                    model_name="temporal_predictor",
+                    key=str(promote_key),
+                    reason={
+                        "rmse": rmse,
+                        "baseline_rmse": baseline_rmse,
+                        "directional_acc": da,
+                        "baseline_directional_acc": b_da,
+                        "n": n,
+                        "model_ts_ms": int(model_ts_ms),
+                    },
+                )
+
+            if not DRY_RUN and ALLOW_PROMOTE:
+                con.commit()
+
+        finally:
+            con.close()
+
+        print(json.dumps(
+            {
+                "ok": True,
+                "dry_run": DRY_RUN,
+                "allow_promote": ALLOW_PROMOTE,
+                "promoted": promoted,
+                "skipped": skipped,
+            },
+            indent=2,
+        ))
+        return 0
+
+    finally:
+        try:
+            release_job_lock(JOB_NAME, OWNER, PID)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
