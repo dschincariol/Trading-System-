@@ -21,9 +21,9 @@ from dev_core.storage import connect, init_db
 import portfolio_backtest
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Logging
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -32,9 +32,9 @@ logging.basicConfig(
 )
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Metrics helpers
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def _sharpe(returns: List[float], eps: float = 1e-9) -> float:
     if not returns:
@@ -68,9 +68,9 @@ def _max_drawdown(equity: List[float]) -> float:
     return abs(max_dd)
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Strategy runner
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def _run(strategy: str) -> Dict[str, Any]:
     os.environ["BT_STRATEGY"] = str(strategy)
@@ -82,9 +82,9 @@ def _run(strategy: str) -> Dict[str, Any]:
     return res
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Main
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def main() -> int:
     init_db()
@@ -92,6 +92,8 @@ def main() -> int:
     con = connect()
     try:
         # Ensure schema
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS strategy_metrics (
@@ -123,13 +125,15 @@ def main() -> int:
                 "n_points": int(len(points)),
             }
 
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT INTO strategy_metrics(strategy, metrics_json, ts_ms)
                 VALUES (?, ?, ?)
                 """,
                 (str(name), json.dumps(metrics), int(time.time() * 1000)),
-            )
+                )
             con.commit()
 
             logging.info(

@@ -30,9 +30,9 @@ from dev_core.storage import (
 )
 from dev_core.model_v2 import classify_regime
 
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 # Job / runtime config
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 
 JOB_NAME = "label_due_events"
 OWNER = os.environ.get(
@@ -50,16 +50,16 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [label_due_events] %(message)s",
 )
 
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 # Labeling configuration (from old file)
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 
 HORIZONS_S = [300, 3600]  # 5m, 1h
 SYMBOLS = ["SPY", "BTC", "OIL"]
 
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 # Helpers (from old file)
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 
 def price_at_or_after(con, symbol: str, ts_ms: int) -> Optional[float]:
     row = con.execute(
@@ -113,9 +113,9 @@ def realized_vol_proxy(con, symbol: str, lookback_points: int = 50) -> float:
     vol = var ** 0.5
     return max(vol, 1e-6)
 
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 # Core labeling logic (extracted & reusable)
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 
 def label_due_events_internal() -> int:
     con = connect()
@@ -160,7 +160,9 @@ def label_due_events_internal() -> int:
 
                     impact_z = float(ret) / float(vol)
 
-                    con.execute(
+                    pass
+
+        con.execute(
                         """
                         INSERT OR IGNORE INTO labels(
                           event_id, horizon_s, symbol,
@@ -189,9 +191,9 @@ def label_due_events_internal() -> int:
     finally:
         con.close()
 
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 # Runtime helpers
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 
 def _sleep_with_jitter(seconds: float) -> None:
     if seconds <= 0:
@@ -199,14 +201,14 @@ def _sleep_with_jitter(seconds: float) -> None:
     j = seconds * 0.2
     time.sleep(max(0.05, seconds + random.uniform(-j, j)))
 
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 # Main (production runner)
-# ---------------------------------------------------------------------
+# ---------------            -- ------------------------------------------------------
 
 def main():
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance is holding the job lock; exiting")
         raise SystemExit(2)
 

@@ -24,18 +24,18 @@ MAX_DRIFT = float(os.environ.get("RULES_MAX_DRIFT_RATIO", "2.5"))
 MIN_GLOBAL_WINRATE = float(os.environ.get("RULES_MIN_EXEC_WINRATE", "0.45"))
 EXEC_LOOKBACK_DAYS = int(os.environ.get("RULES_EXEC_LOOKBACK_DAYS", "30"))
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Realized execution cost spike (from fills)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 EXEC_COST_SPIKE_BPS = float(os.environ.get("RULES_EXEC_COST_SPIKE_BPS", "35.0"))
 EXEC_COST_SPIKE_WINDOW_S = int(os.environ.get("RULES_EXEC_COST_SPIKE_WINDOW_S", "180"))
 EXEC_COST_SPIKE_MIN_N = int(os.environ.get("RULES_EXEC_COST_SPIKE_MIN_N", "10"))
 EXEC_COST_SPIKE_PCTL = float(os.environ.get("RULES_EXEC_COST_SPIKE_PCTL", "80"))
 EXEC_COST_SPIKE_COOLDOWN_S = int(os.environ.get("RULES_EXEC_COST_SPIKE_COOLDOWN_S", "300"))
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Execution cost spike (spread proxy)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 COST_SPIKE_BPS = float(os.environ.get("RULES_COST_SPIKE_BPS", "45.0"))
 COST_SPIKE_WINDOW_S = int(os.environ.get("RULES_COST_SPIKE_WINDOW_S", "120"))
 COST_SPIKE_MIN_N = int(os.environ.get("RULES_COST_SPIKE_MIN_N", "20"))
@@ -158,9 +158,9 @@ def evaluate_rules() -> Dict[str, Any]:
         now_ms = _now_ms()
         out: Dict[str, Any] = {"enabled": True, "ts_ms": now_ms, "actions": []}
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Execution cost spike → GLOBAL kill switch
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             spike = _detect_cost_spike(con)
             out["exec_cost_spike"] = spike

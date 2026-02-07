@@ -12,11 +12,16 @@ from dev_core.storage import (
     put_job_heartbeat,
 )
 
+_REGION_MAP_CACHE = None
+
 from dev_core.ingest.options_polygon import fetch_options_chain_snapshot
 
 
 JOB_NAME = "ingest_options"
-OWNER = os.environ.get("JOB_OWNER", os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")))
+OWNER = os.environ.get(
+    "JOB_OWNER",
+    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
+)
 PID = os.getpid()
 
 LOCK_STALE_AFTER_S = int(os.environ.get("JOB_LOCK_STALE_AFTER_S", "180"))
@@ -107,7 +112,7 @@ def _put_options_rows(con, rows):
 def main():
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance is holding the job lock; exiting")
         raise SystemExit(2)
 

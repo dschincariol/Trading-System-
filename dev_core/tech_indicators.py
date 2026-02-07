@@ -1,8 +1,7 @@
-# dev_core/tech_indicators.py
 import os
 import time
 import math
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Tuple
 
 import numpy as np
 
@@ -20,6 +19,7 @@ VOV_N = int(os.environ.get("TECH_VOV_N", "60"))
 KAMA_ER_N = int(os.environ.get("TECH_KAMA_ER_N", "10"))
 KAMA_FAST = int(os.environ.get("TECH_KAMA_FAST", "2"))
 KAMA_SLOW = int(os.environ.get("TECH_KAMA_SLOW", "30"))
+KAMA_SLOPE_N = int(os.environ.get("TECH_KAMA_SLOPE_N", "5"))
 
 # cache (very small; avoids repeated DB reads inside tight loops)
 _CACHE_TTL_S = float(os.environ.get("TECH_CACHE_TTL_S", "3.0"))
@@ -30,11 +30,19 @@ _cache = {
 }
 
 
-def _load_prices(symbol: str, ts_ms: int, lookback: int) -> List[Tuple[int, float]]:
+def _load_prices(
+    symbol: str,
+    ts_ms: int,
+    lookback: int,
+    con=None,
+) -> List[Tuple[int, float]]:
     """
     Returns ascending list[(ts_ms, price)] up to ts_ms inclusive.
     """
-    con = connect()
+    owns = False
+    if con is None:
+        con = connect()
+        owns = True
     try:
         rows = con.execute(
             """
@@ -94,7 +102,6 @@ def vol_of_vol(px: np.ndarray, rv_n: int, vov_n: int) -> float:
     if r.size < max(10, int(rv_n) + int(vov_n)):
         return 0.0
 
-    # rolling realized-vol series
     rvs = []
     for i in range(int(rv_n), r.size + 1):
         w = r[i - int(rv_n): i]
@@ -127,7 +134,6 @@ def kama(px: np.ndarray, er_n: int, fast: int, slow: int) -> float:
     fast_sc = 2.0 / (fast + 1.0)
     slow_sc = 2.0 / (slow + 1.0)
 
-    # start from SMA seed
     k = float(np.mean(px[:er_n]))
 
     for i in range(er_n, px.size):
@@ -144,8 +150,7 @@ def kama(px: np.ndarray, er_n: int, fast: int, slow: int) -> float:
 
 def atr_proxy(px: np.ndarray, n: int) -> float:
     """
-    ATR proxy using abs log-return magnitude * price (since we only store last price).
-    This is not full OHLC ATR but works as a volatility-scale proxy.
+    ATR proxy using abs log-return magnitude * price.
     """
     px = np.asarray(px, dtype=float)
     if px.size < max(4, int(n) + 1):
@@ -155,7 +160,6 @@ def atr_proxy(px: np.ndarray, n: int) -> float:
         return 0.0
     w = np.abs(r[-int(n):])
     a = float(np.mean(w)) if w.size else 0.0
-    # convert to price-scale using last price
     out = a * float(px[-1])
     if not math.isfinite(out):
         return 0.0
@@ -192,68 +196,75 @@ def compute_tech_features(symbol: str, ts_ms: int) -> Dict[str, float]:
     except Exception:
         pass
 
-    series = _load_prices(str(symbol).upper(), int(ts_ms), int(TECH_LOOKBACK))
-    px = np.asarray([p for _, p in series], dtype=float)
-
-    out: Dict[str, float] = {}
-
-    # price-derived
-    last = float(px[-1]) if px.size else 0.0
-
-    k = kama(px, KAMA_ER_N, KAMA_FAST, KAMA_SLOW)
-    out["kama_level"] = float(k)
-
-    # slope proxy: kama(t) - kama(t-5) using truncated tail
-    if px.size >= max(50, KAMA_ER_N + 10):
-        k2 = kama(px[:-5], KAMA_ER_N, KAMA_FAST, KAMA_SLOW)
-        out["kama_slope"] = float(k - k2)
-    else:
-        out["kama_slope"] = 0.0
-
-    a = atr_proxy(px, ATR_N)
-    out["atr_14"] = float(a)
-    out["atr_pct"] = float((a / last) if last > 0 else 0.0)
-
-    rv = realized_vol(px, RV_N)
-    out["rv_20"] = float(rv)
-
-    vv = vol_of_vol(px, RV_N, VOV_N)
-    out["vol_of_vol"] = float(vv)
-
-    # normalized distance to KAMA (z-like using ATR proxy)
-    if a > 1e-12:
-        out["price_kama_z"] = float((last - float(k)) / float(a))
-    else:
-        out["price_kama_z"] = 0.0
-
-    # --------------------------------------------
-    # Global stress proxy via VIX (optional)
-    # --------------------------------------------
-    # If you are polling ^VIX into prices as symbol="VIX", we can compute:
-    # - stress_vix_level
-    # - stress_vix_z_60
-    # - stress_vix_change_1d (1-step change, since we don't have daily bars)
+    con = connect()
     try:
-        vix_series = _load_prices("VIX", int(ts_ms), 200)
-        vix_px = np.asarray([p for _, p in vix_series], dtype=float)
-        if vix_px.size >= 5:
-            vix_last = float(vix_px[-1])
-            out["stress_vix_level"] = float(vix_last)
-            out["stress_vix_z_60"] = float(_zscore(vix_last, vix_px[-60:]))
-            out["stress_vix_change_1d"] = float(vix_last - float(vix_px[-2]))
+        series = _load_prices(
+            str(symbol).upper(),
+            int(ts_ms),
+            int(TECH_LOOKBACK),
+            con=con,
+        )
+        px = np.asarray([p for _, p in series], dtype=float)
+
+        out: Dict[str, float] = {}
+
+        last = float(px[-1]) if px.size else 0.0
+
+        k = kama(px, KAMA_ER_N, KAMA_FAST, KAMA_SLOW)
+        out["kama_level"] = float(k)
+
+        if px.size >= max(50, KAMA_ER_N + KAMA_SLOPE_N + 2):
+            k2 = kama(
+                px[:-int(KAMA_SLOPE_N)],
+                KAMA_ER_N,
+                KAMA_FAST,
+                KAMA_SLOW,
+            )
+            out["kama_slope"] = float(k - k2)
         else:
+            out["kama_slope"] = 0.0
+
+        a = atr_proxy(px, ATR_N)
+        out["atr_14"] = float(a)
+        out["atr_pct"] = float((a / last) if last > 0 else 0.0)
+
+        rv = realized_vol(px, RV_N)
+        out["rv_20"] = float(rv)
+
+        vv = vol_of_vol(px, RV_N, VOV_N)
+        out["vol_of_vol"] = float(vv)
+
+        if a > 1e-12:
+            out["price_kama_z"] = float((last - float(k)) / float(a))
+        else:
+            out["price_kama_z"] = 0.0
+
+        try:
+            vix_series = _load_prices("VIX", int(ts_ms), 200, con=con)
+            vix_px = np.asarray([p for _, p in vix_series], dtype=float)
+            if vix_px.size >= 5:
+                vix_last = float(vix_px[-1])
+                out["stress_vix_level"] = float(vix_last)
+                out["stress_vix_z_60"] = float(_zscore(vix_last, vix_px[-60:]))
+                out["stress_vix_change_1d"] = float(vix_last - float(vix_px[-2]))
+            else:
+                out["stress_vix_level"] = 0.0
+                out["stress_vix_z_60"] = 0.0
+                out["stress_vix_change_1d"] = 0.0
+        except Exception:
             out["stress_vix_level"] = 0.0
             out["stress_vix_z_60"] = 0.0
             out["stress_vix_change_1d"] = 0.0
-    except Exception:
-        out["stress_vix_level"] = 0.0
-        out["stress_vix_z_60"] = 0.0
-        out["stress_vix_change_1d"] = 0.0
 
-    # cache
-    try:
-        _cache["items"][key] = (float(now_s), dict(out))
-    except Exception:
-        pass
+        try:
+            _cache["items"][key] = (float(now_s), dict(out))
+        except Exception:
+            pass
 
-    return out
+        return out
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass

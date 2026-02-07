@@ -73,6 +73,8 @@ def train_shadow(
             metrics=metrics,
         )
 
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             UPDATE shadow_training_runs
@@ -85,14 +87,16 @@ def train_shadow(
 
     except Exception as e:
         if run_id is not None:
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 UPDATE shadow_training_runs
                 SET status='error', error=?
                 WHERE id=?
                 """,
                 (str(e), run_id),
-            )
+                )
             con.commit()
     finally:
         con.close()

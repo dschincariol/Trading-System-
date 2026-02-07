@@ -102,6 +102,8 @@ def log_submit(
     init_execution_ledger()
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT INTO execution_orders(
@@ -150,6 +152,8 @@ def log_fill(
     init_execution_ledger()
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT INTO execution_fills(
@@ -264,7 +268,9 @@ def compute_metrics_snapshot(limit_orders: int = 500) -> Dict[str, Any]:
                 # qty<0 sell/short -> pnl=(vwap - last)*abs(filled_qty) = (last - vwap)*filled_qty
                 m2m = (float(last_px) - float(vwap)) * float(filled_qty)
 
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT OR REPLACE INTO execution_metrics(
                   ts_ms, client_order_id, symbol, ref_px, fill_vwap, slippage_bps, m2m_pnl, last_px
@@ -324,7 +330,9 @@ def compute_pnl_attribution_snapshot(lookback_orders: int = 500) -> Dict[str, An
         n = 0
         for (sid, sym), v in agg.items():
             avg_sl = float(v["slippage_bps"]) / max(1.0, float(v["n"]))
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT OR REPLACE INTO pnl_attribution(
                   ts_ms, source_alert_id, symbol, pnl, fees, slippage_bps, extra_json

@@ -43,8 +43,8 @@ import torch
 import torch.nn as nn
 
 from dev_core.storage import connect
-from dev_core.feature_expansion import build_feature_vector
-
+from dev_core.feature_expansion import build_feature_vector, feature_set_tag
+from asset_map import asset_class_for_symbol
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS embed_models2 (
   key_type TEXT NOT NULL,             -- 'symbol' | 'class'
@@ -85,6 +85,25 @@ CREATE TABLE IF NOT EXISTS embed_conf_calib (
   x_json TEXT NOT NULL,
   y_json TEXT NOT NULL,
   PRIMARY KEY (horizon_s, model_kind)
+);
+
+-- Weather contribution tracking (base vs weather)
+CREATE TABLE IF NOT EXISTS model_weather_effect (
+  key_type TEXT NOT NULL,        -- 'symbol' | 'class'
+  key TEXT NOT NULL,             -- raw key (not namespaced)
+  horizon_s INTEGER NOT NULL,
+  ts_ms INTEGER NOT NULL,
+
+  base_rmse REAL,
+  wx_rmse REAL,
+  rmse_delta REAL,
+
+  base_spearman REAL,
+  wx_spearman REAL,
+  spearman_delta REAL,
+
+  n_eval INTEGER NOT NULL,
+  PRIMARY KEY (key_type, key, horizon_s, ts_ms)
 );
 
 """
@@ -317,9 +336,15 @@ def train_embed_models(
     if mlp_hidden is None:
         mlp_hidden = [128, 64]
 
-    now_ms = int(time.time() * 1000)
+        now_ms = int(time.time() * 1000)
+
     cutoff_ms = now_ms - int(lookback_days) * 24 * 3600 * 1000
 
+    tag = feature_set_tag()
+    def _tag_key(k: str) -> str:
+        # Keep backward-compatible keys for existing deployments.
+        # Only namespace when tag != "base".
+        return str(k) if tag == "base" else f"{str(k)}#{tag}"
     symset = set(str(s).upper() for s in (symbols or []))
     hset = set(int(h) for h in (horizons or []))
 
@@ -451,6 +476,50 @@ def train_embed_models(
 
             results: Dict[str, Tuple[bytes, Dict[str, float]]] = {}
 
+            # --------------------------------------------------
+            # Weather contribution test (ridge-only, same split)
+            # --------------------------------------------------
+            try:
+                Xb, yb = _build_xy(items)
+                Xw, yw = _build_xy(items)
+
+                if Xb is not None and Xw is not None:
+                    mr = Ridge(alpha=float(alpha), fit_intercept=True)
+                    mr.fit(Xb[:split], yb[:split])
+                    pb = mr.predict(Xb[split:])
+                    brmse, bsp, _ = _eval_predictions(yb[split:], pb)
+
+                    mw = Ridge(alpha=float(alpha), fit_intercept=True)
+                    mw.fit(Xw[:split], yw[:split])
+                    pw = mw.predict(Xw[split:])
+                    wrmse, wsp, _ = _eval_predictions(yw[split:], pw)
+
+                    pass
+
+        con.execute(
+                        """
+                        INSERT OR REPLACE INTO model_weather_effect(
+                          key_type, key, horizon_s, ts_ms,
+                          base_rmse, wx_rmse, rmse_delta,
+                          base_spearman, wx_spearman, spearman_delta,
+                          n_eval
+                        )
+                        VALUES ('__PENDING__','__PENDING__',-1,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            int(now_ms),
+                            float(brmse),
+                            float(wrmse),
+                            float(brmse) - float(wrmse),
+                            float(bsp),
+                            float(wsp),
+                            float(wsp) - float(bsp),
+                            int(len(yb[split:])),
+                        ),
+                    )
+            except Exception:
+                pass
+
             # --- Ridge ---
             try:
                 model_r = Ridge(alpha=float(alpha), fit_intercept=True)
@@ -529,7 +598,9 @@ def train_embed_models(
 
             # A1: store eval rows for all trained kinds
             for mk, (_b, em) in (results or {}).items():
-                con.execute(
+                pass
+
+        con.execute(
                     """
                     INSERT OR REPLACE INTO embed_model_eval(
                       key_type, key, horizon_s, model_kind, ts_ms,
@@ -559,9 +630,24 @@ def train_embed_models(
                 except Exception:
                     pass
 
-            # A3: store only winner blob in embed_models2
-            _upsert_model(con, "symbol", sym_u, h_i, now_ms, len(items), int(dim), blob_out)
-            out[("symbol", sym_u, h_i)] = int(len(items))
+            # A3: store only winner blob in embed_models2 (namespaced key)
+            _upsert_model(con, "symbol", _tag_key(sym_u), h_i, now_ms, len(items), int(dim), blob_out)
+            out[("symbol", _tag_key(sym_u), h_i)] = int(len(items))
+
+            # Fill pending weather-effect row (if any) for this (symbol,h)
+            try:
+                pass
+
+        con.execute(
+                    """
+                    UPDATE model_weather_effect
+                    SET key_type='symbol', key=?, horizon_s=?
+                    WHERE key_type='__PENDING__' AND key='__PENDING__' AND horizon_s=-1 AND ts_ms=?
+                    """,
+                    (str(sym_u), int(h_i), int(now_ms)),
+                )
+            except Exception:
+                pass
 
         # train class models
         if train_by_class:
@@ -573,7 +659,9 @@ def train_embed_models(
 
                 # A1: store eval rows for all trained kinds (FIXED INDENTATION)
                 for mk, (_b, em) in (results or {}).items():
-                    con.execute(
+                    pass
+
+        con.execute(
                         """
                         INSERT OR REPLACE INTO embed_model_eval(
                           key_type, key, horizon_s, model_kind, ts_ms,
@@ -604,8 +692,8 @@ def train_embed_models(
                         pass
 
                 # A3: store only winner blob in embed_models2
-                _upsert_model(con, "class", str(cls).upper(), h_i, now_ms, len(items), int(dim), blob_out)
-                out[("class", str(cls).upper(), h_i)] = int(len(items))
+               _upsert_model(con, "class", _tag_key(str(cls).upper()), h_i, now_ms, len(items), int(dim), blob_out)
+                out[("class", _tag_key(str(cls).upper()), h_i)] = int(len(items))
 
         # -----------------------------------
         # A2: fit + persist confidence calibration curves
@@ -618,7 +706,9 @@ def train_embed_models(
                 if not curve:
                     continue
                 xj, yj = curve
-                con.execute(
+                pass
+
+        con.execute(
                     """
                     INSERT OR REPLACE INTO embed_conf_calib(
                       horizon_s, model_kind, ts_ms, conf_k, n_points, x_json, y_json
@@ -735,17 +825,32 @@ def predict_with_embed_model(
     Returns:
       (predicted_z, n_support, model_ts_ms, model_key_type, model_key, model_kind)
     Tries symbol model first, then asset-class model.
+
+    NOTE:
+    - When feature flags change (e.g. weather on/off), we namespace model keys
+      with "#<feature_set_tag>" to avoid overwriting existing models.
+    - If a namespaced model is missing, we fall back to the legacy key.
     """
     sym_u = str(symbol).upper()
     h = int(horizon_s)
 
-    r1 = _predict_raw("symbol", sym_u, h, query_vec)
+    tag = feature_set_tag()
+    sym_key = sym_u if tag == "base" else f"{sym_u}#{tag}"
+
+    r1 = _predict_raw("symbol", sym_key, h, query_vec)
+    if r1 is None and sym_key != sym_u:
+        r1 = _predict_raw("symbol", sym_u, h, query_vec)
     if r1 is not None:
         return r1
 
     cls = asset_class_for_symbol(sym_u)
     if cls and str(cls).upper() != "UNKNOWN":
-        r2 = _predict_raw("class", str(cls).upper(), h, query_vec)
+        cls_u = str(cls).upper()
+        cls_key = cls_u if tag == "base" else f"{cls_u}#{tag}"
+
+        r2 = _predict_raw("class", cls_key, h, query_vec)
+        if r2 is None and cls_key != cls_u:
+            r2 = _predict_raw("class", cls_u, h, query_vec)
         if r2 is not None:
             return r2
 

@@ -26,22 +26,25 @@ from dev_core.promotion_audit import audit
 from dev_core.training_guard import training_allowed
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Training guard
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 if not training_allowed():
     print("[training_guard] training disabled")
     raise SystemExit(0)
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Constants
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 MODEL_NAME = os.environ.get("MODEL_NAME", "embed_regressor")
 ACTIVE_REGIMES = ["global", "low_vol", "high_vol", "trend", "shock"]
 
 JOB_NAME = "pipeline_train_and_eval"
-OWNER = os.environ.get("JOB_OWNER", os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")))
+OWNER = os.environ.get(
+    "JOB_OWNER",
+    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
+)
 PID = os.getpid()
 
 LOCK_STALE_AFTER_S = int(os.environ.get("JOB_LOCK_STALE_AFTER_S", "180"))
@@ -59,9 +62,9 @@ PROMOTE_DIRACC_TOL = float(os.environ.get("PROMOTE_DIRACC_TOL", "0.00"))
 EVAL_LIMIT_ROWS = int(os.environ.get("CHALLENGER_EVAL_LIMIT_ROWS", "5000"))
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Small helpers
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 def _sleep_with_jitter(seconds: float) -> None:
     if seconds <= 0:
         return
@@ -100,9 +103,9 @@ def _run_python(script: str) -> int:
     return int(p.returncode)
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Data-quality gates (fail-closed)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 def _data_gates_or_exit() -> None:
     con = connect()
     try:
@@ -136,9 +139,9 @@ def _data_gates_or_exit() -> None:
     )
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Net-of-cost evaluation (execution-aware)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 def _net_eval_metrics(con, lookback_days: int = 90) -> Optional[Dict[str, Any]]:
     DAY_MS = 86400 * 1000
     now = int(time.time() * 1000)
@@ -190,9 +193,9 @@ def _net_eval_metrics(con, lookback_days: int = 90) -> Optional[Dict[str, Any]]:
     }
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Embed model eval aggregation
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 def _latest_embed_eval_snapshot(con) -> int:
     r = con.execute("SELECT MAX(ts_ms) FROM embed_model_eval").fetchone()
     return int(r[0] or 0)
@@ -247,9 +250,9 @@ def _aggregate(rows) -> Tuple[str, Dict[str, Any]]:
     )
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Challenger vs champion comparison
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 def _beats_champion(candidate: Dict[str, Any], champion: Optional[Dict[str, Any]]):
     if champion is None:
         return True, {"no_champion": True}
@@ -277,13 +280,13 @@ def _beats_champion(candidate: Dict[str, Any], champion: Optional[Dict[str, Any]
     }
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Main pipeline
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 def main() -> int:
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance is holding the job lock; exiting")
         return 2
 

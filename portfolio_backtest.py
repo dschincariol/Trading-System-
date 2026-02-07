@@ -104,9 +104,9 @@ CREATE TABLE IF NOT EXISTS rl_policies (
 );
 """
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # Small numeric guards
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def _now_ms():
     return int(time.time() * 1000)
@@ -181,17 +181,17 @@ def _risk_metrics_from_curve(curve, total_return, max_drawdown):
         "n_returns": n,
     }
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # DB init
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def _ensure_tables(con):
     con.executescript(SCHEMA)
     con.commit()
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # Label lookup
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def _resolve_event_id(con, alert_ts, title):
     t = (title or "").strip()
@@ -228,9 +228,9 @@ def _realized_label(con, event_id, symbol, horizon_s):
     except Exception:
         return None
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # Portfolio construction from alerts (baseline)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def _targets_from_recent_alerts(con, now_ms, lookback_s):
     cutoff = int(now_ms) - int(lookback_s) * 1000
@@ -385,9 +385,9 @@ def _recompute_step_ret(positions):
         r += (signed / gross) * float(p["realized_impact_z"])
     return r
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # Main backtest
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def run_backtest():
     con = connect()
@@ -505,30 +505,30 @@ def run_backtest():
 
         risk = _risk_metrics_from_curve(curve, total_return=float(total_return), max_drawdown=float(max_dd))
 
+        total_exec_cost = con.execute(
+            "SELECT SUM(exec_cost) FROM portfolio_bt_points WHERE run_id=?",
+            (int(run_id),),
+        ).fetchone()[0] or 0.0
+
+        total_slippage = con.execute(
+            "SELECT SUM(slippage) FROM portfolio_bt_points WHERE run_id=?",
+            (int(run_id),),
+        ).fetchone()[0] or 0.0
+
+        total_fees = con.execute(
+            "SELECT SUM(fees) FROM portfolio_bt_points WHERE run_id=?",
+            (int(run_id),),
+        ).fetchone()[0] or 0.0
+
         metrics = {
             "final_equity": float(equity_end),
             "max_drawdown": float(max_dd),
             "total_return": float(total_return),
             "steps": int(len(curve)),
             **risk,
-            "total_exec_cost": float(
-                con.execute(
-                    "SELECT SUM(exec_cost) FROM portfolio_bt_points WHERE run_id=?",
-                    (int(run_id),),
-                ).fetchone()[0] or 0.0
-            ),
-            "total_slippage": float(
-                con.execute(
-                    "SELECT SUM(slippage) FROM portfolio_bt_points WHERE run_id=?",
-                    (int(run_id),),
-                ).fetchone()[0] or 0.0
-            ),
-            "total_fees": float(
-                con.execute(
-                    "SELECT SUM(fees) FROM portfolio_bt_points WHERE run_id=?",
-                    (int(run_id),),
-                ).fetchone()[0] or 0.0
-            ),
+            "total_exec_cost": float(total_exec_cost),
+            "total_slippage": float(total_slippage),
+            "total_fees": float(total_fees),
         }
 
         con.execute(
@@ -555,9 +555,9 @@ def run_backtest():
         except Exception:
             pass
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # CLI entry
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def main():
     res = run_backtest()

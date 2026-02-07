@@ -240,6 +240,8 @@ def main():
             "method": "dd_factor_monotone",
         }
 
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT INTO size_policy(ts_ms, lookback_days, buckets, method, params_json, metrics_json)

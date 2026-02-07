@@ -122,6 +122,8 @@ def learn_exec_conf_calibration(
             ],
         }
 
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT INTO exec_conf_calib

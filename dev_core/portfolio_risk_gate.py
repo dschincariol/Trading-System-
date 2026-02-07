@@ -31,6 +31,7 @@ import os
 from typing import Any, Dict, Tuple
 
 from dev_core.drawdown_state import get_current_drawdown
+from dev_core.weather_features import get_weather_feature_snapshot
 
 USE = os.environ.get("PORTFOLIO_USE_RISK_GATE", "1") == "1"
 
@@ -41,6 +42,20 @@ DD_ADD_BLOCK = float(os.environ.get("PORTFOLIO_DD_ADD_BLOCK", "0.08"))
 DD_GROSS_MULT = float(os.environ.get("PORTFOLIO_DD_GROSS_MULT", "0.70"))
 
 GROSS_CAP = float(os.environ.get("PORTFOLIO_GROSS_CAP", "1.00"))
+
+# ------            -- ------------------------------------------------------
+# Optional: weather-aware portfolio clamps (read-only)
+# ------            -- ------------------------------------------------------
+USE_WX_RISK = os.environ.get("PORTFOLIO_USE_WEATHER_RISK", "1") == "1"
+
+# If storm_risk >= threshold, block any increase in gross exposure
+WX_STORM_ADD_BLOCK = float(os.environ.get("PORTFOLIO_WX_STORM_ADD_BLOCK", "0.60"))
+
+# If storm_risk >= threshold, apply additional gross cap multiplier
+WX_STORM_GROSS_MULT = float(os.environ.get("PORTFOLIO_WX_STORM_GROSS_MULT", "0.85"))
+
+# Only evaluate top-N symbols by abs(target weight) to bound DB queries
+WX_MAX_SYMBOLS = int(os.environ.get("PORTFOLIO_WX_MAX_SYMBOLS", "25"))
 
 
 def _side_sign(side: str) -> float:
@@ -104,6 +119,62 @@ def _turnover(desired: Dict[str, Dict[str, Any]], state: Dict[str, Dict[str, Any
         tot += abs(float(tgt_w) - float(cur_w))
     return float(tot)
 
+def _portfolio_weather_risk(desired: Dict[str, Dict[str, Any]], now_ms: int) -> Dict[str, float]:
+    """
+    Portfolio-level weather summary computed from per-symbol weather snapshots.
+
+    Returns:
+      storm_risk_max: max storm risk across evaluated symbols
+      storm_risk_w:   weight-weighted average storm risk (abs weights)
+      spread_7d_w:    weight-weighted avg forecast spread
+      n_eval:         number of symbols evaluated
+
+    Bounded cost: only evaluates top WX_MAX_SYMBOLS by abs(target weight).
+    """
+    if not USE_WX_RISK:
+        return {"storm_risk_max": 0.0, "storm_risk_w": 0.0, "spread_7d_w": 0.0, "n_eval": 0.0}
+
+    # choose top-N by abs weight (stable + bounded)
+    items = []
+    for sym, row in (desired or {}).items():
+        try:
+            w = abs(float((row or {}).get("weight", 0.0) or 0.0))
+            if w > 0.0:
+                items.append((str(sym), float(w)))
+        except Exception:
+            pass
+    items.sort(key=lambda t: t[1], reverse=True)
+    if WX_MAX_SYMBOLS > 0:
+        items = items[: int(WX_MAX_SYMBOLS)]
+
+    denom = sum(w for _, w in items) if items else 0.0
+    if denom <= 1e-12:
+        return {"storm_risk_max": 0.0, "storm_risk_w": 0.0, "spread_7d_w": 0.0, "n_eval": 0.0}
+
+    storm_max = 0.0
+    storm_w = 0.0
+    spread_w = 0.0
+    n_eval = 0
+
+    for sym, w in items:
+        try:
+            wx = get_weather_feature_snapshot(symbol=str(sym), ts_ms=int(now_ms)) or {}
+            sr = float(wx.get("storm_risk", 0.0) or 0.0)
+            sp = float(wx.get("spread_7d", 0.0) or 0.0)
+
+            storm_max = max(storm_max, sr)
+            storm_w += float(w) * sr
+            spread_w += float(w) * sp
+            n_eval += 1
+        except Exception:
+            continue
+
+    return {
+        "storm_risk_max": float(storm_max),
+        "storm_risk_w": float(storm_w / denom) if denom > 1e-12 else 0.0,
+        "spread_7d_w": float(spread_w / denom) if denom > 1e-12 else 0.0,
+        "n_eval": float(n_eval),
+    }
 
 def _annotate(desired: Dict[str, Dict[str, Any]], info: Dict[str, Any]) -> None:
     for sym in list((desired or {}).keys()):
@@ -137,12 +208,34 @@ def apply_portfolio_risk_gate(
         dd = float(get_current_drawdown(con))
     except Exception:
         dd = 0.0
+        
     info["drawdown"] = float(dd)
 
     # drawdown-based gross cap
     eff_gross_cap = float(GROSS_CAP)
     if dd >= float(DD_ADD_BLOCK):
         eff_gross_cap = float(GROSS_CAP) * float(DD_GROSS_MULT)
+
+    # ------            -- ------------------------------------------------------
+    # Optional: weather-based clamps (portfolio-level)
+    # ------            -- ------------------------------------------------------
+    wx = {"storm_risk_max": 0.0, "storm_risk_w": 0.0, "spread_7d_w": 0.0, "n_eval": 0.0}
+    try:
+        if USE_WX_RISK:
+            wx = _portfolio_weather_risk(out, int(now_ms)) or wx
+    except Exception:
+        wx = wx
+
+    info["wx_storm_risk_max"] = float(wx.get("storm_risk_max", 0.0) or 0.0)
+    info["wx_storm_risk_w"] = float(wx.get("storm_risk_w", 0.0) or 0.0)
+    info["wx_spread_7d_w"] = float(wx.get("spread_7d_w", 0.0) or 0.0)
+    info["wx_n_eval"] = int(wx.get("n_eval", 0.0) or 0.0)
+
+    # If storm risk is high, apply additional gross cap multiplier (fail-soft)
+    if float(info["wx_storm_risk_max"]) >= float(WX_STORM_ADD_BLOCK):
+        eff_gross_cap = min(float(eff_gross_cap), float(GROSS_CAP) * float(WX_STORM_GROSS_MULT))
+        info["wx_gross_mult_applied"] = float(WX_STORM_GROSS_MULT)
+
     info["gross_cap"] = float(GROSS_CAP)
     info["eff_gross_cap"] = float(eff_gross_cap)
 
@@ -158,7 +251,9 @@ def apply_portfolio_risk_gate(
     tgt_gross = _gross(out)
     info["tgt_gross_pre"] = float(tgt_gross)
 
-    if dd >= float(DD_ADD_BLOCK) and tgt_gross > cur_gross + 1e-12:
+    wx_block = (float(info.get("wx_storm_risk_max", 0.0)) >= float(WX_STORM_ADD_BLOCK)) if USE_WX_RISK else False
+
+    if (dd >= float(DD_ADD_BLOCK) or wx_block) and tgt_gross > cur_gross + 1e-12:
         # scale DOWN targets so gross <= current gross
         if tgt_gross > 1e-12:
             scale = float(cur_gross) / float(tgt_gross)
@@ -167,11 +262,19 @@ def apply_portfolio_risk_gate(
                     out[sym]["weight"] = float(out[sym].get("weight", 0.0) or 0.0) * float(scale)
                 except Exception:
                     pass
-            info["dd_add_block"] = True
-            info["dd_add_scale"] = float(scale)
+            if dd >= float(DD_ADD_BLOCK):
+                info["dd_add_block"] = True
+                info["dd_add_scale"] = float(scale)
+            if wx_block:
+                info["wx_add_block"] = True
+                info["wx_add_scale"] = float(scale)
         else:
-            info["dd_add_block"] = True
-            info["dd_add_scale"] = 0.0
+            if dd >= float(DD_ADD_BLOCK):
+                info["dd_add_block"] = True
+                info["dd_add_scale"] = 0.0
+            if wx_block:
+                info["wx_add_block"] = True
+                info["wx_add_scale"] = 0.0
 
     # Enforce effective gross cap (post dd scaling)
     tgt_gross2 = _gross(out)

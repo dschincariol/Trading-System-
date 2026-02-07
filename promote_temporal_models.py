@@ -27,9 +27,9 @@ from dev_core.storage import (
 )
 from dev_core.promotion_audit import audit
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Flags
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 DRY_RUN = os.environ.get("DRY_RUN", "1") == "1"
 ALLOW_PROMOTE = os.environ.get("PROMOTE_TEMPORAL", "0") == "1"
@@ -45,17 +45,38 @@ OWNER = os.environ.get(
 PID = os.getpid()
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Helpers
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
+
+def _put_provider_health(con, ts_ms: int, provider: str, ok: int, latency_ms: int, n_symbols: int, error: str = None) -> None:
+    con.execute(
+        """
+        INSERT INTO price_provider_health(ts_ms, provider, ok, latency_ms, n_symbols, error)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(provider, ts_ms) DO UPDATE SET
+          ok=excluded.ok,
+          latency_ms=excluded.latency_ms,
+          n_symbols=excluded.n_symbols,
+          error=excluded.error
+        """,
+        (
+            int(ts_ms),
+            str(provider),
+            int(ok),
+            (int(latency_ms) if latency_ms is not None else None),
+            int(n_symbols),
+            (str(error) if error else None),
+        ),
+    )
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Main
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def main() -> int:
     init_db()
@@ -124,6 +145,8 @@ def main() -> int:
                     continue
 
                 # Keyed champion write (temporal_models is source of truth)
+                pass
+
                 con.execute(
                     """
                     UPDATE temporal_models

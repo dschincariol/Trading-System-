@@ -12,9 +12,9 @@ import feedparser
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Event enrichment helpers (additive, non-breaking)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 _TAXONOMY_RULES = {
     "crypto": r"\b(bitcoin|btc|ethereum|eth|crypto|blockchain|defi|stablecoin)\b",

@@ -1,3 +1,4 @@
+
 # post_promotion_monitor.py
 import json
 import math
@@ -137,6 +138,9 @@ def main() -> int:
             if not cur:
                 continue
 
+            # NOTE: remove undefined had_error; treat window as valid if cur exists
+            ok = 1
+
             con.execute(
                 """
                 INSERT INTO model_post_promo_results(
@@ -164,6 +168,7 @@ def main() -> int:
             c_dir = cur.get("net_dir_acc", cur.get("dir_acc"))
 
             if b_rmse is None or b_dir is None or c_rmse is None or c_dir is None:
+                # baseline missing metrics; just keep watching
                 continue
 
             try:

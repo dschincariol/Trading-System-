@@ -29,7 +29,7 @@ LOOKAHEAD_DAYS = int(os.environ.get("EARNINGS_LOOKAHEAD_DAYS", "21"))
 def main():
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         raise SystemExit(2)
 
     ts_ms = int(time.time() * 1000)

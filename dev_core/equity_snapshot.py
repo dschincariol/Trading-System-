@@ -14,6 +14,8 @@ def snapshot_equity(ts_ms: int = None) -> bool:
         if not r:
             return False
         eq = float(r[0] or 0.0)
+        ok = 0 if had_error else 1
+
         con.execute(
             "INSERT OR REPLACE INTO equity_history(ts_ms, equity) VALUES (?,?)",
             (int(ts_ms), float(eq)),

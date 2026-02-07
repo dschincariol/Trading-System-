@@ -54,7 +54,9 @@ def main():
                 updates.append((gross_z, net_z, int(eid), sym, int(h)))
 
         for gross_z, net_z, eid, sym, h in updates:
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 UPDATE labels_exec
                 SET gross_z=?, net_z=?

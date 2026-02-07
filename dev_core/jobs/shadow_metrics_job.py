@@ -60,7 +60,9 @@ def run():
             dir_acc = da / n
             net_rmse = math.sqrt(ne / cntn) if cntn else None
 
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT INTO shadow_metrics
                   (window_start_ms, window_end_ms, regime, model_name,

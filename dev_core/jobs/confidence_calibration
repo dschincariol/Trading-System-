@@ -34,7 +34,10 @@ from dev_core.storage import (
 )
 
 JOB_NAME = "calibrate_confidence_from_prices"
-OWNER = os.environ.get("JOB_OWNER", os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")))
+OWNER = os.environ.get(
+    "JOB_OWNER",
+    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
+)
 PID = os.getpid()
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -197,7 +200,7 @@ def _calibrate_for_symbol(con, symbol: str, horizon_s: int, since_ms: int) -> bo
 def main():
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance holds lock; exiting")
         raise SystemExit(2)
 

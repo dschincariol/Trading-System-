@@ -771,6 +771,74 @@ tbody tr:hover td{
 </header>
 
   <div class="row">
+
+    <!-- Social Pressure -->
+    <div class="card collapsible">
+      <h2>📣 Social Pressure</h2>
+      <div class="small">
+        Attention, confirmation, and manipulation risk (read-only).
+      </div>
+
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>z</th>
+              <th>Attention</th>
+              <th>Manip</th>
+              <th>Confirm</th>
+            </tr>
+          </thead>
+          <tbody id="socialPressureBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Social Regimes -->
+    <div class="card collapsible">
+      <h2>🧠 Social Regime</h2>
+      <div class="small">
+        Detected crowd state (QUIET / CHURN / FEAR / MANIA).
+      </div>
+
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Regime</th>
+              <th>Conf</th>
+            </tr>
+          </thead>
+          <tbody id="socialRegimeBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Social Kill-Switch Blocks -->
+    <div class="card collapsible expertOnly">
+      <h2>🛑 Social Blocks</h2>
+      <div class="small">
+        Trades blocked by social manipulation / mania gates.
+      </div>
+
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="socialBlocksBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
   </div>
 
   <!-- Decision Header (sticky): guided ops clarity + speed -->

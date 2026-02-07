@@ -17,18 +17,18 @@ from typing import Dict, Any, Optional
 from dev_core.storage import connect, init_db
 from dev_core.execution_costs import DEFAULT_FEES_BPS, DEFAULT_SLIPPAGE_BPS, DEFAULT_SPREAD_BPS_CAP
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Constants
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 MODES = ("paper", "shadow", "live")
 DEFAULT_MODE = os.environ.get("EXECUTION_MODE_DEFAULT", "paper").strip().lower()
 if DEFAULT_MODE not in MODES:
     DEFAULT_MODE = "paper"
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Schema
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS execution_mode (
@@ -51,9 +51,30 @@ CREATE INDEX IF NOT EXISTS idx_execution_mode_audit_ts
   ON execution_mode_audit(ts_ms);
 """
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Helpers
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
+
+def _put_provider_health(con, ts_ms: int, provider: str, ok: int, latency_ms: int, n_symbols: int, error: str = None) -> None:
+    con.execute(
+        """
+        INSERT INTO price_provider_health(ts_ms, provider, ok, latency_ms, n_symbols, error)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(provider, ts_ms) DO UPDATE SET
+          ok=excluded.ok,
+          latency_ms=excluded.latency_ms,
+          n_symbols=excluded.n_symbols,
+          error=excluded.error
+        """,
+        (
+            int(ts_ms),
+            str(provider),
+            int(ok),
+            (int(latency_ms) if latency_ms is not None else None),
+            int(n_symbols),
+            (str(error) if error else None),
+        ),
+    )
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -75,9 +96,9 @@ def _ensure_row(con) -> None:
             (DEFAULT_MODE, _now_ms(), "system", "init"),
         )
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Public API
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def get_execution_mode(con=None) -> Dict[str, Any]:
     """
@@ -132,18 +153,21 @@ def set_execution_mode(
         ).fetchone()
         prev_mode = str(prev[0]) if prev else DEFAULT_MODE
 
-        if prev_mode != m:
-            con.execute(
-                "UPDATE execution_mode SET mode=?, updated_ts_ms=?, actor=?, reason=? WHERE id=1",
-                (m, _now_ms(), a, r),
-            )
-            con.execute(
-                """
-                INSERT INTO execution_mode_audit(ts_ms, prev_mode, new_mode, actor, reason)
-                VALUES (?,?,?,?,?)
-                """,
-                (_now_ms(), prev_mode, m, a, r),
-            )
+        # proceed even if unchanged (still audited + updates timestamp/actor/reason)
+
+        con.execute(
+            "UPDATE execution_mode SET mode=?, updated_ts_ms=?, actor=?, reason=? WHERE id=1",
+            (m, _now_ms(), a, r),
+        )
+
+        # Audit the change (always record; prev==new still useful for ops trace)
+        con.execute(
+            """
+            INSERT INTO execution_mode_audit(ts_ms, prev_mode, new_mode, actor, reason)
+            VALUES (?,?,?,?,?)
+            """,
+            (_now_ms(), prev_mode, m, a, r),
+        )
 
         con.execute("COMMIT;")
         return get_execution_mode(con)

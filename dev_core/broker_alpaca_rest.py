@@ -275,7 +275,7 @@ def apply_latest_portfolio_orders_live(dry_run: bool = False) -> Dict[str, Any]:
                 pass
 
             submitted.append({"symbol": symbol, "delta_qty": delta, "client_order_id": client_oid, "resp": res})
-          n += 1
+            n += 1
             time.sleep(max(0.0, float(SLEEP_BETWEEN_ORDERS_S)))
 
         set_state("alpaca_last_portfolio_orders_id", str(int(order_id)))
@@ -283,6 +283,8 @@ def apply_latest_portfolio_orders_live(dry_run: bool = False) -> Dict[str, Any]:
 
     finally:
         con.close()
+
+
 def poll_and_log_fills(after_ts_ms: int) -> Dict[str, Any]:
     """
     Poll Alpaca orders after a given timestamp and log fills into execution_ledger.

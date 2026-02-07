@@ -13,6 +13,8 @@ def set_state(key: str, value: str):
     init_db()
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT OR REPLACE INTO risk_state(key, value, updated_ts_ms)

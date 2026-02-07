@@ -128,6 +128,8 @@ def _ensure_tables(con):
             cash0 = 0.0
             eq0 = 1.0
 
+        ok = 0 if had_error else 1
+
         con.execute(
             "INSERT INTO broker_account(id, cash, equity, updated_ts_ms) VALUES(1, ?, ?, ?)",
             (float(cash0), float(eq0), int(ts)),
@@ -535,7 +537,18 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
                 }
 
                 _write_fill(
-                                    try:
+                    con,
+                    ts_ms=fill_ts,
+                    source_order_id=order_id,
+                    symbol=symbol,
+                    qty=float(qty_cap),
+                    px=float(px_exec),
+                    note=f"spread_bps={BROKER_SPREAD_BPS} slippage_bps={BROKER_SLIPPAGE_BPS} fee_bps={BROKER_FEE_BPS}",
+                    explain_json=json.dumps(explain),
+                )
+
+                # best-effort execution labels (if the table exists)
+                try:
                     con.execute(
                         """
                         INSERT OR REPLACE INTO labels_exec (
@@ -582,15 +595,6 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
                 except Exception:
                     pass
 
-                    con,
-                    ts_ms=fill_ts,
-                    source_order_id=order_id,
-                    symbol=symbol,
-                    qty=float(qty_cap),
-                    px=float(px_exec),
-                    note=f"spread_bps={BROKER_SPREAD_BPS} slippage_bps={BROKER_SLIPPAGE_BPS} fee_bps={BROKER_FEE_BPS}",
-                    explain_json=json.dumps(explain),
-                )
 
                 wrote_fills = True
                 fills_written += 1
@@ -614,6 +618,8 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
         # persist cash and MTM equity
         # (write cash first, then mark-to-market equity)
         cash = _safe_f(cash, 0.0)
+        ok = 0 if had_error else 1
+
         con.execute(
             "UPDATE broker_account SET cash=?, updated_ts_ms=? WHERE id=1",
             (float(cash), int(now_ms)),

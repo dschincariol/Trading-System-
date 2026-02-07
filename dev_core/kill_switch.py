@@ -11,9 +11,9 @@ ENV_GLOBAL_KEYS = ("KILL_SWITCH_GLOBAL", "TRADING_KILL_SWITCH", "KILL_SWITCH")
 ENV_SYMBOLS_KEY = "KILL_SWITCH_SYMBOLS"   # CSV: "SPY,BTC,ETH"
 ENV_REGIMES_KEY = "KILL_SWITCH_REGIMES"   # CSV: "low_vol,high_vol,trend,shock"
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Circuit breakers (production safety)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 REQUIRE_FRESH_DATA = os.environ.get("KILL_SWITCH_REQUIRE_FRESH_DATA", "1") == "1"
 REQUIRE_FRESH_JOBS = os.environ.get("KILL_SWITCH_REQUIRE_FRESH_JOBS", "1") == "1"
 
@@ -200,6 +200,8 @@ def set_kill_switch(
             )
         else:
             created_ms = int(cur[1] or now_ms)
+            pass
+
             con.execute(
                 """
                 UPDATE kill_switch_state
@@ -207,16 +209,18 @@ def set_kill_switch(
                 WHERE scope=? AND key=?
                 """,
                 (en, reason_s, actor_s, meta_json, now_ms, scope_n, key_n),
-            )
+                )
             if created_ms <= 0:
                 con.execute(
                     "UPDATE kill_switch_state SET created_ts_ms=? WHERE scope=? AND key=?",
                     (now_ms, scope_n, key_n),
                 )
 
-        con.execute(
-            """
-            INSERT INTO kill_switch_audit
+        ok = 0 if had_error else 1
+
+            con.execute(
+                """
+                INSERT INTO kill_switch_audit
               (ts_ms, action, scope, key, enabled, actor, reason, meta_json)
             VALUES (?,?,?,?,?,?,?,?)
             """,

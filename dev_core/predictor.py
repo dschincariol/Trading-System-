@@ -18,9 +18,9 @@ from dev_core.learning import (
 )
 from dev_core.model_v2 import get_regime_prior, get_spillover_betas
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Option A: supervised embedding regressor (OPT-IN)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 from dev_core.embed_regressor import predict_with_embed_model
 from dev_core.feature_expansion import build_feature_vector
 
@@ -86,9 +86,9 @@ MS_PER_DAY = 24 * 3600 * 1000
 
 MIN_BETA_N = 10
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Prediction core
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -100,9 +100,9 @@ logging.basicConfig(
 CONF_COLLAPSE_MIN = float(os.environ.get("CONF_COLLAPSE_MIN", "0.15"))
 CONF_COLLAPSE_FRAC = float(os.environ.get("CONF_COLLAPSE_FRAC", "0.7"))
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Option 4: performance/scalability cache (behavior-preserving)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 _CACHE_TTL_S = 10.0  # short TTL; invalidation also uses label stamp
 
@@ -116,9 +116,9 @@ _cached = {
     "event_ts": None,           # list[int]
 }
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Option 5.1: learned relevance → confidence scaling (OPT-IN)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 _USE_LEARNED_REL = os.environ.get("PREDICTOR_USE_LEARNED_RELEVANCE", "0") == "1"
 _LEARNED_REL_ABS_Z = float(os.environ.get("PREDICTOR_LEARNED_REL_ABS_Z", "0.5"))
@@ -481,10 +481,10 @@ def predict_event(
 
             knn_z, wsum, knn_ex = _knn_raw(qv_knn, sym, int(h), top_k)
 
-            # ------------------------------------------------------------
+            # ------            -- ------------------------------------------------------
             # Option A (OPT-IN): supervised embedding regressor
             # Falls back to KNN automatically if unavailable
-            # ------------------------------------------------------------
+            # ------            -- ------------------------------------------------------
             embed_pred = None
             if _USE_EMBED_REGRESSOR:
                 try:
@@ -573,9 +573,9 @@ def predict_event(
                     explain["confidence_base"] = float(conf)
                     conf = float(max(0.0, min(1.0, float(conf) * m)))
 
-            # ------------------------------------------------------------
+            # ------            -- ------------------------------------------------------
             # A.2 Drift-aware confidence scaling (prediction unchanged)
-            # ------------------------------------------------------------
+            # ------            -- ------------------------------------------------------
             drift_scale = 1.0
             con = None
             try:

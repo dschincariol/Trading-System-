@@ -33,11 +33,20 @@ def connect():
         isolation_level=None,  # autocommit
         check_same_thread=False,
     )
+    con.row_factory = sqlite3.Row
+
     for p in _SQLITE_PRAGMAS:
         try:
             con.execute(p)
         except Exception:
             pass
+
+    # Safety: enforce FK every connection
+    try:
+        con.execute("PRAGMA foreign_keys=ON;")
+    except Exception:
+        pass
+
     return con
 
 
@@ -213,6 +222,10 @@ def _ensure_events_columns(con):
     if not _has_column(con, "events", "meta_json"):
         con.execute("ALTER TABLE events ADD COLUMN meta_json TEXT;")
 
+def _ensure_symbol_universe_columns(con):
+    # Additive migration for symbol_universe
+    if not _has_column(con, "symbol_universe", "last_demoted_ms"):
+        con.execute("ALTER TABLE symbol_universe ADD COLUMN last_demoted_ms INTEGER;")
 
 def _ensure_promotion_audit_columns(con):
     # Additive migration: ensure model_promotion_audit.regime exists
@@ -325,25 +338,9 @@ def init_db():
     try:
         con.executescript(
             """
-            -- -------------------------------------------------------
-            -- Dynamic symbol universe (WATCH → ACTIVE)
-            -- -------------------------------------------------------
-            CREATE TABLE IF NOT EXISTS symbol_universe (
-              symbol TEXT PRIMARY KEY,
-              status TEXT NOT NULL,            -- WATCH | ACTIVE | BLOCKED
-              first_seen_ms INTEGER NOT NULL,
-              last_seen_ms INTEGER NOT NULL,
-              last_promoted_ms INTEGER,
-              seen_n INTEGER NOT NULL DEFAULT 1,
-              meta_json TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_symbol_universe_status
-              ON symbol_universe(status);
-
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Core ingestion
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS events (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               ts_ms INTEGER NOT NULL,
@@ -358,6 +355,93 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts_ms);
             CREATE INDEX IF NOT EXISTS idx_events_source_ts ON events(source, ts_ms);
 
+            -- -            -- ------------------------------------------------------
+            -- GDELT macro narrative features (market-wide, bucketed)
+            -- -            -- ------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS gdelt_macro_features (
+              bucket_ts_ms INTEGER NOT NULL,
+              bucket_sec INTEGER NOT NULL,
+              doc_count INTEGER NOT NULL DEFAULT 0,
+              tone_mean REAL NOT NULL DEFAULT 0.0,
+              tone_std REAL NOT NULL DEFAULT 0.0,
+              conflict_share REAL NOT NULL DEFAULT 0.0,
+              econ_share REAL NOT NULL DEFAULT 0.0,
+              PRIMARY KEY(bucket_ts_ms, bucket_sec)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_gdelt_macro_bucket
+              ON gdelt_macro_features(bucket_ts_ms);
+
+            -- -            -- ------------------------------------------------------
+            -- Social (raw posts + bucketed features + regime labels)
+            -- -            -- ------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS social_posts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts_ms INTEGER NOT NULL,
+              platform TEXT NOT NULL,
+              symbol TEXT NOT NULL,
+              post_id TEXT NOT NULL,
+              author_id_hash TEXT,
+              text TEXT,
+              lang TEXT,
+              like_count INTEGER,
+              reply_count INTEGER,
+              repost_count INTEGER,
+              quote_count INTEGER,
+              follower_count INTEGER,
+              is_spam INTEGER NOT NULL DEFAULT 0,
+              spam_reason TEXT
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_social_posts_platform_post
+              ON social_posts(platform, post_id);
+
+            CREATE INDEX IF NOT EXISTS idx_social_posts_symbol_ts
+              ON social_posts(symbol, ts_ms);
+
+            CREATE INDEX IF NOT EXISTS idx_social_posts_ts
+              ON social_posts(ts_ms);
+
+            CREATE TABLE IF NOT EXISTS social_features (
+              symbol TEXT NOT NULL,
+              bucket_ts_ms INTEGER NOT NULL,
+              bucket_sec INTEGER NOT NULL,
+              mention_count INTEGER NOT NULL DEFAULT 0,
+              unique_authors INTEGER NOT NULL DEFAULT 0,
+              new_author_ratio REAL NOT NULL DEFAULT 0.0,
+              engagement_now REAL NOT NULL DEFAULT 0.0,
+              sentiment_mean REAL NOT NULL DEFAULT 0.0,
+              sentiment_dispersion REAL NOT NULL DEFAULT 0.0,
+              mention_rate_z REAL NOT NULL DEFAULT 0.0,
+              bot_likelihood_mean REAL NOT NULL DEFAULT 0.0,
+              promo_likelihood_mean REAL NOT NULL DEFAULT 0.0,
+              manip_risk REAL NOT NULL DEFAULT 0.0,
+              attention_shock REAL NOT NULL DEFAULT 0.0,
+              cross_platform_confirm REAL NOT NULL DEFAULT 0.0,
+              PRIMARY KEY(symbol, bucket_ts_ms, bucket_sec)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_social_features_symbol_bucket
+              ON social_features(symbol, bucket_ts_ms);
+
+            CREATE INDEX IF NOT EXISTS idx_social_features_bucket
+              ON social_features(bucket_ts_ms);
+
+            CREATE TABLE IF NOT EXISTS social_regimes (
+              symbol TEXT NOT NULL,
+              bucket_ts_ms INTEGER NOT NULL,
+              bucket_sec INTEGER NOT NULL,
+              regime TEXT NOT NULL,                 -- QUIET | CHURN | FEAR | MANIA
+              regime_conf REAL NOT NULL DEFAULT 0.0,
+              mania_score REAL NOT NULL DEFAULT 0.0,
+              fear_score REAL NOT NULL DEFAULT 0.0,
+              churn_score REAL NOT NULL DEFAULT 0.0,
+              PRIMARY KEY(symbol, bucket_ts_ms, bucket_sec)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_social_regimes_symbol_bucket
+              ON social_regimes(symbol, bucket_ts_ms);
+
             CREATE TABLE IF NOT EXISTS prices (
               ts_ms INTEGER NOT NULL,
               symbol TEXT NOT NULL,
@@ -367,10 +451,9 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_prices_symbol_ts
               ON prices(symbol, ts_ms);
-
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Optional: computed market/tech features (versioned JSON)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS market_features (
               ts_ms INTEGER NOT NULL,
               symbol TEXT NOT NULL,
@@ -382,30 +465,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_market_features_symbol_ts
               ON market_features(symbol, ts_ms);
 
-                          -- -------------------------------------------------------
-            -- Quote snapshots (bid/ask/spread/volume)
-            -- -------------------------------------------------------
-            CREATE TABLE IF NOT EXISTS price_quotes (
-              ts_ms INTEGER NOT NULL,
-              symbol TEXT NOT NULL,
-              last REAL,
-              bid REAL,
-              ask REAL,
-              spread REAL,
-              volume REAL,
-              source TEXT,
-              PRIMARY KEY(symbol, ts_ms)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_price_quotes_symbol_ts
-              ON price_quotes(symbol, ts_ms);
-
-            CREATE INDEX IF NOT EXISTS idx_price_quotes_ts
-              ON price_quotes(ts_ms);
-
-            -- -------------------------------------------------------
+            -- ------------------------------------------------------
             -- Provider health (for auto-failover)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS price_provider_health (
               ts_ms INTEGER NOT NULL,
               provider TEXT NOT NULL,
@@ -422,9 +484,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_price_provider_health_provider
               ON price_provider_health(provider);
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Ingest-side slippage proxy (mid vs last) per provider
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS ingest_slippage (
               ts_ms INTEGER NOT NULL,
               symbol TEXT NOT NULL,
@@ -448,9 +510,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_ingest_slippage_provider
               ON ingest_slippage(provider);
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Dynamic symbol universe (WATCH → ACTIVE → BLOCKED)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS symbol_universe (
               symbol TEXT PRIMARY KEY,
               status TEXT NOT NULL,              -- WATCH | ACTIVE | BLOCKED
@@ -465,10 +527,10 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_symbol_universe_status
               ON symbol_universe(status);
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- OHLCV bars (for tradability + correlation + risk)
             -- tf_s: timeframe in seconds (e.g. 60 for 1m)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS price_bars (
               tf_s INTEGER NOT NULL,
               ts_ms INTEGER NOT NULL,
@@ -484,9 +546,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_price_bars_symbol_tf_ts
               ON price_bars(symbol, tf_s, ts_ms);
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Symbol registry (dynamic universe)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS symbols (
               symbol TEXT PRIMARY KEY,
               asset_class TEXT NOT NULL DEFAULT 'UNKNOWN',
@@ -505,9 +567,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_symbols_updated
               ON symbols(updated_ts_ms);
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Labels
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS labels (
               event_id INTEGER NOT NULL,
               horizon_s INTEGER NOT NULL,
@@ -524,9 +586,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_labels_symbol_h
               ON labels(symbol, horizon_s);
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Embeddings
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS event_embeddings (
               event_id INTEGER PRIMARY KEY,
               dim INTEGER NOT NULL,
@@ -539,9 +601,9 @@ def init_db():
               vec BLOB NOT NULL
             );
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Equity / risk state
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS equity_history (
               ts_ms INTEGER PRIMARY KEY,
               equity REAL NOT NULL
@@ -553,9 +615,9 @@ def init_db():
               updated_ts_ms INTEGER NOT NULL
             );
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Job locks + heartbeats (production stability)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS job_locks (
               job_name TEXT PRIMARY KEY,
               owner TEXT NOT NULL,
@@ -572,9 +634,9 @@ def init_db():
               extra_json TEXT
             );
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Temporal models
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS temporal_models (
               key_type TEXT NOT NULL,
               key TEXT NOT NULL,
@@ -613,10 +675,14 @@ def init_db():
               ts_ms INTEGER NOT NULL,
               PRIMARY KEY (event_id, symbol, horizon_s, model_kind)
             );
+            -- -            -- ------------------------------------------------------
+            -- Weather model contribution (base vs weather)
+            -- -            -- ------------------------------------------------------
 
-            -- -------------------------------------------------------
+
+            -- -            -- ------------------------------------------------------
             -- Drift & backtests
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS model_drift (
               symbol TEXT NOT NULL,
               horizon_s INTEGER NOT NULL,
@@ -638,9 +704,9 @@ def init_db():
               PRIMARY KEY(symbol, horizon_s)
             );
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Model registry (single canonical definition)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS model_registry (
               model_name TEXT NOT NULL,
               model_kind TEXT NOT NULL,
@@ -726,9 +792,9 @@ def init_db():
             );
 
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Execution-aware labels (FIXED)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS labels_exec (
               event_id INTEGER NOT NULL,
               symbol TEXT NOT NULL,
@@ -756,9 +822,9 @@ def init_db():
               PRIMARY KEY (event_id, symbol, horizon_s)
             );
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Kill switches (system-wide, fail-closed)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS kill_switch_state (
               scope TEXT NOT NULL,                 -- global / symbol / regime
               key TEXT NOT NULL,                   -- 'global' or '<SYMBOL>' or '<REGIME>'
@@ -789,9 +855,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_kill_switch_audit_ts
               ON kill_switch_audit(ts_ms);
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Shadow training runs
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS shadow_training_runs (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               ts_ms INTEGER NOT NULL,
@@ -807,9 +873,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_shadow_training_ts
               ON shadow_training_runs(ts_ms);
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Shadow metrics (non-executing)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS shadow_predictions (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               ts_ms INTEGER NOT NULL,
@@ -849,9 +915,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_shadow_metrics_window
               ON shadow_metrics(window_end_ms);
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Decision log
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS decision_log (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               ts_ms INTEGER NOT NULL,
@@ -870,9 +936,9 @@ def init_db():
               UNIQUE(event_id, symbol, horizon_s, model_name, model_ts_ms)
             );
 
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             -- Size policy (confidence -> sizing factor)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS size_policy (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               ts_ms INTEGER NOT NULL,
@@ -899,9 +965,8 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_size_policy_points_policy
               ON size_policy_points(policy_id, bucket_idx);
 
-            -- -------------------------------------------------------
             -- Portfolio backtest outputs (required by dashboard preflight)
-            -- -------------------------------------------------------
+            -- -            -- ------------------------------------------------------
             CREATE TABLE IF NOT EXISTS portfolio_bt_runs (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               ts_ms INTEGER NOT NULL,
@@ -929,11 +994,190 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_portfolio_bt_points_ts
               ON portfolio_bt_points(ts_ms);
 
+            -- -            -- ------------------------------------------------------
+            -- External factor universe (as-of, revision-safe)
+            -- -            -- ------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS factor_registry (
+              factor_id TEXT PRIMARY KEY,
+              family TEXT NOT NULL,
+              name TEXT NOT NULL,
+              cadence TEXT NOT NULL,
+              release_lag_sec INTEGER DEFAULT 0,
+              applies_to TEXT,
+              units TEXT,
+              transform TEXT,
+              is_revisioned INTEGER NOT NULL DEFAULT 0,
+              source TEXT,
+              enabled INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS factor_observations (
+              factor_id TEXT NOT NULL,
+              asof_ts INTEGER NOT NULL,
+              effective_ts INTEGER NOT NULL,
+              value REAL,
+              version INTEGER NOT NULL DEFAULT 1,
+              meta_json TEXT,
+              PRIMARY KEY (factor_id, asof_ts, effective_ts, version)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_factor_obs_factor_asof
+              ON factor_observations(factor_id, asof_ts);
+
+            CREATE INDEX IF NOT EXISTS idx_factor_obs_effective
+              ON factor_observations(factor_id, effective_ts);
+
+            CREATE TABLE IF NOT EXISTS factor_features (
+              feature_id TEXT NOT NULL,
+              asof_ts INTEGER NOT NULL,
+              effective_ts INTEGER NOT NULL,
+              value REAL,
+              meta_json TEXT,
+              PRIMARY KEY (feature_id, asof_ts, effective_ts)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_factor_features_feature_asof
+              ON factor_features(feature_id, asof_ts);
+
+            CREATE TABLE IF NOT EXISTS factor_groups (
+              group_id TEXT PRIMARY KEY,
+              description TEXT,
+              members_json TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS factor_group_scores (
+              ts INTEGER NOT NULL,
+              scope TEXT NOT NULL,
+              horizon TEXT NOT NULL,
+              group_id TEXT NOT NULL,
+              model_id TEXT NOT NULL,
+              metric_ic REAL,
+              metric_calibration REAL,
+              metric_drawdown REAL,
+              metric_turnover REAL,
+              metric_cost REAL,
+              metric_stability REAL,
+              delta_vs_base REAL,
+              decision TEXT,
+              PRIMARY KEY (ts, scope, horizon, group_id, model_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_factor_group_scores_scope
+              ON factor_group_scores(scope, horizon, ts);
+
+            CREATE TABLE IF NOT EXISTS active_feature_policy (
+              scope TEXT NOT NULL,
+              horizon TEXT NOT NULL,
+              group_id TEXT NOT NULL,
+              weight REAL NOT NULL,
+              state TEXT NOT NULL,
+              since_ts INTEGER NOT NULL,
+              PRIMARY KEY (scope, horizon, group_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_active_feature_policy_scope
+              ON active_feature_policy(scope, horizon, weight);
+
+            -- -            -- ------------------------------------------------------
+            -- Weather forecasts (as-issued, leakage-safe)
+            -- -            -- ------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS weather_forecast_region_daily (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              provider TEXT NOT NULL,          -- 'open_meteo' | 'gfs' | 'ecmwf' | ...
+              region_id TEXT NOT NULL,         -- e.g. 'us_pop', 'us_gulf', 'corn_belt'
+              run_ts INTEGER NOT NULL,         -- forecast run/issue time (unix ms)
+              day_ts INTEGER NOT NULL,         -- 00:00 UTC day start (unix ms)
+
+              temp_mean_c REAL,
+              hdd65 REAL,
+              cdd65 REAL,
+              wind_mean_mps REAL,
+              precip_sum_mm REAL,
+              spread REAL,
+
+              source_uri TEXT,
+              UNIQUE(provider, region_id, run_ts, day_ts)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_wx_region_lookup
+              ON weather_forecast_region_daily(provider, region_id, day_ts, run_ts);
+
+            -- -            -- ------------------------------------------------------
+            -- Weather provider health (optional but recommended)
+            -- -            -- ------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS weather_provider_health (
+              ts_ms INTEGER NOT NULL,
+              provider TEXT NOT NULL,
+              ok INTEGER NOT NULL,
+              latency_ms INTEGER,
+              error TEXT,
+              PRIMARY KEY (provider, ts_ms)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_weather_provider_health_ts
+              ON weather_provider_health(ts_ms);
+
+            -- -            -- ------------------------------------------------------
+            -- Weather alerts / events (event stream)
+            -- -            -- ------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS weather_alerts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              provider TEXT NOT NULL,          -- 'nws'
+              alert_id TEXT NOT NULL,
+              issued_ts INTEGER NOT NULL,
+              effective_ts INTEGER,
+              expires_ts INTEGER,
+
+              event TEXT,
+              severity TEXT,
+              urgency TEXT,
+              certainty TEXT,
+
+              area_desc TEXT,
+              polygon_geojson TEXT,
+              affected_regions TEXT,           -- JSON list of region_ids
+              headline TEXT,
+              description TEXT,
+
+              source_uri TEXT,
+              UNIQUE(provider, alert_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_wx_alerts_time
+              ON weather_alerts(provider, issued_ts);
+
+            -- -            -- ------------------------------------------------------
+            -- Weather usefulness tracking (base vs wx) per regime
+            -- -            -- ------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS model_weather_effect (
+              key_type TEXT NOT NULL,          -- 'symbol' | 'class'
+              key TEXT NOT NULL,               -- raw key (NOT namespaced)
+              horizon_s INTEGER NOT NULL,
+              regime TEXT NOT NULL DEFAULT 'global',
+              ts_ms INTEGER NOT NULL,
+
+              base_rmse REAL,
+              wx_rmse REAL,
+              rmse_delta REAL,
+
+              base_dir_acc REAL,
+              wx_dir_acc REAL,
+              dir_acc_delta REAL,
+
+              n_eval INTEGER NOT NULL,
+              PRIMARY KEY (key_type, key, horizon_s, regime, ts_ms)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_model_wx_effect_lookup
+              ON model_weather_effect(key_type, key, horizon_s, regime, ts_ms);
+
             """
         )
 
         _ensure_labels_columns(con)
         _ensure_events_columns(con)
+        _ensure_symbol_universe_columns(con)
         _ensure_price_quotes_schema(con)
         _ensure_options_chain_schema(con)
         _ensure_earnings_calendar_schema(con)
@@ -1009,6 +1253,7 @@ def put_event(ts_ms, source, title, body, url, event_key, meta_json=None):
 def put_price(ts_ms, symbol, price):
     con = connect()
     try:
+
         con.execute(
             """
             INSERT INTO prices(ts_ms, symbol, price)
@@ -1025,7 +1270,7 @@ def put_price(ts_ms, symbol, price):
     finally:
         con.close()
 
-def acquire_job_lock(job_name: str, owner: str, pid: int, stale_after_s: int = 180) -> bool:
+def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> bool:
     """
     Best-effort single-instance lock.
     Returns True if lock acquired/renewed, False otherwise.
@@ -1033,7 +1278,7 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, stale_after_s: int = 1
     import time
 
     now_ms = int(time.time() * 1000)
-    stale_ms = int(stale_after_s) * 1000
+    stale_ms = int(ttl_s) * 1000
 
     con = connect()
     try:
@@ -1085,6 +1330,8 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, stale_after_s: int = 1
 def release_job_lock(job_name: str, owner: str, pid: int) -> None:
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             "DELETE FROM job_locks WHERE job_name=? AND owner=? AND pid=?",
             (str(job_name), str(owner), int(pid)),
@@ -1099,6 +1346,8 @@ def touch_job_lock(job_name: str, owner: str, pid: int) -> None:
     now_ms = int(time.time() * 1000)
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             UPDATE job_locks
@@ -1117,6 +1366,8 @@ def put_job_heartbeat(job_name: str, owner: str, pid: int, extra_json: str = Non
     now_ms = int(time.time() * 1000)
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT INTO job_heartbeats(job_name, owner, pid, ts_ms, extra_json)

@@ -20,9 +20,9 @@ from dev_core.storage import connect, init_db
 
 from dev_core.training_guard import training_allowed
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Schema (owned by this module)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 SIZE_POLICY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS size_policy (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,6 +214,8 @@ def main():
             "method": "bucket_sharpe_monotone",
         }
 
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT INTO size_policy(ts_ms, lookback_days, buckets, method, params_json, metrics_json)
@@ -224,7 +226,9 @@ def main():
         pid = con.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         for p in points:
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT INTO size_policy_points(policy_id, bucket_idx, conf_lo, conf_hi, n, mean_net_ret, std_net_ret, factor)
                 VALUES (?,?,?,?,?,?,?,?)

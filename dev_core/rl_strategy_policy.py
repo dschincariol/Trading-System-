@@ -91,6 +91,8 @@ def upsert_policy(policy_name: str, weights: np.ndarray, bias: float, n: int, fe
 
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT INTO rl_strategy_policy_models(policy_name, ts_ms, n, dim, model_blob, meta_json)
@@ -199,6 +201,8 @@ def log_decision(
     init_rl_policy_db()
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT OR REPLACE INTO rl_strategy_policy_decisions(

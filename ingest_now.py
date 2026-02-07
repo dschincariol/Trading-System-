@@ -19,7 +19,10 @@ from dev_core.ingest.rss_ingest import ingest_rss_sources
 from dev_core.ingest.gdelt_ingest import ingest_gdelt_doc
 
 JOB_NAME = "ingest_now"
-OWNER = os.environ.get("JOB_OWNER", os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")))
+OWNER = os.environ.get(
+    "JOB_OWNER",
+    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
+)
 PID = os.getpid()
 
 MAX_ITEMS_PER_SOURCE = int(os.environ.get("RSS_MAX_ITEMS_PER_SOURCE", "15"))
@@ -36,7 +39,7 @@ logging.basicConfig(
 def main() -> None:
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance is holding the job lock; exiting")
         raise SystemExit(2)
 

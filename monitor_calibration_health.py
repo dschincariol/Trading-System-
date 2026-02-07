@@ -10,7 +10,10 @@ from dev_core.storage import connect, init_db, acquire_job_lock, release_job_loc
 from dev_core.model_registry import rollback_champion
 
 JOB_NAME = "monitor_calibration_health"
-OWNER = os.environ.get("JOB_OWNER", os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")))
+OWNER = os.environ.get(
+    "JOB_OWNER",
+    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
+)
 PID = os.getpid()
 
 LOCK_STALE_AFTER_S = int(os.environ.get("JOB_LOCK_STALE_AFTER_S", "180"))
@@ -111,7 +114,7 @@ def _risk_set(con, key: str, value: int) -> None:
 def main() -> None:
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance is holding the job lock; exiting")
         raise SystemExit(2)
 

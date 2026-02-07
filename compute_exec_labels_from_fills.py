@@ -66,7 +66,9 @@ def main():
             # Fees already realized
             net_ret = gross_ret - trade["fees_total"]
 
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT OR REPLACE INTO labels_exec(
                   event_id, symbol, horizon_s, ts_ms,

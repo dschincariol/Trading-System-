@@ -27,9 +27,9 @@ from dev_core.rules_engine import evaluate_rules
 from dev_core.execution_mode import get_execution_mode
 from dev_core.broker_router import apply_new_portfolio_orders_router as apply_new_portfolio_orders
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Job / runtime config
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 JOB_NAME = "broker_apply_orders"
 OWNER = os.environ.get(
@@ -48,9 +48,9 @@ logging.basicConfig(
 )
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Shadow intent logging (local, safe)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def _log_shadow_intents(orders: List[Dict[str, Any]], actor: str, mode_state: dict) -> None:
     try:
@@ -67,6 +67,7 @@ def _log_shadow_intents(orders: List[Dict[str, Any]], actor: str, mode_state: di
                 )
                 """
             )
+
             con.execute(
                 """
                 INSERT INTO shadow_order_intents(
@@ -81,7 +82,7 @@ def _log_shadow_intents(orders: List[Dict[str, Any]], actor: str, mode_state: di
                     json.dumps(orders or [], separators=(",", ":"), sort_keys=True),
                     json.dumps(mode_state or {}, separators=(",", ":"), sort_keys=True),
                 ),
-            )
+                )
             con.commit()
         finally:
             con.close()
@@ -94,23 +95,23 @@ def _print(out: Dict[str, Any]) -> None:
     print(json.dumps(out, indent=2, sort_keys=True))
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Main (one-shot)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def main() -> int:
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance is holding the job lock; exiting")
         return 2
 
     started_ms = int(time.time() * 1000)
 
     try:
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         # Kill switch (hard safety)
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         con = connect()
         try:
             allow, ks_reason, ks_meta = execution_allowed(con=con, symbol=None, regime=None)
@@ -130,24 +131,24 @@ def main() -> int:
                 }
             )
             return 0
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         # Rules engine (best-effort, never blocks execution by itself)
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         try:
             evaluate_rules()
         except Exception:
             pass
 
 
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         # Execution mode (single source of truth)
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         mode_state = get_execution_mode() or {}
         mode = str(mode_state.get("mode") or "").lower().strip()
 
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         # SHADOW MODE — compute intents and log only
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         if mode == "shadow":
             res = apply_new_portfolio_orders(dry_run=True)
             orders = []
@@ -171,9 +172,9 @@ def main() -> int:
             )
             return 0
 
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         # PAPER MODE — execute into broker_sim only (never real broker)
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         if mode == "paper":
             broker_lc = str(BROKER_NAME).lower().strip()
             if broker_lc not in ("sim", "paper", "sandbox"):
@@ -206,9 +207,9 @@ def main() -> int:
             )
             return 0
 
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         # LIVE MODE — explicit allow only (mode must be live AND armed)
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         if mode != "live":
             _print(
                 {
@@ -245,7 +246,7 @@ def main() -> int:
         try:
             con = connect()
             try:
-                con.execute(
+                        con.execute(
                     """
                     CREATE TABLE IF NOT EXISTS execution_meta (
                       key TEXT PRIMARY KEY,
@@ -253,6 +254,7 @@ def main() -> int:
                     )
                     """
                 )
+
                 con.execute(
                     """
                     INSERT INTO execution_meta(key, value)
@@ -261,6 +263,7 @@ def main() -> int:
                     """,
                     ("last_execution_source", "live_broker"),
                 )
+
                 con.execute(
                     """
                     INSERT INTO execution_meta(key, value)

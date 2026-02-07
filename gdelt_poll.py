@@ -17,7 +17,10 @@ from dev_core.universe import get_active_symbols
 from dev_core.ingest.gdelt_ingest import ingest_gdelt_doc
 
 JOB_NAME = "poll_gdelt"
-OWNER = os.environ.get("JOB_OWNER", os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")))
+OWNER = os.environ.get(
+    "JOB_OWNER",
+    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
+)
 PID = os.getpid()
 
 LOCK_STALE_AFTER_S = int(os.environ.get("JOB_LOCK_STALE_AFTER_S", "180"))
@@ -38,7 +41,7 @@ logging.basicConfig(
 def main() -> None:
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance is holding the job lock; exiting")
         raise SystemExit(2)
 
@@ -85,25 +88,17 @@ def main() -> None:
         )
 
         upsert_attempts = 0
-        conw = connect()
-        try:
-            for it in items:
-                put_event(
-                    ts_ms=it["ts_ms"],
-                    source=it["source"],
-                    title=it["title"],
-                    body=it["body"],
-                    url=it["url"],
-                    event_key=it["event_key"],
-                    meta_json=it.get("meta_json"),
-                )
-                upsert_attempts += 1
-            conw.commit()
-        finally:
-            try:
-                conw.close()
-            except Exception:
-                pass
+        for it in items:
+            put_event(
+                ts_ms=it["ts_ms"],
+                source=it["source"],
+                title=it["title"],
+                body=it["body"],
+                url=it["url"],
+                event_key=it["event_key"],
+                meta_json=it.get("meta_json"),
+            )
+            upsert_attempts += 1
 
         dur_ms = int(time.time() * 1000) - started_ms
         logging.info(

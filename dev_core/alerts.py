@@ -12,9 +12,9 @@ from dev_core.learning import get_global_prior
 from dev_core.position_sizing import position_from_signal
 from dev_core.edge_filter import adjust_expected_z_for_costs
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Schema
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS alerts (
@@ -35,9 +35,9 @@ CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_alerts_sym ON alerts(symbol);
 """
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Defaults / thresholds
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 DEFAULT_RULES = [
     {"rule_id": "warn_z1_conf55", "min_abs_z": 1.0, "min_conf": 0.55, "severity": "WARN"},
@@ -61,9 +61,9 @@ COOLDOWN_CRIT_S = int(os.environ.get("ALERT_COOLDOWN_CRIT_S", "3600"))
 
 ALERT_DEDUPE_WINDOW_S = int(os.environ.get("ALERT_DEDUPE_WINDOW_S", "300"))
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Rate limits (production safety)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 ALERT_RATE_WINDOW_S = int(os.environ.get("ALERT_RATE_WINDOW_S", "3600"))  # 1h
 ALERT_MAX_PER_WINDOW_GLOBAL = int(os.environ.get("ALERT_MAX_PER_WINDOW_GLOBAL", "250"))
 ALERT_MAX_PER_WINDOW_PER_SYMBOL = int(os.environ.get("ALERT_MAX_PER_WINDOW_PER_SYMBOL", "40"))
@@ -138,9 +138,9 @@ def _get_playbook(severity: str, rule_id: str = "") -> dict:
 
 REGIME_Z_MULT = {"LOW": 0.9, "MID": 1.0, "HIGH": 1.2}
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Logging
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -148,9 +148,11 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [alerts] %(message)s",
 )
 
-# ------------------------------------------------------------
+ALERT_LOG_COST_REJECTS = os.environ.get("ALERT_LOG_COST_REJECTS", "1") == "1"
+
+# ------            -- ------------------------------------------------------
 # DB init
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def init_alerts_db() -> None:
     con = connect()
@@ -160,9 +162,30 @@ def init_alerts_db() -> None:
     finally:
         con.close()
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Helpers
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
+
+def _put_provider_health(con, ts_ms: int, provider: str, ok: int, latency_ms: int, n_symbols: int, error: str = None) -> None:
+    con.execute(
+        """
+        INSERT INTO price_provider_health(ts_ms, provider, ok, latency_ms, n_symbols, error)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(provider, ts_ms) DO UPDATE SET
+          ok=excluded.ok,
+          latency_ms=excluded.latency_ms,
+          n_symbols=excluded.n_symbols,
+          error=excluded.error
+        """,
+        (
+            int(ts_ms),
+            str(provider),
+            int(ok),
+            (int(latency_ms) if latency_ms is not None else None),
+            int(n_symbols),
+            (str(error) if error else None),
+        ),
+    )
 
 def severity_rank(s: str) -> int:
     return {"INFO": 0, "WARN": 1, "HIGH": 2, "CRIT": 3}.get((s or "").upper(), 0)
@@ -278,9 +301,9 @@ def _passes_cooldown(symbol: str, horizon_s: int, severity: str, now_ms: int) ->
 
     return severity_rank(row[0]) < severity_rank(severity)
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Rule selection
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def choose_rule(
     expected_z: float,
@@ -304,10 +327,9 @@ def choose_rule(
                 best["min_abs_z_resolved"] = r["min_abs_z"] * mult
     return best
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Emit alert
-# ------------------------------------------------------------
-
+# ------            -- ------------------------------------------------------
 def emit_alert(
     event_title: str,
     symbol: str,
@@ -322,25 +344,25 @@ def emit_alert(
     explain = explain or {}
     now_ms = int(time.time() * 1000)
 
-# ------------------------------------------------------------
-# Informational: market stress context (read-only)
-# ------------------------------------------------------------
-try:
-    from dev_core.market_stress import get_market_stress_snapshot
-    ms = get_market_stress_snapshot(ts_ms=now_ms) or {}
-    explain["market_stress"] = {
-        "score": float(ms.get("stress_score", 0.0)),
-        "explain": (
-            "elevated market stress"
-            if float(ms.get("stress_score", 0.0)) >= 0.7
-            else "normal market stress"
-        ),
-    }
-except Exception:
-    explain["market_stress"] = {
-        "score": 0.0,
-        "explain": "unavailable",
-    }
+    # ------------------------------------------------------------
+    # Informational: market stress context (read-only)
+    # ------------------------------------------------------------
+    try:
+        from dev_core.market_stress import get_market_stress_snapshot
+        ms = get_market_stress_snapshot(ts_ms=now_ms) or {}
+        explain["market_stress"] = {
+            "score": float(ms.get("stress_score", 0.0)),
+            "explain": (
+                "elevated market stress"
+                if float(ms.get("stress_score", 0.0)) >= 0.7
+                else "normal market stress"
+            ),
+        }
+    except Exception:
+        explain["market_stress"] = {
+            "score": 0.0,
+            "explain": "unavailable",
+        }
 
     # price staleness decay
     try:
@@ -381,12 +403,26 @@ except Exception:
                 "vol_step": float(adj.get("vol_step", 0.0)),
                 "vol_horizon": float(adj.get("vol_horizon", 0.0)),
             }
+            
             ez_adj = adj.get("expected_z_adj", None)
             # If helper signals rejection it returns NaN
             if ez_adj is not None and ez_adj == ez_adj:
                 expected_z = float(ez_adj)
             else:
+                explain["exec_cost_reject"] = True
+                if ALERT_LOG_COST_REJECTS:
+                    try:
+                        logging.info(
+                            "exec_cost_reject symbol=%s horizon_s=%s expected_z=%s conf=%s",
+                            str(symbol),
+                            str(horizon_s),
+                            str(expected_z),
+                            str(confidence),
+                        )
+                    except Exception:
+                        pass
                 return None
+
     except Exception:
         pass
 
@@ -426,6 +462,7 @@ except Exception:
 # ------------------------------------------------------------
 # Query
 # ------------------------------------------------------------
+
 
 def get_recent_alerts(limit: int = 50):
     init_alerts_db()

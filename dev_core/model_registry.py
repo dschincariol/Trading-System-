@@ -89,6 +89,8 @@ def register_model(
     con = connect()
     try:
         reg = str(regime if regime is not None else (key if key is not None else "global"))
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT OR REPLACE INTO model_registry(
@@ -257,6 +259,7 @@ def promote_to_champion(
             to_ts = int(row[1])
 
             con.execute("BEGIN IMMEDIATE;")
+
             con.execute(
                 """
                 UPDATE model_registry
@@ -265,7 +268,9 @@ def promote_to_champion(
                 """,
                 (str(model_name), str(reg)),
             )
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 UPDATE model_registry
                 SET stage='champion'
@@ -324,6 +329,7 @@ def promote_to_champion(
             )
 
         con.execute("BEGIN IMMEDIATE;")
+
         con.execute(
             """
             UPDATE model_registry
@@ -332,6 +338,8 @@ def promote_to_champion(
             """,
             (str(model_name), str(reg)),
         )
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             UPDATE model_registry
@@ -382,6 +390,7 @@ def rollback_champion(model_name: str, *, regime: Optional[str] = None, key: Opt
         to_ts = int(cur[1])
 
         con.execute("BEGIN IMMEDIATE;")
+
         con.execute(
             """
             UPDATE model_registry
@@ -390,6 +399,8 @@ def rollback_champion(model_name: str, *, regime: Optional[str] = None, key: Opt
             """,
             (str(model_name), str(reg)),
         )
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             UPDATE model_registry
@@ -416,9 +427,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [model_registry] %(message)s",
 )
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Schema (unified + backward-compatible)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS model_registry (
@@ -467,9 +478,6 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def init_model_registry(con=None) -> None:
-    """
-    Ensure registry schema exists.
 
     Accepts optional SQLite connection. If provided, does NOT close it.
     """
@@ -488,10 +496,6 @@ def init_model_registry(con=None) -> None:
             con.close()
 
 
-def register_model(
-    *,
-    model_name: str,
-    model_kind: str,
     model_ts_ms: int,
     stage: str,
     metrics: Dict[str, Any],
@@ -508,6 +512,8 @@ def register_model(
     con = connect()
     try:
         k = str(key) if key is not None else "global"
+
+        ok = 0 if had_error else 1
 
         con.execute(
             """
@@ -690,7 +696,9 @@ def promote_to_champion(
             con.execute("BEGIN IMMEDIATE;")
 
             # retire current champion (if any)
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 UPDATE model_registry
                 SET stage='retired'
@@ -700,7 +708,9 @@ def promote_to_champion(
             )
 
             # promote challenger
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 UPDATE model_registry
                 SET stage='champion'
@@ -748,6 +758,8 @@ def promote_to_champion(
         con.execute("BEGIN IMMEDIATE;")
 
         # retire existing champion(s)
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             UPDATE model_registry
@@ -774,6 +786,8 @@ def promote_to_champion(
             raise RuntimeError(
                 f"cannot promote missing model record model={model_name} key={k} kind={to_kind} ts={to_ts_ms}"
             )
+
+        ok = 0 if had_error else 1
 
         con.execute(
             """
@@ -825,6 +839,8 @@ def rollback_champion(model_name: str, *, key: Optional[str] = None) -> Optional
 
         con.execute("BEGIN IMMEDIATE;")
 
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             UPDATE model_registry
@@ -833,6 +849,8 @@ def rollback_champion(model_name: str, *, key: Optional[str] = None) -> Optional
             """,
             (str(model_name), str(k)),
         )
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             UPDATE model_registry

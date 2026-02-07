@@ -131,6 +131,8 @@ def build_temporal_embeddings(
                 total += float(loss)
 
         # persist embeddings
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS event_embeddings_seq (
@@ -146,7 +148,9 @@ def build_temporal_embeddings(
             xt = torch.from_numpy(X)
             with torch.no_grad():
                 out = model(xt[-1]).numpy().astype(np.float32)
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT OR REPLACE INTO event_embeddings_seq(event_id, dim, vec)
                 VALUES (?,?,?)

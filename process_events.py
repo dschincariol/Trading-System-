@@ -26,9 +26,9 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 import torch
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # In-memory cache for recent embeddings (novelty acceleration)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 _RECENT_EMB_CACHE: List[np.ndarray] = []
 _RECENT_EMB_CACHE_MAX = int(os.environ.get("NOVELTY_CACHE_MAX", "500"))
@@ -58,9 +58,9 @@ from dev_core.symbol_blacklist import is_blacklisted
 from dev_core.rules_engine import evaluate_rules
 from dev_core.kill_switch import execution_allowed
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Optional subsystems (shadow-safe)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 try:
     from dev_core.temporal_predictor import predict_temporal_shadow_for_event
@@ -72,9 +72,9 @@ try:
 except Exception:
     assign_cluster = None
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Runtime config
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 # If symbols table is empty, fallback to a conservative seed set.
 DEFAULT_SYMBOLS = [
@@ -104,9 +104,9 @@ NOVELTY_MIN_SCORE = float(os.environ.get("NOVELTY_MIN_SCORE", "0.20"))  # curren
 RET_SCALE_PER_Z = float(os.environ.get("RET_SCALE_PER_Z", "0.0025"))  # per 1.0 z at 1h (0.25% default)
 COST_BPS = float(os.environ.get("COST_BPS", "6.0"))                   # 6 bps default
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Feature 4: Kill-switch on execution cost spikes (spread-based)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 EXEC_COST_SPIKE_BPS = float(os.environ.get("EXEC_COST_SPIKE_BPS", "45.0"))  # trigger kill if avg spread_bps >= this
 EXEC_COST_SPIKE_WINDOW_S = int(os.environ.get("EXEC_COST_SPIKE_WINDOW_S", "120"))  # lookback window
 EXEC_COST_SPIKE_MIN_N = int(os.environ.get("EXEC_COST_SPIKE_MIN_N", "8"))          # minimum samples required
@@ -124,9 +124,30 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [process_events] %(message)s",
 )
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Helpers
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
+
+def _put_provider_health(con, ts_ms: int, provider: str, ok: int, latency_ms: int, n_symbols: int, error: str = None) -> None:
+    con.execute(
+        """
+        INSERT INTO price_provider_health(ts_ms, provider, ok, latency_ms, n_symbols, error)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(provider, ts_ms) DO UPDATE SET
+          ok=excluded.ok,
+          latency_ms=excluded.latency_ms,
+          n_symbols=excluded.n_symbols,
+          error=excluded.error
+        """,
+        (
+            int(ts_ms),
+            str(provider),
+            int(ok),
+            (int(latency_ms) if latency_ms is not None else None),
+            int(n_symbols),
+            (str(error) if error else None),
+        ),
+    )
 
 def _sleep_with_jitter(seconds: float) -> None:
     if seconds <= 0:
@@ -229,6 +250,8 @@ def _update_event_meta_json(con, event_id: int, meta: Dict[str, Any]) -> None:
     Best-effort UPDATE events.meta_json. Fail-soft if column doesn't exist.
     """
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             "UPDATE events SET meta_json=? WHERE id=?",
             (json.dumps(meta or {}, separators=(",", ":"), sort_keys=True), int(event_id)),
@@ -554,9 +577,9 @@ def _tradability_from_pred(expected_z: float, horizon_s: int, novelty: float) ->
         "expected_dd": float(expected_dd),
     }
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Heuristic relevance rules (title-only)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 _RELEVANCE_RULES = {
     "BTC": [
@@ -610,9 +633,9 @@ def relevance_for_title(title: str, symbol: str) -> Tuple[float, List[str]]:
             continue
     return _score_from_hit_count(len(reasons)), reasons
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Symbol discovery (WATCH-only)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 _SYMBOL_PATTERNS = [
     # Equities / ETFs
@@ -638,7 +661,9 @@ def discover_symbols_from_text(text: str):
 def upsert_watch_symbols(con, symbols, ts_ms: int):
     for sym in symbols:
         try:
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT INTO symbol_universe(symbol, status, first_seen_ms, last_seen_ms, seen_n)
                 VALUES (?, 'WATCH', ?, ?, 1)
@@ -658,9 +683,9 @@ def relevance_map(title: str, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         out[sym] = {"score": float(score), "reasons": list(reasons)}
     return out
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Embedding model (lazy init)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 _model: Optional[SentenceTransformer] = None
 
@@ -671,26 +696,26 @@ def _get_model() -> SentenceTransformer:
         _model = SentenceTransformer("all-MiniLM-L6-v2")
     return _model
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Ensure schemas exist
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 init_db()
 init_alerts_db()
 init_validation_db()
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Main loop
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def main() -> None:
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance is holding the job lock; exiting")
         raise SystemExit(2)
 
-    # ---------------------------------------------------------
+    # ---            -- ------------------------------------------------------
     # Rules engine (single pass)
-    # ---------------------------------------------------------
+    # ---            -- ------------------------------------------------------
     try:
         evaluate_rules()
     except Exception:
@@ -700,9 +725,9 @@ def main() -> None:
     started_ms = int(time.time() * 1000)
 
     try:
-        # --------------------------------------------------------
+        # --            -- ------------------------------------------------------
         # Phase 3: Global rules engine (auto kill-switch)
-        # --------------------------------------------------------
+        # --            -- ------------------------------------------------------
         try:
             evaluate_rules()
         except Exception:
@@ -712,18 +737,18 @@ def main() -> None:
             logging.warning("execution blocked by rules engine; sleeping")
             _sleep_with_jitter(2.0)
             return
-        # --------------------------------------------------------
+        # --            -- ------------------------------------------------------
         # Phase 5: rules engine (per-symbol halts + global stops)
-        # --------------------------------------------------------
+        # --            -- ------------------------------------------------------
 
         allow0, _, _ = execution_allowed(symbol=None, regime=None)
         if not allow0:
             logging.warning("execution blocked by kill switch; exiting process_events pass")
             return
 
-        # --------------------------------------------------------
+        # --            -- ------------------------------------------------------
         # Phase 5/6/7: rules engine (global + per-symbol halts)
-        # --------------------------------------------------------
+        # --            -- ------------------------------------------------------
 
         allow0, _, _ = execution_allowed(symbol=None, regime=None)
         if not allow0:
@@ -743,9 +768,9 @@ def main() -> None:
 
             symbols = list(dict.fromkeys(symbols))  # de-dup, preserve order
 
-            # --------------------------------------------------------
+            # --            -- ------------------------------------------------------
             # Feature 4: Kill-switch on execution cost spikes (spread)
-            # --------------------------------------------------------
+            # --            -- ------------------------------------------------------
             try:
                 spike_info = _detect_exec_cost_spike(conu)
                 if spike_info and spike_info.get("spike"):
@@ -787,9 +812,9 @@ def main() -> None:
             except Exception:
                 pass
 
-        # --------------------------------------------------------
+        # --            -- ------------------------------------------------------
         # Read candidate events (no write txn)
-        # --------------------------------------------------------
+        # --            -- ------------------------------------------------------
         con = connect()
         try:
             rows = con.execute(
@@ -1002,9 +1027,9 @@ def main() -> None:
                         if cluster_info:
                             explain["cluster"] = cluster_info
 
-                        # ---------------------------------------------------------
+                        # ---            -- ------------------------------------------------------
                         # Feature 3: Spread-aware confidence decay
-                        # ---------------------------------------------------------
+                        # ---            -- ------------------------------------------------------
                         try:
                             cost_ctx = _exec_cost_context(conw, sym)
                             if cost_ctx:

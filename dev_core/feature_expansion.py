@@ -15,11 +15,11 @@ import time
 import os
 from typing import Dict
 
-from asset_map import asset_class_for_symbol
+from dev_core.asset_map import asset_class_for_symbol
 
-# ------------------------------------------------------------------
+# ------------            -- ------------------------------------------------------
 # BASE FEATURE LAYOUT (KEEP ORDER STABLE)
-# ------------------------------------------------------------------
+# ------------            -- ------------------------------------------------------
 #
 # [0] source_credibility
 # [1] log_recency_hours
@@ -32,15 +32,41 @@ from asset_map import asset_class_for_symbol
 #
 BASE_FEATURE_DIM = 8
 
-# ------------------------------------------------------------------
+# ------------            -- ------------------------------------------------------
 # Optional feature flags (MUST MATCH train/predict)
-# ------------------------------------------------------------------
+# ------------            -- ------------------------------------------------------
 USE_TECH_FEATURES = os.environ.get("USE_TECH_FEATURES", "0") == "1"
 USE_STRESS_FEATURES = os.environ.get("USE_STRESS_FEATURES", "0") == "1"
+USE_SOCIAL_FEATURES = os.environ.get("USE_SOCIAL_FEATURES", "0") == "1"
+USE_SOCIAL_REGIME = os.environ.get("USE_SOCIAL_REGIME", "0") == "1"
+USE_WEATHER_FEATURES = os.environ.get("USE_WEATHER_FEATURES", "0") == "1"
+USE_FACTOR_UNIVERSE = os.environ.get("USE_FACTOR_UNIVERSE", "0") == "1"
 
-# ------------------------------------------------------------------
+def feature_set_tag() -> str:
+    """
+    Stable feature-set tag for model-key namespacing.
+
+    IMPORTANT:
+    - Any change here intentionally creates a NEW model namespace.
+    """
+    parts = ["base"]
+    if USE_TECH_FEATURES:
+        parts.append("tech")
+    if USE_STRESS_FEATURES:
+        parts.append("stress")
+    if USE_WEATHER_FEATURES:
+        parts.append("wx")
+    if USE_SOCIAL_FEATURES:
+        parts.append("social")
+    if USE_SOCIAL_REGIME:
+        parts.append("social_regime")
+    if USE_FACTOR_UNIVERSE:
+        parts.append("factors")
+    return "+".join(parts)
+
+# ------------            -- ------------------------------------------------------
 # Source credibility priors
-# ------------------------------------------------------------------
+# ------------            -- ------------------------------------------------------
 _SOURCE_CRED = {
     "rss:reuters": 0.9,
     "rss:bloomberg": 0.9,
@@ -112,9 +138,9 @@ def build_feature_vector(*, event: Dict, symbol: str) -> list:
         asset_match,
     ]
 
-    # --------------------------------------------------------------
+    # --------            -- ------------------------------------------------------
     # Optional: technical / market features (price-only, safe)
-    # --------------------------------------------------------------
+    # --------            -- ------------------------------------------------------
     if USE_TECH_FEATURES:
         try:
             from dev_core.tech_indicators import compute_tech_features
@@ -132,9 +158,9 @@ def build_feature_vector(*, event: Dict, symbol: str) -> list:
             float(tf.get("vol_of_vol", 0.0)),
         ])
 
-    # --------------------------------------------------------------
+    # --------            -- ------------------------------------------------------
     # Optional: market stress features
-    # --------------------------------------------------------------
+    # --------            -- ------------------------------------------------------
     if USE_STRESS_FEATURES:
         try:
             from dev_core.market_stress import get_market_stress_snapshot
@@ -149,6 +175,87 @@ def build_feature_vector(*, event: Dict, symbol: str) -> list:
             float(ms.get("z_term", 0.0)),
             float(ms.get("z_credit", 0.0)),
             float(ms.get("stress_score", 0.0)),
+        ])
+
+    # --------            -- ------------------------------------------------------
+    # Optional: external factor universe (Tier-1 fixed-dim vector)
+    # --------            -- ------------------------------------------------------
+    if USE_FACTOR_UNIVERSE:
+        try:
+            from dev_core.factor_universe import FACTOR_FEATURE_DIM, get_factor_universe_vector
+            fv = get_factor_universe_vector(ts_ms=ts_ms) or []
+            if len(fv) != int(FACTOR_FEATURE_DIM):
+                fv = [0.0] * int(FACTOR_FEATURE_DIM)
+        except Exception:
+            fv = [0.0] * int(FACTOR_FEATURE_DIM)  # strict dimension safety
+
+        features.extend([float(x or 0.0) for x in fv])
+
+    # --------            -- ------------------------------------------------------
+    # Optional: social context features (attention/manipulation)
+    # --------            -- ------------------------------------------------------
+    if USE_SOCIAL_FEATURES:
+        try:
+            from dev_core.social_context import get_social_feature_vector
+            sf = get_social_feature_vector(symbol=str(symbol), ts_ms=int(ts_ms)) or {}
+        except Exception:
+            sf = {}
+
+        # Fixed social layout (keep stable)
+        features.extend([
+            float(sf.get("mention_rate_z", 0.0)),
+            float(sf.get("unique_authors", 0.0)),
+            float(sf.get("new_author_ratio", 0.0)),
+            float(sf.get("sentiment_mean", 0.0)),
+            float(sf.get("sentiment_dispersion", 0.0)),
+            float(sf.get("manip_risk", 0.0)),
+            float(sf.get("attention_shock", 0.0)),
+            float(sf.get("promo_likelihood_mean", 0.0)),
+        ])
+
+    # --------            -- ------------------------------------------------------
+    # Optional: weather forecast + weather alerts features
+    # (exogenous, leakage-safe via as-of queries)
+    # --------            -- ------------------------------------------------------
+    if USE_WEATHER_FEATURES:
+        try:
+            from dev_core.weather_features import get_weather_feature_snapshot
+            wx = get_weather_feature_snapshot(symbol=str(symbol), ts_ms=ts_ms) or {}
+        except Exception:
+            wx = {}
+
+        features.extend([
+            float(wx.get("hdd_3d", 0.0)),
+            float(wx.get("hdd_7d", 0.0)),
+            float(wx.get("cdd_3d", 0.0)),
+            float(wx.get("cdd_7d", 0.0)),
+            float(wx.get("precip_7d", 0.0)),
+            float(wx.get("wind_3d", 0.0)),
+            float(wx.get("spread_7d", 0.0)),
+            float(wx.get("storm_risk", 0.0)),
+        ])
+
+
+    # --------            -- ------------------------------------------------------
+    # Optional: social regime features (QUIET/CHURN/FEAR/MANIA)
+    # --------            -- ------------------------------------------------------
+    if USE_SOCIAL_REGIME:
+        try:
+            from dev_core.social_regime import get_social_regime_vector
+            rg = get_social_regime_vector(symbol=str(symbol), ts_ms=int(ts_ms)) or {}
+        except Exception:
+            rg = {}
+
+        # Stable layout (append-only)
+        features.extend([
+            float(rg.get("mania_score", 0.0)),
+            float(rg.get("fear_score", 0.0)),
+            float(rg.get("churn_score", 0.0)),
+            float(rg.get("regime_quiet", 0.0)),
+            float(rg.get("regime_churn", 0.0)),
+            float(rg.get("regime_fear", 0.0)),
+            float(rg.get("regime_mania", 0.0)),
+            float(rg.get("regime_conf", 0.0)),
         ])
 
     return features

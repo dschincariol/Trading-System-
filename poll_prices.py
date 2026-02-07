@@ -29,16 +29,15 @@ from dev_core.storage import (
 
 from dev_core.live_prices.yfinance_live import fetch_latest_ohlcv_yf
 from dev_core.live_prices.ccxt_live import fetch_last_prices_ccxt, fetch_latest_ohlcv_ccxt
-from dev_core.live_prices.provider import get_price_provider
 from dev_core.live_prices.provider import get_price_provider, get_price_provider_by_name
 from dev_core.universe import get_active_symbols
 from dev_core.symbol_blacklist import is_blacklisted
 from dev_core.portfolio_risk_gate import apply_portfolio_risk_gate
 from dev_core.alerts import emit_alert
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Runtime config
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "30"))
 PRICE_STALE_AFTER_S = int(os.environ.get("PRICE_STALE_AFTER_S", "120"))
@@ -65,9 +64,10 @@ FAIL_MAX_S = float(os.environ.get("POLL_FAIL_MAX_S", "60.0"))
 HEARTBEAT_EVERY_S = float(os.environ.get("HEARTBEAT_EVERY_S", "15.0"))
 LOCK_STALE_AFTER_S = int(os.environ.get("JOB_LOCK_STALE_AFTER_S", "180"))
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Helpers
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
+
 def _put_provider_health(con, ts_ms: int, provider: str, ok: int, latency_ms: int, n_symbols: int, error: str = None) -> None:
     con.execute(
         """
@@ -234,7 +234,10 @@ def _sleep_with_jitter(seconds: float) -> None:
 
 
 def _load_symbol_providers() -> Tuple[Dict[str, str], Dict[str, str]]:
-    con = connect()
+    owns = False
+    if con is None:
+        con = connect()
+        owns = True
     try:
         rows = con.execute(
             """
@@ -262,11 +265,28 @@ def _load_symbol_providers() -> Tuple[Dict[str, str], Dict[str, str]]:
         elif provider == "ccxt":
             ccxt_map[sym] = meta.get("ccxt_market")
 
-    # ------------------------------------------------------------
+    # ------            -- ------------------------------------------------------
     # Ensure global stress proxy (VIX) is always present
-    # ------------------------------------------------------------
+    # ------            -- ------------------------------------------------------
     if "VIX" not in yf_map:
         yf_map["VIX"] = "^VIX"
+
+    # ------            -- ------------------------------------------------------
+    # Ensure Tier-1 macro/credit/flows proxies are present (YF)
+    # These are used by compute_factor_features.py (factor universe)
+    # ------            -- ------------------------------------------------------
+    if os.environ.get("FORCE_FACTOR_PROXY_TICKERS", "1") == "1":
+        # Rates (Yahoo caret indices)
+        yf_map.setdefault("TNX", "^TNX")  # 10Y yield index (Yahoo convention)
+        yf_map.setdefault("FVX", "^FVX")  # 5Y yield index (proxy for short rates)
+
+        # Credit proxies (ETF prices)
+        yf_map.setdefault("HYG", "HYG")
+        yf_map.setdefault("LQD", "LQD")
+
+        # Risk appetite proxy (ETF ratio)
+        yf_map.setdefault("SPY", "SPY")
+        yf_map.setdefault("AGG", "AGG")
 
     return yf_map, ccxt_map
 
@@ -281,11 +301,43 @@ def _detect_outlier(prices: list, latest: float) -> bool:
         return z >= OUTLIER_Z
     except Exception:
         return False
+def _put_prices_batch(con, rows):
+    """
+    rows: [(ts_ms, symbol, price), ...]
+    """
+    con.executemany(
+        """
+        INSERT INTO prices(ts_ms, symbol, price)
+        VALUES (?, ?, ?)
+        ON CONFLICT(symbol, ts_ms) DO UPDATE SET
+          price=excluded.price
+        """,
+        rows,
+    )
+
+    now_ms = int(time.time() * 1000)
+    for ts_ms, sym, _ in rows:
+        ok = 0 if had_error else 1
+
+        con.execute(
+            """
+            UPDATE symbols SET
+              updated_ts_ms=?,
+              meta_json=json_set(
+                COALESCE(meta_json,'{}'),
+                '$.price_status.last_seen_ts_ms', ?
+              )
+            WHERE symbol=?
+            """,
+            (now_ms, int(ts_ms), sym),
+        )
 
 
 def _put_bar(tf_s: int, ts_ms: int, symbol: str, o: float, h: float, l: float, c: float, v) -> None:
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT OR REPLACE INTO price_bars(tf_s, ts_ms, symbol, o, h, l, c, v)
@@ -302,7 +354,10 @@ def _put_bar(tf_s: int, ts_ms: int, symbol: str, o: float, h: float, l: float, c
 
 def _mark_stale(now_ts_ms: int) -> None:
     cutoff = now_ts_ms - PRICE_STALE_AFTER_S * 1000
-    con = connect()
+    owns = False
+    if con is None:
+        con = connect()
+        owns = True
     try:
         rows = con.execute(
             "SELECT symbol, meta_json FROM symbols WHERE status IN ('ACTIVE','WATCH')"
@@ -332,7 +387,9 @@ def _mark_stale(now_ts_ms: int) -> None:
                     },
                 )
 
-                con.execute(
+                pass
+
+        con.execute(
                     "UPDATE symbols SET meta_json=?, updated_ts_ms=? WHERE symbol=?",
                     (json.dumps(meta, separators=(",", ":")), now_ts_ms, sym),
                 )
@@ -341,175 +398,14 @@ def _mark_stale(now_ts_ms: int) -> None:
     finally:
         con.close()
 
-def _put_provider_health(con, ts_ms: int, provider: str, ok: int, latency_ms: int, n_symbols: int, error: str = None) -> None:
-    con.execute(
-        """
-        INSERT INTO price_provider_health(ts_ms, provider, ok, latency_ms, n_symbols, error)
-        VALUES (?,?,?,?,?,?)
-        ON CONFLICT(provider, ts_ms) DO UPDATE SET
-          ok=excluded.ok,
-          latency_ms=excluded.latency_ms,
-          n_symbols=excluded.n_symbols,
-          error=excluded.error
-        """,
-        (
-            int(ts_ms),
-            str(provider),
-            int(ok),
-            (int(latency_ms) if latency_ms is not None else None),
-            int(n_symbols),
-            (str(error) if error else None),
-        ),
-    )
-
-
-def _put_quotes_batch(con, rows):
-    """
-    rows: [(ts_ms, symbol, last, bid, ask, spread, volume, source), ...]
-    """
-    con.executemany(
-        """
-        INSERT INTO price_quotes(ts_ms, symbol, last, bid, ask, spread, volume, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(symbol, ts_ms) DO UPDATE SET
-          last=excluded.last,
-          bid=excluded.bid,
-          ask=excluded.ask,
-          spread=excluded.spread,
-          volume=excluded.volume,
-          source=excluded.source
-        """,
-        rows,
-    )
-
-
-def _put_ingest_slippage_batch(con, rows):
-    """
-    rows: [(ts_ms, symbol, provider, last, bid, ask, mid, spread, px_minus_mid, abs_px_minus_mid), ...]
-    """
-    con.executemany(
-        """
-        INSERT INTO ingest_slippage(
-          ts_ms, symbol, provider,
-          last, bid, ask, mid, spread,
-          px_minus_mid, abs_px_minus_mid
-        )
-        VALUES (?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(symbol, provider, ts_ms) DO UPDATE SET
-          last=excluded.last,
-          bid=excluded.bid,
-          ask=excluded.ask,
-          mid=excluded.mid,
-          spread=excluded.spread,
-          px_minus_mid=excluded.px_minus_mid,
-          abs_px_minus_mid=excluded.abs_px_minus_mid
-        """,
-        rows,
-    )
-
-def _put_prices_batch(con, rows):
-    """
-    rows: [(ts_ms, symbol, price), ...]
-    """
-    con.executemany(
-        """
-        INSERT INTO prices(ts_ms, symbol, price)
-        VALUES (?, ?, ?)
-        ON CONFLICT(symbol, ts_ms) DO UPDATE SET
-          price=excluded.price
-        """,
-        rows,
-    )
-
-    now_ms = int(time.time() * 1000)
-    for ts_ms, sym, _ in rows:
-        con.execute(
-            """
-            UPDATE symbols SET
-              updated_ts_ms=?,
-              meta_json=json_set(
-                COALESCE(meta_json,'{}'),
-                '$.price_status.last_seen_ts_ms', ?
-              )
-            WHERE symbol=?
-            """,
-            (now_ms, int(ts_ms), sym),
-        )
-
-def _put_quotes_batch(con, rows):
-    """
-    rows: [(ts_ms, symbol, last, bid, ask, spread, volume, source), ...]
-    """
-    con.executemany(
-        """
-        INSERT INTO price_quotes(ts_ms, symbol, last, bid, ask, spread, volume, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(symbol, ts_ms) DO UPDATE SET
-          last=excluded.last,
-          bid=excluded.bid,
-          ask=excluded.ask,
-          spread=excluded.spread,
-          volume=excluded.volume,
-          source=excluded.source
-        """,
-        rows,
-    )
-
-def _put_quotes_batch(con, rows):
-    """
-    rows: [(ts_ms, symbol, last, bid, ask, spread, volume, source), ...]
-    """
-    con.executemany(
-        """
-        INSERT INTO price_quotes(ts_ms, symbol, last, bid, ask, spread, volume, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(symbol, ts_ms) DO UPDATE SET
-          last=excluded.last,
-          bid=excluded.bid,
-          ask=excluded.ask,
-          spread=excluded.spread,
-          volume=excluded.volume,
-          source=excluded.source
-        """,
-        rows,
-    )
-def _put_prices_batch(con, rows):
-    """
-    rows: [(ts_ms, symbol, price), ...]
-    """
-    con.executemany(
-        """
-        INSERT INTO prices(ts_ms, symbol, price)
-        VALUES (?, ?, ?)
-        ON CONFLICT(symbol, ts_ms) DO UPDATE SET
-          price=excluded.price
-        """,
-        rows,
-    )
-
-    now_ms = int(time.time() * 1000)
-    for ts_ms, sym, _ in rows:
-        con.execute(
-            """
-            UPDATE symbols SET
-              updated_ts_ms=?,
-              meta_json=json_set(
-                COALESCE(meta_json,'{}'),
-                '$.price_status.last_seen_ts_ms', ?
-              )
-            WHERE symbol=?
-            """,
-            (now_ms, int(ts_ms), sym),
-        )
-
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Main loop
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def main():
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         raise SystemExit(2)
 
     # Provider failover chain: "polygon,yfinance" (default falls back to LIVE_PRICE_PROVIDER)

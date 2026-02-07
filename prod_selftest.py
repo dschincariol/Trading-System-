@@ -52,6 +52,7 @@ def main() -> int:
     con = connect()
     try:
         con.execute("BEGIN IMMEDIATE;")
+
         con.execute(
             """
             INSERT OR IGNORE INTO events(ts_ms, source, title, body, url, event_key)

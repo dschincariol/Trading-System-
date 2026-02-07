@@ -7,9 +7,9 @@ import requests
 
 _BASE = "https://api.gdeltproject.org/api/v2/doc/doc"
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Symbol-aware keyword packs (profit-focused, conservative)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 _SYMBOL_KEYWORDS = {
     "SPY": [
@@ -145,15 +145,15 @@ def ingest_gdelt_doc(
         "sort": "datedesc",
     }
 
-    if start_dt and end_dt:
-        params["startdatetime"] = start_dt
-        params["enddatetime"] = end_dt
-
     arts = []
 
     for sym, q in queries.items():
         params = dict(base_params)
         params["query"] = q
+
+        if start_dt and end_dt:
+            params["startdatetime"] = start_dt
+            params["enddatetime"] = end_dt
         if language:
             params["sourcelang"] = language
 

@@ -4,9 +4,9 @@ from typing import Tuple, Dict
 from dev_core.storage import connect
 
 
-# ------------------------------------------------------------------
+# ------------            -- ------------------------------------------------------
 # Confidence helpers (UNCHANGED)
-# ------------------------------------------------------------------
+# ------------            -- ------------------------------------------------------
 
 def confidence_from_n(n: int) -> float:
     n = max(0, int(n))
@@ -18,13 +18,15 @@ def confidence_from_weight(w: float) -> float:
     return float(1.0 - math.exp(-w / 3.0))
 
 
-# ------------------------------------------------------------------
+# ------------            -- ------------------------------------------------------
 # Global priors (UNCHANGED)
-# ------------------------------------------------------------------
+# ------------            -- ------------------------------------------------------
 
 def _ensure_model_stats():
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS model_stats (
@@ -70,9 +72,9 @@ def get_global_prior(symbol: str, horizon_s: int) -> Tuple[float, int]:
         con.close()
 
 
-# ------------------------------------------------------------------
+# ------------            -- ------------------------------------------------------
 # OPTION 5 — Learned relevance from real outcomes (NEW, SAFE)
-# ------------------------------------------------------------------
+# ------------            -- ------------------------------------------------------
 
 def learn_relevance_stats(
     abs_z_threshold: float = 0.5,

@@ -11,7 +11,6 @@ from dev_core.storage import connect
 _LOOKBACK = 240   # samples
 _ZWIN = 120       # samples for zscore window
 
-
 def _load_prices(con, symbol: str, ts_ms: int, n: int) -> List[Tuple[int, float]]:
     rows = con.execute(
         """
@@ -67,7 +66,6 @@ def _ratio(a: float, b: float) -> float:
     if not math.isfinite(r):
         return 0.0
     return float(r)
-
 
 def get_market_stress_snapshot(con=None, ts_ms: Optional[int] = None) -> Dict[str, float]:
     """
@@ -130,12 +128,36 @@ def get_market_stress_snapshot(con=None, ts_ms: Optional[int] = None) -> Dict[st
         z_vvix = _zscore_last(vvix, _ZWIN)
         z_move = _zscore_last(move, _ZWIN)
 
-        z_ts_1d = _zscore_last(np.asarray([_ratio(_safe_last(load("VIX1D")[:i+1]), _safe_last(load("VIX")[:i+1])) for i in range(min(_LOOKBACK, max(1, vix.size)))] ,dtype=float), min(_ZWIN, max(20, vix.size)))
-        z_ts_9d = _zscore_last(np.asarray([_ratio(_safe_last(load("VIX9D")[:i+1]), _safe_last(load("VIX")[:i+1])) for i in range(min(_LOOKBACK, max(1, vix.size)))] ,dtype=float), min(_ZWIN, max(20, vix.size)))
-        z_ts_3m = _zscore_last(np.asarray([_ratio(_safe_last(load("VIX3M")[:i+1]), _safe_last(load("VIX")[:i+1])) for i in range(min(_LOOKBACK, max(1, vix.size)))] ,dtype=float), min(_ZWIN, max(20, vix.size)))
+        # ---- term structure z-scores (vectorized, no extra DB reads)
+        n_vix = int(min(vix.size, vix1d.size, vix9d.size, vix3m.size))
+        if n_vix >= 20:
+            v = np.maximum(vix[-n_vix:], 1e-12)
+            ts1 = np.asarray([_ratio(float(vix1d[-n_vix + i]), float(v[i])) for i in range(n_vix)], dtype=float)
+            ts9 = np.asarray([_ratio(float(vix9d[-n_vix + i]), float(v[i])) for i in range(n_vix)], dtype=float)
+            ts3 = np.asarray([_ratio(float(vix3m[-n_vix + i]), float(v[i])) for i in range(n_vix)], dtype=float)
 
-        z_credit = _zscore_last(np.asarray([_ratio(_safe_last(lqd[:i+1]), _safe_last(hyg[:i+1])) for i in range(min(_LOOKBACK, max(1, hyg.size)))] ,dtype=float), min(_ZWIN, max(20, hyg.size)))
-        z_rates = _zscore_last(np.asarray([_ratio(_safe_last(tlt[:i+1]), _safe_last(shy[:i+1])) for i in range(min(_LOOKBACK, max(1, shy.size)))] ,dtype=float), min(_ZWIN, max(20, shy.size)))
+            z_ts_1d = _zscore_last(ts1, min(_ZWIN, ts1.size))
+            z_ts_9d = _zscore_last(ts9, min(_ZWIN, ts9.size))
+            z_ts_3m = _zscore_last(ts3, min(_ZWIN, ts3.size))
+        else:
+            z_ts_1d = 0.0
+            z_ts_9d = 0.0
+            z_ts_3m = 0.0
+
+        # ---- credit + rates z-scores (vectorized, aligned lengths)
+        n_credit = int(min(hyg.size, lqd.size))
+        if n_credit >= 20:
+            cr = np.asarray([_ratio(float(lqd[-n_credit + i]), float(hyg[-n_credit + i])) for i in range(n_credit)], dtype=float)
+            z_credit = _zscore_last(cr, min(_ZWIN, cr.size))
+        else:
+            z_credit = 0.0
+
+        n_rates = int(min(tlt.size, shy.size))
+        if n_rates >= 20:
+            rr = np.asarray([_ratio(float(tlt[-n_rates + i]), float(shy[-n_rates + i])) for i in range(n_rates)], dtype=float)
+            z_rates = _zscore_last(rr, min(_ZWIN, rr.size))
+        else:
+            z_rates = 0.0
 
         # ---- unified stress score (0..1)
         # Weights chosen to emphasize volatility + cross-asset confirmation.
@@ -159,8 +181,8 @@ def get_market_stress_snapshot(con=None, ts_ms: Optional[int] = None) -> Dict[st
         # squash into 0..1
         score = 1.0 / (1.0 + math.exp(-float(raw) / 2.0)) if math.isfinite(raw) else 0.5
 
-        return {
-            "ts_ms": float(ts_ms),
+        out = {
+            "ts_ms": int(ts_ms),
 
             "vix": float(vix_last),
             "vvix": float(vvix_last),
@@ -182,9 +204,26 @@ def get_market_stress_snapshot(con=None, ts_ms: Optional[int] = None) -> Dict[st
 
             "stress_score": float(max(0.0, min(1.0, score))),
         }
+
+        # Optional: macro narrative stress from GDELT (best-effort, no failures)
+        try:
+            from dev_core.gdelt_macro import get_gdelt_macro_snapshot
+            gm = get_gdelt_macro_snapshot(ts_ms=int(ts_ms or int(time.time() * 1000))) or {}
+            if gm:
+                out["z_gdelt_doc"] = float(gm.get("z_doc_count", 0.0))
+                out["z_gdelt_tone"] = float(gm.get("z_tone_mean", 0.0))
+                out["z_gdelt_conflict"] = float(gm.get("z_conflict_share", 0.0))
+                # Conservative bump: only conflict increases stress; tone is ambiguous
+                out["stress_score"] = float(out["stress_score"]) + max(0.0, float(out["z_gdelt_conflict"]))
+        except Exception:
+            pass
+
+        return out
+
     finally:
         if owns:
             try:
                 con.close()
             except Exception:
                 pass
+

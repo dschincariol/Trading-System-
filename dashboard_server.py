@@ -7,7 +7,7 @@ UI:
 
 APIs:
   /api/jobs
-    /api/embed_model_eval              
+  /api/embed_model_eval              
   /api/embed_conf_calib
   /api/jobs/start?name=<job>
   /api/jobs/stop?name=<job>
@@ -26,7 +26,11 @@ import subprocess
 import sys
 import threading
 import time
-import math
+
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+from collections import deque
+from typing import Deque, Dict, Optional
 
 # Ensure static UI paths resolve even when launched from another working directory
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -34,11 +38,6 @@ try:
     os.chdir(_BASE_DIR)
 except Exception:
     pass
-
-from collections import deque
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-from typing import Deque, Dict, Optional
-from urllib.parse import parse_qs, urlparse
 
 # SINGLE SOURCE OF TRUTH FOR SQLITE
 from dev_core.storage import connect as _db_connect
@@ -108,6 +107,9 @@ ALLOWED_JOBS = {
     # Portfolio + execution
     "portfolio_rebalance": ("portfolio_rebalance.py", "oneshot"),
     "broker_apply_orders": ("broker_apply_orders.py", "oneshot"),
+
+    # Production preflight (compile + schema + smoke)
+    "prod_preflight": ("prod_preflight.py", "oneshot"),
 }
 
 PIPELINE_ORDER = [
@@ -153,11 +155,9 @@ JOB_ORDER = [
     "backtest_walk_forward",
 ]
 
-_HEALTH_OK_STREAK = 0
-
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # CONFIG (auto-restart guards)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 AUTO_RESTART_DAEMONS = os.environ.get("AUTO_RESTART_DAEMONS", "1") == "1"
 DAEMON_RESTART_BASE_DELAY_MS = int(os.environ.get("DAEMON_RESTART_BASE_DELAY_MS", "2000"))
 DAEMON_RESTART_MAX_DELAY_MS = int(os.environ.get("DAEMON_RESTART_MAX_DELAY_MS", "30000"))
@@ -166,24 +166,24 @@ DAEMON_RESTART_MAX_IN_WINDOW = int(os.environ.get("DAEMON_RESTART_MAX_IN_WINDOW"
 DAEMON_WATCHDOG_PERIOD_S = float(os.environ.get("DAEMON_WATCHDOG_PERIOD_S", "1.0"))
 AUTO_RECALIBRATE = os.environ.get("AUTO_RECALIBRATE", "1") == "1"
 AUTO_RECALIBRATE_INTERVAL_S = 86400  # daily
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # Phase 5.2: AUTO SIZE POLICY (NEW)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 AUTO_SIZE_POLICY = os.environ.get("AUTO_SIZE_POLICY", "0") == "1"
 AUTO_SIZE_POLICY_INTERVAL_S = float(os.environ.get("AUTO_SIZE_POLICY_INTERVAL_S", "86400"))  # daily
 AUTO_SIZE_POLICY_START_DELAY_S = float(os.environ.get("AUTO_SIZE_POLICY_START_DELAY_S", "20.0"))
 AUTO_SIZE_POLICY_LOG = os.environ.get("AUTO_SIZE_POLICY_LOG", "1") == "1"
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # A.1 AUTO PIPELINE SCHEDULER (NEW)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 AUTO_PIPELINE = os.environ.get("AUTO_PIPELINE", "0") == "1"
 AUTO_PIPELINE_INTERVAL_S = float(os.environ.get("AUTO_PIPELINE_INTERVAL_S", "300"))  # 5 min
 AUTO_PIPELINE_START_DELAY_S = float(os.environ.get("AUTO_PIPELINE_START_DELAY_S", "2.0"))
 AUTO_PIPELINE_LOG = os.environ.get("AUTO_PIPELINE_LOG", "1") == "1"
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # PHASE 3: AUTO CHALLENGER LOOP (NEW)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 AUTO_CHALLENGER = os.environ.get("AUTO_CHALLENGER", "0") == "1"
 AUTO_CHALLENGER_INTERVAL_S = float(os.environ.get("AUTO_CHALLENGER_INTERVAL_S", "3600"))  # 1h
 AUTO_CHALLENGER_START_DELAY_S = float(os.environ.get("AUTO_CHALLENGER_START_DELAY_S", "10.0"))
@@ -206,16 +206,16 @@ HEALTH_JOBS_MAX_STALE_S = float(os.environ.get("HEALTH_JOBS_MAX_STALE_S", "180")
 HEALTH_MIN_LABELS = int(os.environ.get("HEALTH_MIN_LABELS", "10"))
 HEALTH_MIN_MODEL_SUPPORT = int(os.environ.get("HEALTH_MIN_MODEL_SUPPORT", "10"))
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # TRAINING AUTO-RESUME POLICY (SAFE, EXPLICIT)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 TRAINING_RESUME_MIN_OK_STREAK = int(
     os.environ.get("TRAINING_RESUME_MIN_OK_STREAK", "5")
 )
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # PREFLIGHT (safe startup checklist)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 PREFLIGHT_ENABLE = os.environ.get("PREFLIGHT_ENABLE", "1") == "1"
 PREFLIGHT_BLOCK_JOBS = os.environ.get("PREFLIGHT_BLOCK_JOBS", "1") == "1"
 PREFLIGHT_PRICES_MAX_AGE_S = float(os.environ.get("PREFLIGHT_PRICES_MAX_AGE_S", "300"))
@@ -240,7 +240,8 @@ PREFLIGHT_REQUIRED_TABLES = [
 
 _PREFLIGHT_CACHE = {"ok": True, "notes": [], "tables_ok": True, "health_ok": True, "ts_ms": 0}
 
-def _preflight_check_tables() -> (bool, str):
+def _preflight_check_tables() -> tuple[bool, str]:
+
     try:
         con = _db_connect()
         try:
@@ -351,9 +352,9 @@ def run_preflight() -> Dict:
 def preflight_cached() -> Dict:
     return dict(_PREFLIGHT_CACHE or {})
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # CRIT notifications (email / webhook)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 EQ_CRIT_EMAIL_TO = os.environ.get("EQ_CRIT_EMAIL_TO", "")   # comma-separated
 EQ_CRIT_EMAIL_FROM = os.environ.get("EQ_CRIT_EMAIL_FROM", "alerts@localhost")
 EQ_CRIT_SMTP_HOST = os.environ.get("EQ_CRIT_SMTP_HOST", "")
@@ -362,9 +363,9 @@ EQ_CRIT_SMTP_PORT = int(os.environ.get("EQ_CRIT_SMTP_PORT", "25"))
 EQ_CRIT_WEBHOOK_URL = os.environ.get("EQ_CRIT_WEBHOOK_URL", "")
 EQ_CRIT_WEBHOOK_TIMEOUT_S = float(os.environ.get("EQ_CRIT_WEBHOOK_TIMEOUT_S", "4.0"))
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # Broker ↔ Backtest equity reconciliation thresholds (NEW)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 EQ_DIFF_WARN_PCT = float(os.environ.get("EQ_DIFF_WARN_PCT", "0.01"))   # 1%
 EQ_DIFF_CRIT_PCT = float(os.environ.get("EQ_DIFF_CRIT_PCT", "0.03"))   # 3%
 EQ_DIFF_WARN_ABS = float(os.environ.get("EQ_DIFF_WARN_ABS", "50"))
@@ -384,9 +385,9 @@ EQ_DRIFT_SUSTAINED_MIN_CRIT = int(os.environ.get("EQ_DRIFT_SUSTAINED_MIN_CRIT", 
 # Job history retention
 JOB_HISTORY_MAX_ROWS = int(os.environ.get("JOB_HISTORY_MAX_ROWS", "5000"))
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # RELEVANCE STATS CONFIG (NEW)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 ENABLE_RELEVANCE_STATS = os.environ.get("ENABLE_RELEVANCE_STATS", "1") == "1"
 RELEVANCE_STATS_CACHE_TTL_S = int(os.environ.get("RELEVANCE_STATS_CACHE_TTL_S", "60"))
@@ -407,25 +408,28 @@ def _ensure_equity_drift():
     finally:
         con.close()
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # SQLITE-BASED JOB LOCKS (cross-process safe)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def _ensure_job_locks():
     """
     Cross-process job locks + heartbeats.
 
-    This file historically used a simplified schema (key/owner/expires_ms). Newer code expects:
-      - job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms (+ optional expires_ms)
+    Legacy schema used:
+      job_locks(key TEXT PRIMARY KEY, owner TEXT, expires_ms INTEGER)
 
-    This function is SAFE to call repeatedly:
+    Current schema uses:
+      job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms (+ optional expires_ms)
+
+    Safe to call repeatedly:
       - creates table if missing
       - migrates legacy schema if detected
       - adds missing columns via ALTER TABLE (best-effort)
     """
     con = _db_connect()
     try:
-        # Detect existing schema
+        # Detect existing schema (if table missing PRAGMA returns [])
         try:
             cols = [r[1] for r in con.execute("PRAGMA table_info(job_locks)").fetchall()]
         except Exception:
@@ -435,37 +439,13 @@ def _ensure_job_locks():
 
         if has_legacy_key:
             # Migrate legacy schema -> new schema
-            con.execute("ALTER TABLE job_locks RENAME TO job_locks_legacy")
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS job_locks (
-                  job_name TEXT PRIMARY KEY,
-                  owner TEXT NOT NULL,
-                  pid INTEGER NOT NULL,
-                  acquired_ts_ms INTEGER NOT NULL,
-                  heartbeat_ts_ms INTEGER NOT NULL,
-                  expires_ms INTEGER
-                )
-                """
-            )
-            now = int(time.time() * 1000)
-            # Copy legacy rows as best-effort (pid unknown -> 0)
             try:
-                legacy_rows = con.execute("SELECT key, owner, expires_ms FROM job_locks_legacy").fetchall()
+                con.execute("ALTER TABLE job_locks RENAME TO job_locks_legacy")
             except Exception:
-                legacy_rows = []
-            for k, owner, exp in legacy_rows or []:
-                con.execute(
-                    """
-                    INSERT OR IGNORE INTO job_locks
-                    (job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms, expires_ms)
-                    VALUES (?,?,?,?,?,?)
-                    """,
-                    (str(k), str(owner), 0, int(now), int(now), int(exp) if exp is not None else None),
-                )
-            con.commit()
+                pass
+            cols = []
 
-        # Ensure new schema exists (if table missing)
+        # Ensure base table exists
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS job_locks (
@@ -479,13 +459,40 @@ def _ensure_job_locks():
             """
         )
 
+        # Copy legacy rows best-effort (pid unknown -> 0, acquired/heartbeat -> now)
+        if has_legacy_key:
+            now = int(time.time() * 1000)
+            try:
+                legacy_rows = con.execute(
+                    "SELECT key, owner, expires_ms FROM job_locks_legacy"
+                ).fetchall()
+            except Exception:
+                legacy_rows = []
+
+            for k, owner, exp in legacy_rows or []:
+                con.execute(
+                    """
+                    INSERT OR REPLACE INTO job_locks
+                    (job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms, expires_ms)
+                    VALUES (?,?,?,?,?,?)
+                    """,
+                    (
+                        str(k),
+                        str(owner or ""),
+                        0,
+                        int(now),
+                        int(now),
+                        int(exp) if exp is not None else None,
+                    ),
+                )
+
         # Add missing columns (idempotent best-effort)
         try:
             cols = [r[1] for r in con.execute("PRAGMA table_info(job_locks)").fetchall()]
         except Exception:
             cols = []
 
-        def _add(col, ddl):
+        def _add(col: str, ddl: str) -> None:
             if col in cols:
                 return
             try:
@@ -505,85 +512,100 @@ def _ensure_job_locks():
         con.close()
 
 
-def _acquire_lock(job_name: str, ttl_ms: int = 15 * 60 * 1000) -> bool:
-    """
-    Cross-process lock using job_locks table (schema created by _ensure_job_locks()).
-    """
-    _ensure_job_locks()
-    now = int(time.time() * 1000)
-    owner = f"{os.getpid()}:{threading.get_ident()}"
-    pid = int(os.getpid())
-    exp = now + int(ttl_ms)
-
+def _acquire_lock(name: str, ttl_ms: int = 10_000) -> bool:
+    """Acquire a best-effort cross-process lock with TTL."""
     con = _db_connect()
     try:
-        con.execute("DELETE FROM job_locks WHERE expires_ms < ?", (now,))
+        now = int(time.time() * 1000)
+        exp = int(now + int(ttl_ms))
+
         row = con.execute(
-            "SELECT owner, expires_ms FROM job_locks WHERE job_name=?",
-            (str(job_name),),
+            "SELECT owner, pid, expires_ms FROM job_locks WHERE job_name=?",
+            (str(name),),
         ).fetchone()
+
         if row:
-            return False
+            try:
+                cur_exp = int(row[2] or 0)
+            except Exception:
+                cur_exp = 0
+            # lock still valid
+            if cur_exp > now:
+                return False
 
         con.execute(
             """
-            INSERT INTO job_locks(job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms, expires_ms)
+            INSERT OR REPLACE INTO job_locks
+              (job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms, expires_ms)
             VALUES (?,?,?,?,?,?)
             """,
-            (str(job_name), str(owner), int(pid), int(now), int(now), int(exp)),
+            (str(name), str(os.getpid()), int(os.getpid()), int(now), int(now), int(exp)),
         )
         con.commit()
         return True
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
     finally:
         con.close()
 
 
-def _touch_lock(job_name: str, ttl_ms: int = 15 * 60 * 1000) -> None:
-    """
-    Refresh heartbeat + extend expiry for an existing lock row.
-    Safe no-op if row doesn't exist.
-    """
-    _ensure_job_locks()
-    now = int(time.time() * 1000)
-    exp = now + int(ttl_ms)
-
+def _touch_lock(name: str, ttl_ms: int = 10_000) -> None:
+    """Extend TTL of an existing lock (best-effort)."""
     con = _db_connect()
     try:
+        now = int(time.time() * 1000)
+        exp = int(now + int(ttl_ms))
         con.execute(
-            """
-            UPDATE job_locks
-            SET heartbeat_ts_ms=?, expires_ms=?
-            WHERE job_name=?
-            """,
-            (int(now), int(exp), str(job_name)),
+            "UPDATE job_locks SET expires_ms=? WHERE job_name=?",
+            (int(exp), str(name)),
         )
         con.commit()
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
     finally:
         con.close()
 
-def _heartbeat_lock(job_name: str) -> None:
-    """
-    Refresh heartbeat_ts_ms (+ expires_ms if present).
-    Safe to call even if lock is not held.
-    """
+
+def _heartbeat_lock(job_name: str, ttl_ms: int = 60_000) -> None:
+    """Heartbeat a held lock (best-effort)."""
+    _touch_lock(job_name, ttl_ms=ttl_ms)
+
     _ensure_job_locks()
     now = int(time.time() * 1000)
     owner = f"{os.getpid()}:{threading.get_ident()}"
     pid = int(os.getpid())
+
     con = _db_connect()
     try:
+        # Prefer newer schema if present
         try:
+            cols = [r[1] for r in con.execute("PRAGMA table_info(job_locks)").fetchall() or []]
+        except Exception:
+            cols = []
+
+        if "heartbeat_ts_ms" in cols:
             con.execute(
                 "UPDATE job_locks SET heartbeat_ts_ms=?, owner=?, pid=? WHERE job_name=?",
                 (int(now), str(owner), int(pid), str(job_name)),
             )
-        except Exception:
-            pass
+        else:
+            # Fallback: touch acquired_ts_ms
+            if "acquired_ts_ms" in cols:
+                con.execute(
+                    "UPDATE job_locks SET acquired_ts_ms=?, owner=?, pid=? WHERE job_name=?",
+                    (int(now), str(owner), int(pid), str(job_name)),
+                )
 
         con.commit()
     finally:
         con.close()
-
 def _release_lock(job_name: str) -> None:
     _ensure_job_locks()
     con = _db_connect()
@@ -593,9 +615,9 @@ def _release_lock(job_name: str) -> None:
     finally:
         con.close()
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # RELEVANCE STATS CACHE + TIMEOUT (NEW)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 _relevance_cache = {
     "ts": 0.0,
@@ -628,9 +650,9 @@ def _compute_relevance_stats_with_timeout(timeout_s: float):
 
     return result.get("value")
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # ALERT ACKS + RESOLVED (Slack Resolve)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def _ensure_alert_acks():
     con = _db_connect()
@@ -720,9 +742,9 @@ def _is_alert_resolved(alert_id: int) -> bool:
     finally:
         con.close()
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # JOB HISTORY (server-side persistence)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def _ensure_job_history():
     con = _db_connect()
@@ -739,77 +761,89 @@ def _ensure_job_history():
             )
             """
         )
-        con.execute("CREATE INDEX IF NOT EXISTS idx_job_history_ts ON job_history(ts_ms)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_job_history_job ON job_history(job_name, ts_ms)")
-        con.commit()
-    finally:
-        con.close()
-
-
-def _write_job_history(job_name: str, event: str, detail: str = "", exit_code: Optional[int] = None) -> None:
-    _ensure_job_history()
-    con = _db_connect()
-    try:
         con.execute(
-            "INSERT INTO job_history(ts_ms, job_name, event, detail, exit_code) VALUES(?,?,?,?,?)",
-            (int(time.time() * 1000), str(job_name), str(event), str(detail or ""), int(exit_code) if exit_code is not None else None),
+            """
+            CREATE INDEX IF NOT EXISTS idx_job_history_job_ts
+              ON job_history(job_name, ts_ms)
+            """
         )
-        # prune
+        con.commit()
+    finally:
+        con.close()
+
+def _write_job_history(
+    job_name: str,
+    event: str,
+    detail: str = "",
+    exit_code: int = None,
+    ts_ms: int = None,
+) -> None:
+    """Append a compact job history row (best-effort)."""
+    try:
+        _ensure_job_history()
+    except Exception:
+        pass
+
+    con = _db_connect()
+    try:
+        now = int(ts_ms or (time.time() * 1000))
+        con.execute(
+            """
+            INSERT INTO job_history(ts_ms, job_name, event, detail, exit_code)
+            VALUES (?,?,?,?,?)
+            """,
+            (
+                int(now),
+                str(job_name or ""),
+                str(event or ""),
+                str(detail or ""),
+                (int(exit_code) if exit_code is not None else None),
+            ),
+        )
+
+        # Best-effort pruning (keep latest N rows total)
         try:
-            row = con.execute("SELECT COUNT(*) FROM job_history").fetchone()
-            n = int(row[0] or 0)
-            if n > JOB_HISTORY_MAX_ROWS:
-                # delete oldest rows beyond retention
-                del_n = n - JOB_HISTORY_MAX_ROWS
-                con.execute(
-                    """
-                    DELETE FROM job_history
-                    WHERE id IN (
-                      SELECT id FROM job_history
-                      ORDER BY ts_ms ASC
-                      LIMIT ?
-                    )
-                    """,
-                    (int(del_n),),
-                )
+            max_rows = int(os.environ.get("JOB_HISTORY_MAX_ROWS", "20000"))
         except Exception:
-            pass
+            max_rows = 20000
+
+        if max_rows > 0:
+            con.execute(
+                "DELETE FROM job_history WHERE id NOT IN (SELECT id FROM job_history ORDER BY ts_ms DESC LIMIT ?)",
+                (int(max_rows),),
+            )
+
         con.commit()
     finally:
         con.close()
 
 
-def _read_job_history(job_name: str = "", limit: int = 200):
+def _read_job_history(job_name: str, limit: int = 200) -> list:
+    """Read recent job history rows for a job."""
     _ensure_job_history()
-    limit = max(1, min(5000, int(limit)))
     con = _db_connect()
     try:
-        if job_name:
-            rows = con.execute(
-                """
-                SELECT ts_ms, job_name, event, detail, exit_code
-                FROM job_history
-                WHERE job_name = ?
-                ORDER BY ts_ms DESC
-                LIMIT ?
-                """,
-                (str(job_name), int(limit)),
-            ).fetchall()
-        else:
-            rows = con.execute(
-                """
-                SELECT ts_ms, job_name, event, detail, exit_code
-                FROM job_history
-                ORDER BY ts_ms DESC
-                LIMIT ?
-                """,
-                (int(limit),),
-            ).fetchall()
-
-        return [
-            {"ts_ms": r[0], "job_name": r[1], "event": r[2], "detail": r[3], "exit_code": r[4]}
-            for r in rows
-        ]
+        rows = con.execute(
+            """
+            SELECT ts_ms, event, detail, exit_code
+            FROM job_history
+            WHERE job_name=?
+            ORDER BY ts_ms DESC
+            LIMIT ?
+            """,
+            (str(job_name or ""), int(limit)),
+        ).fetchall()
+        out = []
+        for ts_ms, event, detail, exit_code in rows or []:
+            out.append(
+                {
+                    "ts_ms": int(ts_ms or 0),
+                    "event": str(event or ""),
+                    "detail": str(detail or ""),
+                    "exit_code": (int(exit_code) if exit_code is not None else None),
+                }
+            )
+        return out
     finally:
         con.close()
 
@@ -852,9 +886,9 @@ def _read_kill_switch_audit(limit: int = 200):
     return out
 
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # JOB STATE
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 class JobState:
     def __init__(self, name: str, script: str, mode: str):
@@ -903,9 +937,25 @@ class JobState:
             return "\n".join(list(self.log)[-n:])
 
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # JOB MANAGER
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
+def api_get_embed_model_eval(parsed):
+    return {"ok": False, "error": "not_implemented"}
+
+def api_get_embed_conf_calib(parsed):
+    return {"ok": False, "error": "not_implemented"}
+
+def api_get_jobs(parsed):
+    return {"ok": True, "jobs": JOBS.list_jobs()}
+
+def api_post_job_start(_parsed, body):
+    name = body.get("name")
+    return JOBS.start(name)
+
+def api_post_job_stop(_parsed, body):
+    name = body.get("name")
+    return JOBS.stop(name)
 
 class JobManager:
     def __init__(self):
@@ -1117,9 +1167,9 @@ class JobManager:
             if job.mode == "oneshot":
                 _release_lock(f"job:{job.name}")
 
-    # -------------------------------------------------------------------
+    # -------------            -- ------------------------------------------------------
     # DAEMON WATCHDOG (auto-restart guards)
-    # -------------------------------------------------------------------
+    # -------------            -- ------------------------------------------------------
     def _daemon_watchdog_loop(self):
         while True:
             try:
@@ -1214,9 +1264,9 @@ class JobManager:
 
 JOBS = JobManager()
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # SERVER LIFECYCLE (status + graceful shutdown)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 SERVER_SHUTDOWN_TOKEN = os.environ.get("SERVER_SHUTDOWN_TOKEN", "").strip()
 
 # Optional API token for any mutating endpoints (start/stop jobs, pipeline run, training mode, etc).
@@ -1232,9 +1282,9 @@ port = int(os.environ.get("DASHBOARD_PORT", "8000"))
 
 _HTTPD = None  # set in run_server()
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # PIPELINE
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def run_pipeline():
     if not _acquire_lock("pipeline", ttl_ms=20 * 60 * 1000):
@@ -1278,9 +1328,12 @@ def run_pipeline():
     finally:
         _release_lock("pipeline")
 
-# -------------------------------------------------------------------
+def api_post_pipeline_run(_parsed, _body):
+    return run_pipeline()
+
+# -------------            -- ------------------------------------------------------
 # A.1 AUTO PIPELINE LOOP (NEW)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def _is_job_running(name: str) -> bool:
     """
@@ -1393,9 +1446,9 @@ def _auto_challenger_loop():
         except Exception:
             time.sleep(3600.0)
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # RELEVANCE STATS (NEW)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def get_relevance_stats():
     """
@@ -1442,9 +1495,9 @@ def get_relevance_stats():
             "error": str(e),
         }
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # EXECUTION-AWARE CONFIDENCE CALIBRATION (NEW)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def get_exec_conf_calib():
     """
@@ -1458,10 +1511,10 @@ def get_exec_conf_calib():
         return {"ok": False, "error": str(e)}
 
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # DIAGNOSTICS / METRICS
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def rollback_champion():
     try:
@@ -1492,6 +1545,8 @@ def rollback_champion():
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+def api_post_rollback(_parsed, _body):
+    return rollback_champion()
 
 def get_promotion_status():
     try:
@@ -1601,6 +1656,7 @@ def get_health_snapshot():
     NEW additive:
       out["_details"] contains explanation strings and thresholds.
     """
+
     con = _db_connect()
     try:
         out = {}
@@ -1781,9 +1837,9 @@ def get_health_snapshot():
                 "allowed": False,
             }
 
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         # AUTO-PAUSE TRAINING ON CRIT HEALTH
-        # ------------------------------------------------------------
+        # ------            -- ------------------------------------------------------
         try:
             # define CRIT as any core subsystem failing
             core_ok = (
@@ -1825,6 +1881,8 @@ def get_health_snapshot():
     finally:
         con.close()
 
+def api_get_health(_parsed):
+    return get_health_snapshot()
 
 def get_model_diagnostics():
     con = _db_connect()
@@ -1890,6 +1948,9 @@ def get_model_diagnostics():
         return out
     finally:
         con.close()
+
+def api_get_model_diagnostics(_parsed):
+    return {"ok": True, "data": get_model_diagnostics()}
 
 def _normalize_explain_json(val) -> str:
     """
@@ -2346,9 +2407,9 @@ def get_latest_portfolio_backtest():
         }
     finally:
         con.close()
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # EXECUTION METRICS (PATCH 24)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def get_execution_metrics():
     """
@@ -2534,7 +2595,213 @@ def get_execution_cost_by_confidence():
     finally:
         con.close()
 
+def _table_exists(con, name: str) -> bool:
+    try:
+        row = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (str(name),),
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def get_social_features(symbol: str, limit: int = 200):
+    """
+    Read-only: recent social feature buckets for a symbol.
+    Returns [] if table missing or query fails.
+    """
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return {"ok": True, "rows": []}
+
+    limit = max(1, min(5000, int(limit or 200)))
+
+    con = _db_connect()
+    try:
+        if not _table_exists(con, "social_features"):
+            return {"ok": True, "rows": []}
+
+        try:
+            rows = con.execute(
+                """
+                SELECT
+                  bucket_ts_ms,
+                  bucket_sec,
+
+                  mention_count,
+                  unique_authors,
+                  new_author_ratio,
+                  engagement_now,
+
+                  sentiment_mean,
+                  sentiment_dispersion,
+
+                  mention_rate_z,
+                  bot_likelihood_mean,
+                  promo_likelihood_mean,
+                  manip_risk,
+                  attention_shock,
+
+                  cross_platform_confirm
+                FROM social_features
+                WHERE symbol = ?
+                ORDER BY bucket_ts_ms DESC
+                LIMIT ?
+                """,
+                (sym, int(limit)),
+            ).fetchall()
+        except Exception:
+            rows = []
+
+        out = []
+        for r in rows or []:
+            try:
+                out.append({
+                    "bucket_ts_ms": int(r[0] or 0),
+                    "bucket_sec": int(r[1] or 0),
+
+                    "mention_count": int(r[2] or 0),
+                    "unique_authors": int(r[3] or 0),
+                    "new_author_ratio": float(r[4] or 0.0),
+                    "engagement_now": float(r[5] or 0.0),
+
+                    "sentiment_mean": float(r[6] or 0.0),
+                    "sentiment_dispersion": float(r[7] or 0.0),
+
+                    "mention_rate_z": float(r[8] or 0.0),
+                    "bot_likelihood_mean": float(r[9] or 0.0),
+                    "promo_likelihood_mean": float(r[10] or 0.0),
+                    "manip_risk": float(r[11] or 0.0),
+                    "attention_shock": float(r[12] or 0.0),
+
+                    "cross_platform_confirm": float(r[13] or 0.0),
+                })
+            except Exception:
+                continue
+
+        return {"ok": True, "symbol": sym, "rows": out}
+    finally:
+        con.close()
+
+
+def get_social_regimes(symbol: str, limit: int = 200):
+    """
+    Read-only: regime timeline for a symbol.
+    Returns [] if table missing or query fails.
+    """
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return {"ok": True, "rows": []}
+
+    limit = max(1, min(5000, int(limit or 200)))
+
+    con = _db_connect()
+    try:
+        if not _table_exists(con, "social_regimes"):
+            return {"ok": True, "rows": []}
+
+        try:
+            rows = con.execute(
+                """
+                SELECT
+                  bucket_ts_ms,
+                  bucket_sec,
+                  regime,
+                  regime_conf,
+                  features_json
+                FROM social_regimes
+                WHERE symbol = ?
+                ORDER BY bucket_ts_ms DESC
+                LIMIT ?
+                """,
+                (sym, int(limit)),
+            ).fetchall()
+        except Exception:
+            rows = []
+
+        out = []
+        for r in rows or []:
+            try:
+                out.append({
+                    "bucket_ts_ms": int(r[0] or 0),
+                    "bucket_sec": int(r[1] or 0),
+                    "regime": str(r[2] or ""),
+                    "regime_conf": float(r[3] or 0.0),
+                    "features": (json.loads(r[4]) if (r[4] or "").strip() else None),
+                })
+            except Exception:
+                continue
+
+        return {"ok": True, "symbol": sym, "rows": out}
+    finally:
+        con.close()
+
+
+def get_social_blocks(limit: int = 200):
+    """
+    Read-only: recent decisions that were blocked by a social gate.
+    Safe: returns [] if decision log table missing.
+    """
+    limit = max(1, min(2000, int(limit or 200)))
+
+    con = _db_connect()
+    try:
+        # Try common table names; return empty if none exist
+        table = None
+        for t in ("decision_log", "decisions", "trade_decisions"):
+            if _table_exists(con, t):
+                table = t
+                break
+
+        if not table:
+            return {"ok": True, "rows": []}
+
+        # We only attempt JSON filtering if SQLite JSON1 is available; otherwise fallback to last rows.
+        rows = []
+        try:
+            rows = con.execute(
+                f"""
+                SELECT ts_ms, symbol, reason_json
+                FROM {table}
+                WHERE json_extract(reason_json, '$.social_gate_block') = 1
+                ORDER BY ts_ms DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        except Exception:
+            try:
+                rows = con.execute(
+                    f"""
+                    SELECT ts_ms, symbol, reason_json
+                    FROM {table}
+                    ORDER BY ts_ms DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+            except Exception:
+                rows = []
+
+        out = []
+        for r in rows or []:
+            try:
+                out.append({
+                    "ts_ms": int(r[0] or 0),
+                    "symbol": str(r[1] or ""),
+                    "reason": (json.loads(r[2]) if (r[2] or "").strip() else {}),
+                })
+            except Exception:
+                continue
+
+        return {"ok": True, "table": table, "rows": out}
+    finally:
+        con.close()
+
+
 def get_confidence_mass():
+
 
     con = _db_connect()
     try:
@@ -2572,6 +2839,9 @@ def get_confidence_mass():
         }
     finally:
         con.close()
+
+def api_get_confidence_mass(_parsed):
+    return get_confidence_mass()
 
 def _format_slack_eq_crit(p: dict) -> bytes:
     bt = p.get("bt") or {}
@@ -2738,9 +3008,19 @@ def get_alerts():
     finally:
         con.close()
 
-# -------------------------------------------------------------------
+def api_get_alerts(_parsed):
+    return {"ok": True, "rows": get_alerts()}
+
+def api_get_validation(_parsed):
+    try:
+        from dev_core.validation import get_validation
+        return {"ok": True, "rows": get_validation()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# -------------            -- ------------------------------------------------------
 # SAFE VOICE / LLM EXPLAINER (THREAD + TIMEOUT)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 VOICE_ENABLED = os.environ.get("VOICE_ENABLED", "1") == "1"
 VOICE_TIMEOUT_S = float(os.environ.get("VOICE_TIMEOUT_S", "6.0"))
@@ -2776,9 +3056,9 @@ def _run_llm_explain_with_timeout(prompt: str, timeout_s: float) -> str:
 
     return str(result.get("text") or "")
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # HTTP HANDLER
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 def get_size_policy():
     con = _db_connect()
     try:
@@ -2848,9 +3128,9 @@ def get_size_policy():
     finally:
         con.close()
 
-
 def run_size_policy_job():
     if not _acquire_lock("train_size_policy", ttl_ms=30 * 60 * 1000):
+
         return {"ok": False, "error": "train_size_policy locked (already running?)"}
     try:
         return JOBS.start("train_size_policy")
@@ -2872,1516 +3152,166 @@ def _auto_size_policy_loop():
                 print("[auto_size_policy] ERROR:", str(e))
         time.sleep(max(300.0, float(AUTO_SIZE_POLICY_INTERVAL_S)))
 
-class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(
-            *args,
-            directory=os.path.join(os.getcwd(), "ui"),
-            **kwargs
-        )
+# ------------------------------
+# ROUTE SPECS (split into files)
+# ------------------------------
+from api_system import ROUTE_SPECS_SYSTEM
 
-    def do_GET(self):
-        # ------------------------------------------------------------
-        # STATIC UI COMPAT: allow both:
-        #   /dashboard.html  (served from ./ui via directory=...)
-        #   /ui/dashboard.html (legacy path used by your console + links)
-        # ------------------------------------------------------------
+from api_jobs import ROUTE_SPECS_JOBS
+
+from api_ops import ROUTE_SPECS_OPS
+
+
+ROUTE_SPECS = list(ROUTE_SPECS_SYSTEM) + list(ROUTE_SPECS_JOBS) + list(ROUTE_SPECS_OPS)
+
+# ------------------------------
+# API HANDLER BINDINGS
+# ------------------------------
+API_HANDLERS = {
+    # GET
+    "api_get_health": api_get_health,
+    "api_get_jobs": api_get_jobs,
+    "api_get_alerts": api_get_alerts,
+    "api_get_validation": api_get_validation,
+    "api_get_model_diagnostics": api_get_model_diagnostics,
+    "api_get_confidence_mass": api_get_confidence_mass,
+    "api_get_execution_metrics": get_execution_metrics,
+    "api_get_execution_metrics_rolling": get_execution_metrics_rolling,
+
+    # POST
+    "api_post_job_start": api_post_job_start,
+    "api_post_job_stop": api_post_job_stop,
+    "api_post_pipeline_run": api_post_pipeline_run,
+    "api_post_rollback": api_post_rollback,
+}
+
+class Handler(SimpleHTTPRequestHandler):
+
+    # ------------------------------
+    # API ROUTE TABLE (collapsed)
+    # ------------------------------
+    ROUTES = {(m, p): h for (m, p, h) in ROUTE_SPECS}
+
+    def _normalize_ui_legacy_path(self):
+        # Backward-compat: allow /dashboard.html and / -> /ui/dashboard.html
         try:
             parsed = urlparse(self.path)
-
-            # normalize /ui/* to /* so SimpleHTTPRequestHandler maps correctly
-            if parsed.path.startswith("/ui/"):
-                new_path = parsed.path[len("/ui"):]  # keep leading slash
-                if not new_path.startswith("/"):
-                    new_path = "/" + new_path
-                if parsed.query:
-                    new_path = new_path + "?" + parsed.query
-                self.path = new_path
+            if parsed.path in ("/", "/dashboard.html"):
+                self.path = "/ui/dashboard.html"
         except Exception:
             pass
 
-        return super().do_GET()
+    def _read_json_body(self):
+        try:
+            n = int(self.headers.get("Content-Length") or "0")
+        except Exception:
+            n = 0
+        if n <= 0:
+            return None
+        try:
+            raw = self.rfile.read(n)
+        except Exception:
+            return None
+        try:
+            return json.loads(raw.decode("utf-8", errors="replace") or "{}")
+        except Exception:
+            return None
 
-    def respond_json(self, obj, code=200):
-        data = json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        self.send_response(code)
+    def respond_json(self, obj, status=200):
+        try:
+            data = json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        except Exception:
+            data = b'{"ok":false,"error":"json_encode_failed"}'
+            status = 500
 
-        # CORS (optional; keep disabled by default)
-        origin = self.headers.get("Origin")
-        allow = os.environ.get("DASHBOARD_CORS_ORIGIN", "").strip()
-        if allow:
-            if allow == "*" or (origin and origin == allow):
-                self.send_header("Access-Control-Allow-Origin", "*" if allow == "*" else origin)
-                self.send_header("Vary", "Origin")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Token")
-                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-
-        self.send_header("Content-Type", "application/json")
+        self.send_response(int(status))
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
-
-    def _is_local_client(self) -> bool:
         try:
-            host = (self.client_address[0] or "")
+            self.wfile.write(data)
         except Exception:
-            host = ""
-        return host in ("127.0.0.1", "::1", "localhost")
+            pass
 
-    def _get_token(self) -> str:
-        # Header takes precedence
-        tok = (self.headers.get("X-API-Token") or "").strip()
-        if tok:
-            return tok
-        # Query fallback
+    def _is_localhost_client(self) -> bool:
         try:
-            q = parse_qs(urlparse(self.path).query)
-            return (q.get("token") or [""])[0].strip()
+            ip = str(self.client_address[0] or "")
+            return ip in ("127.0.0.1", "::1")
         except Exception:
-            return ""
+            return False
 
-    def _require_mutation_auth(self) -> Optional[dict]:
+    def _require_mutation_auth(self):
         """
-        For mutating endpoints:
-          - If DASHBOARD_API_TOKEN is set: require exact token match.
-          - Else: allow ONLY from localhost.
-        Returns error dict (to respond_json) or None if authorized.
+        Mutating endpoints:
+        - If DASHBOARD_API_TOKEN is set: require token for ALL clients.
+        - Else: allow only localhost.
         """
-        if DASHBOARD_API_TOKEN:
-            tok = self._get_token()
-            if tok != DASHBOARD_API_TOKEN:
-                return {"ok": False, "error": "unauthorized"}
+        token = (DASHBOARD_API_TOKEN or "").strip()
+        if token:
+            try:
+                hdr = (self.headers.get("X-API-Token") or "").strip()
+            except Exception:
+                hdr = ""
+            if hdr == token:
+                return None
+
+            try:
+                parsed = urlparse(self.path)
+                q = parse_qs(parsed.query)
+                qtok = (q.get("token") or [""])[0]
+            except Exception:
+                qtok = ""
+
+            if str(qtok).strip() == token:
+                return None
+
+            return {"ok": False, "error": "unauthorized"}
+
+        if self._is_localhost_client():
             return None
 
-        # No token configured -> localhost only
-        if not self._is_local_client():
-            return {"ok": False, "error": "unauthorized"}
-        return None
+        return {"ok": False, "error": "forbidden (localhost only)"}
 
-    def do_OPTIONS(self):
-        # Preflight for optional CORS
-        allow = os.environ.get("DASHBOARD_CORS_ORIGIN", "").strip()
-        if not allow:
-            return super().do_OPTIONS()
+    def _dispatch(self):
+        method = str(self.command or "").upper().strip()
+        self._normalize_ui_legacy_path()
 
-        self.send_response(204)
-        origin = self.headers.get("Origin")
-        if allow == "*" or (origin and origin == allow):
-            self.send_header("Access-Control-Allow-Origin", "*" if allow == "*" else origin)
-            self.send_header("Vary", "Origin")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Token")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.end_headers()
+        parsed = urlparse(self.path)
+        key = (method, parsed.path)
+        handler_name = self.ROUTES.get(key)
+        if not handler_name:
+            if method == "GET":
+                return super().do_GET()
+            return self.respond_json({"ok": False, "error": "unknown endpoint"}, 404)
 
-    def get_alert_by_id(self, alert_id):
+        fn = API_HANDLERS.get(handler_name)
+        if not fn:
+            return self.respond_json({"ok": False, "error": f"handler_missing:{handler_name}"}, 500)
+
+        # auth for POST/PUT/PATCH/DELETE
+        if method != "GET":
+            auth = self._require_mutation_auth()
+            if auth:
+                return self.respond_json(auth, 403)
+
         try:
-            alert_id = int(str(alert_id).strip())
-        except Exception:
-            return {"ok": False, "error": "invalid id"}
-
-        con = _db_connect()
-        try:
-            row = con.execute(
-                "SELECT id, ts_ms, severity, event_title, explain_json FROM alerts WHERE id = ?",
-                (int(alert_id),),
-            ).fetchone()
-
-            if not row:
-                return {"ok": False, "error": "not found"}
-            return {
-                "ok": True,
-                "alert": {
-                    "id": row[0],
-                    "ts_ms": row[1],
-                    "severity": row[2],
-                    "title": row[3],
-                    "explain_json": _normalize_explain_json(row[4]),
-                },
-            }
-        finally:
-            con.close()
-
-    def get_alert_timeline(self, limit):
-        con = _db_connect()
-        try:
-            rows = con.execute(
-                """
-                SELECT a.id, a.ts_ms, a.severity, a.event_title,
-
-                       ak.alert_id IS NOT NULL AS acked,
-                       ak.acked_by,
-
-                       ar.alert_id IS NOT NULL AS resolved,
-                       ar.reason
-
-                FROM alerts a
-                LEFT JOIN alert_acks ak ON ak.alert_id = a.id
-                LEFT JOIN alert_resolutions ar ON ar.alert_id = a.id
-                ORDER BY a.ts_ms DESC
-                LIMIT ?
-                """,
-                (int(limit),),
-            ).fetchall()
-
-            return [{
-                "id": r[0],
-                "ts_ms": r[1],
-                "severity": r[2],
-                "title": r[3],
-
-                "acked": bool(r[4]),
-                "acked_by": r[5],
-
-                "resolved": bool(r[6]),
-                "resolved_reason": r[7],
-
-            } for r in rows]
-        finally:
-            con.close()
-
-    def get_validation(self):
-        # dashboard expects a plain list of rows
-        try:
-            from dev_core.validation import init_validation_db, get_validation_scores
-            init_validation_db()
-            rows = get_validation_scores() or []
-        except Exception:
-            rows = []
-
-        out = []
-        for sym, h, mae, rmse, n, ts_ms in rows:
-            out.append({
-                "symbol": str(sym),
-                "horizon_s": int(h),
-                "mae": float(mae),
-                "rmse": float(rmse),
-                "n": int(n),
-                "ts_ms": int(ts_ms),
-            })
-        return out
-
-    def get_model_metrics(self, model_name="default"):
-        try:
-            from dev_core.validation import init_validation_db, get_model_metrics
-            init_validation_db()
-            rows = get_model_metrics(model_name=str(model_name or "default")) or []
-        except Exception:
-            rows = []
-
-        # keep payload small + dashboard-friendly
-        out = []
-        for r in rows:
-            m = (r.get("metrics") or {})
-            out.append({
-                "model_name": str(r.get("model_name") or model_name or "default"),
-                "symbol": str(r.get("symbol") or ""),
-                "horizon_s": int(r.get("horizon_s") or 0),
-                "n": int(r.get("n") or 0),
-                "ts_ms": int(r.get("ts_ms") or 0),
-                "r2": float(m.get("r2", 0.0) or 0.0),
-                "direction_acc": float(m.get("direction_acc", 0.0) or 0.0),
-                "ece": float(m.get("ece", 0.0) or 0.0),
-                "avg_conf": float(m.get("avg_conf", 0.0) or 0.0),
-                "abs_err_p50": float(m.get("abs_err_p50", 0.0) or 0.0),
-                "abs_err_p90": float(m.get("abs_err_p90", 0.0) or 0.0),
-            })
-        return out
-
-    def get_strategy_metrics(self):
-        con = _db_connect()
-        try:
-            rows = con.execute(
-                """
-                SELECT strategy_name, window_days, ts_ms, metrics_json
-                FROM strategy_metrics
-                ORDER BY ts_ms DESC
-                """
-            ).fetchall()
-        finally:
-            con.close()
-
-        out = []
-        for name, wd, ts, mj in rows:
-            try:
-                metrics = json.loads(mj or "{}")
-            except Exception:
-                metrics = {}
-            out.append({
-                "strategy_name": name,
-                "window_days": wd,
-                "ts_ms": ts,
-                **metrics,
-            })
-        return out
-
-    def get_strategy_status(self):
-        con = _db_connect()
-        try:
-            # active strategy + last switch
-            meta = dict(
-                con.execute(
-                    "SELECT key, value FROM portfolio_meta"
-                ).fetchall() or []
-            )
-
-            active = meta.get("last_strategy_name", "baseline")
-            last_ts = int(meta.get("last_strategy_switch_ts_ms", "0") or 0)
-
-            cooldown_s = int(os.environ.get("PORTFOLIO_STRATEGY_SWITCH_COOLDOWN_S", "3600"))
-            now = int(time.time() * 1000)
-            elapsed = max(0, (now - last_ts) // 1000)
-            remaining = max(0, cooldown_s - elapsed)
-
-            row = con.execute(
-                """
-                SELECT metrics_json, window_days
-                FROM strategy_metrics
-                WHERE strategy_name = ?
-                ORDER BY ts_ms DESC
-                LIMIT 1
-                """,
-                (active,),
-            ).fetchone()
-
-            metrics = {}
-            window_days = None
-            if row:
-                try:
-                    metrics = json.loads(row[0] or "{}")
-                    window_days = int(row[1])
-                except Exception:
-                    pass
-
-            return {
-                "active_strategy": active,
-                "last_switch_ts_ms": last_ts,
-                "cooldown_s": cooldown_s,
-                "cooldown_remaining_s": remaining,
-                "window_days": window_days,
-                "metrics": {
-                    "net_calmar": metrics.get("net_calmar"),
-                    "sharpe_simple": metrics.get("sharpe_simple"),
-                    "turnover_avg": metrics.get("turnover_avg"),
-                },
-            }
-        finally:
-            con.close()
+            if method == "GET":
+                return self.respond_json(fn(parsed))
+            body = self._read_json_body() or {}
+            return self.respond_json(fn(parsed, body))
+        except Exception as e:
+            return self.respond_json({"ok": False, "error": str(e)}, 500)
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-
-        # Mutating endpoints require auth (token or localhost-only)
-        mutating = {
-            "/api/jobs/start",
-            "/api/jobs/stop",
-            "/api/pipeline/run",
-            "/api/challenger/run",
-            "/api/size_policy/train",
-            "/api/champion/rollback",
-            "/api/promotion/enable",
-            "/api/server/shutdown",
-            "/api/voice/ask",
-
-        }
-        if parsed.path in mutating:
-            err = self._require_mutation_auth()
-            if err:
-                return self.respond_json(err, 403)
-
-        if parsed.path == "/api/jobs":
-            return self.respond_json({"jobs": JOBS.list_jobs()})
-
-        if parsed.path == "/api/jobs/start":
-            q = parse_qs(parsed.query)
-            name = (q.get("name") or [""])[0]
-            return self.respond_json(JOBS.start(name))
-
-        if parsed.path == "/api/jobs/stop":
-            q = parse_qs(parsed.query)
-            name = (q.get("name") or [""])[0]
-            return self.respond_json(JOBS.stop(name))
-
-        if parsed.path == "/api/jobs/log":
-            q = parse_qs(parsed.query)
-            name = (q.get("name") or [""])[0]
-            tail_s = (q.get("tail") or ["300"])[0]
-            try:
-                tail_n = max(1, min(5000, int(tail_s)))
-            except Exception:
-                tail_n = 300
-
-            job = JOBS.get(name)
-            if not job:
-                return self.respond_json({"ok": False, "error": f"unknown job: {name}"})
-            return self.respond_json({"ok": True, "name": name, "log": job.tail(tail_n)})
-
-        # NEW: server-side persisted job history
-        if parsed.path == "/api/jobs/history":
-            q = parse_qs(parsed.query)
-            name = (q.get("name") or [""])[0].strip()
-            limit_s = (q.get("limit") or ["200"])[0]
-            try:
-                limit_n = max(1, min(5000, int(limit_s)))
-            except Exception:
-                limit_n = 200
-            return self.respond_json({"ok": True, "name": name, "history": _read_job_history(name, limit_n)})
-
-        if parsed.path == "/api/alerts":
-            return self.respond_json(get_alerts())
-
-        if parsed.path == "/api/alerts/by_id":
-            q = parse_qs(parsed.query)
-            id_s = (q.get("id") or [""])[0].strip()
-            return self.respond_json(self.get_alert_by_id(id_s))
-
-        if parsed.path == "/api/alerts/timeline":
-            q = parse_qs(parsed.query)
-            limit_s = (q.get("limit") or ["20"])[0]
-            try:
-                limit_n = max(1, min(200, int(limit_s)))
-            except Exception:
-                limit_n = 20
-            return self.respond_json(self.get_alert_timeline(limit_n))
-
-        if parsed.path == "/api/validation":
-            return self.respond_json(self.get_validation())
-
-        if parsed.path == "/api/model_metrics":
-            q = parse_qs(parsed.query)
-            model_name = (q.get("model") or ["default"])[0]
-            return self.respond_json(self.get_model_metrics(model_name))
-
-        if parsed.path == "/api/strategy_metrics":
-            return self.respond_json(self.get_strategy_metrics())
-
-        if parsed.path == "/api/strategy_status":
-            return self.respond_json(self.get_strategy_status())
-
-        if parsed.path == "/api/health":
-            return self.respond_json(get_health_snapshot())
-
-        if parsed.path == "/api/training_status":
-            # Dashboard-readable training gate / kill switch
-            try:
-                return self.respond_json(get_training_status())
-            except Exception as e:
-                return self.respond_json({
-                    "mode": "unknown",
-                    "allowed": False,
-                    "reason": str(e),
-                    "updated_ts_ms": 0,
-                })
-
-        if parsed.path == "/api/execution_mode":
-            try:
-                return self.respond_json(_exec_mode_get())
-            except Exception as e:
-                return self.respond_json({"ok": False, "error": str(e)}, 500)
-
-        if parsed.path == "/api/execution_overlays":
-            try:
-                return self.respond_json({"ok": True, "overlays": _exec_overlays_get()})
-            except Exception as e:
-                return self.respond_json({"ok": False, "error": str(e)}, 500)
-
-        if parsed.path == "/api/market_stress":
-            try:
-                con = _db_connect()
-                try:
-                    snap = _market_stress_snapshot(con=con)
-                finally:
-                    con.close()
-                return self.respond_json({"ok": True, "stress": snap})
-            except Exception as e:
-                return self.respond_json({"ok": False, "error": str(e)}, 500)
-
-        if parsed.path == "/api/market_stress_history":
-            try:
-                con = _db_connect()
-                try:
-                    rows = con.execute(
-                        """
-                        SELECT ts_ms, price
-                        FROM prices
-                        WHERE symbol='VIX'
-                        ORDER BY ts_ms DESC
-                        LIMIT 120
-                        """
-                    ).fetchall()
-
-                    out = []
-                    for ts_ms, _ in rows or []:
-                        snap = _market_stress_snapshot(con=con, ts_ms=int(ts_ms))
-                        out.append({
-                            "ts_ms": int(ts_ms),
-                            "stress_score": float(snap.get("stress_score", 0.0)),
-                        })
-                finally:
-                    con.close()
-
-                out.reverse()
-                return self.respond_json({"ok": True, "series": out})
-            except Exception as e:
-                return self.respond_json({"ok": False, "error": str(e)}, 500)
-
-        if parsed.path == "/api/pipeline/run":
-            return self.respond_json(run_pipeline())
-
-        if parsed.path == "/api/model/diagnostics":
-            return self.respond_json(get_model_diagnostics())
-        # ------------------------------------------------------------
-        # Phase 3.5: model registry + promotion guard + rollback
-        # ------------------------------------------------------------
-        if parsed.path == "/api/size_policy":
-            return self.respond_json(get_size_policy())
-
-        if parsed.path == "/api/size_policy/train":
-            return self.respond_json(run_size_policy_job())
-
-        if parsed.path == "/api/champion/rollback":
-            return self.respond_json(rollback_champion())
-
-        if parsed.path == "/api/promotion/status":
-            return self.respond_json(get_promotion_status())
-
-        if parsed.path == "/api/promotion/explain":
-            return self.respond_json(get_promotion_explain())
-
-        if parsed.path == "/api/promotion/enable":
-            q = parse_qs(parsed.query)
-            on = (q.get("on") or [""])[0].strip()
-            return self.respond_json(set_promotion_enabled(on))
-
-        if parsed.path == "/api/embed_model_eval":
-            q = parse_qs(parsed.query)
-            limit_s = (q.get("limit") or ["500"])[0]
-            try:
-                limit_n = max(1, min(5000, int(limit_s)))
-            except Exception:
-                limit_n = 500
-            return self.respond_json(get_embed_model_eval(limit_n))
-
-        if parsed.path == "/api/model_registry":
-            limit_n = 50
-            try:
-                qs = parse_qs(parsed.query or "")
-                if "limit" in qs:
-                    limit_n = int(qs["limit"][0])
-            except Exception:
-                pass
-            return self.respond_json(get_model_registry(limit_n))
-
-        if parsed.path == "/api/challenger/run":
-            return self.respond_json(_run_challenger_job_wait())
-
-        if parsed.path in ("/api/embed_conf_calib", "/api/embed_conf_cali"):
-            q = parse_qs(parsed.query)
-            hs_s = (q.get("horizon_s") or ["0"])[0]
-            mk = (q.get("model_kind") or ["ridge"])[0]
-            limit_s = (q.get("limit") or ["200"])[0]
-            try:
-                hs = int(hs_s)
-            except Exception:
-                hs = 0
-            try:
-                limit_n = max(2, min(5000, int(limit_s)))
-            except Exception:
-                limit_n = 200
-            return self.respond_json(get_embed_conf_calib(hs, mk, limit_n))
-
-        # ------------------------------------------------------------
-        # Temporal predictor surfaces (A.6)
-        # ------------------------------------------------------------
-        if parsed.path == "/api/temporal_eval":
-            q = parse_qs(parsed.query)
-            limit_s = (q.get("limit") or ["50"])[0]
-            try:
-                limit_n = max(1, min(5000, int(limit_s)))
-            except Exception:
-                limit_n = 50
-            return self.respond_json(get_temporal_eval(limit_n))
-
-        if parsed.path == "/api/temporal_models":
-            q = parse_qs(parsed.query)
-            limit_s = (q.get("limit") or ["20"])[0]
-            try:
-                limit_n = max(1, min(5000, int(limit_s)))
-            except Exception:
-                limit_n = 20
-            return self.respond_json(get_temporal_models(limit_n))
-
-        if parsed.path == "/api/confidence_mass":
-            return self.respond_json(get_confidence_mass())
-
-        if parsed.path == "/api/execution_metrics/by_confidence":
-            return self.respond_json(get_execution_cost_by_confidence())
-
-        if parsed.path == "/api/execution_metrics":
-            return self.respond_json(get_execution_metrics())
-
-        if parsed.path == "/api/execution_metrics/rolling":
-            return self.respond_json(get_execution_metrics_rolling())
-
-        if parsed.path == "/api/execution_metrics/by_symbol":
-            q = parse_qs(parsed.query)
-            limit_s = (q.get("limit") or ["50"])[0]
-            try:
-                limit_n = int(limit_s)
-            except Exception:
-                limit_n = 50
-            return self.respond_json(get_execution_metrics_by_symbol(limit_n))
-
-        # -----------------------------------------------------------
-        # Backtest results (walk-forward)
-        # ------------------------------------------------------------
-        if parsed.path == "/api/backtest_scores":
-            con = _db_connect()
-            try:
-                rows = con.execute(
-                    """
-                    SELECT symbol, horizon_s, ts_ms, n, mae, dir_acc
-                    FROM backtest_scores
-                    ORDER BY symbol, horizon_s
-                    """
-                ).fetchall()
-
-                out = []
-                for sym, h, ts_ms, n, mae, acc in rows or []:
-                    out.append({
-                        "symbol": str(sym),
-                        "horizon_s": int(h),
-                        "ts_ms": int(ts_ms),
-                        "n": int(n),
-                        "mae": float(mae),
-                        "dir_acc": float(acc),
-                    })
-
-                return self.respond_json({
-                    "ok": True,
-                    "scores": out,
-                })
-            finally:
-                con.close()
-
-        if parsed.path == "/api/relevance_stats":
-            return self.respond_json(get_relevance_stats())
-
-        if parsed.path == "/api/exec_conf_calib":
-            return self.respond_json(get_exec_conf_calib())
-
-        # ------------------------------------------------------------
-        # Equity drift time-series (for UI chart)
-        # ------------------------------------------------------------
-        if parsed.path == "/api/equity_drift":
-            _ensure_equity_drift()
-            q = parse_qs(parsed.query)
-            limit_s = (q.get("limit") or ["500"])[0]
-            try:
-                limit_n = max(10, min(5000, int(limit_s)))
-            except Exception:
-                limit_n = 500
-
-            con = _db_connect()
-            try:
-                rows = con.execute(
-                    """
-                    SELECT ts_ms, diff_equity, diff_equity_pct, level
-                    FROM equity_drift
-                    ORDER BY ts_ms DESC
-                    LIMIT ?
-                    """,
-                    (limit_n,),
-                ).fetchall()
-
-                # reverse to chronological order
-                rows = list(reversed(rows))
-
-                return self.respond_json({
-                    "ok": True,
-                    "points": [
-                        {
-                            "ts_ms": r[0],
-                            "diff_equity": float(r[1]),
-                            "diff_equity_pct": float(r[2]),
-                            "level": r[3],
-                        }
-                        for r in rows
-                    ],
-                })
-            finally:
-                con.close()
-
-        if parsed.path == "/api/broker":
-            from dev_core.broker_sim import broker_snapshot
-            return self.respond_json(broker_snapshot(limit_fills=50))
-
-        if parsed.path == "/api/reconcile/broker_backtest":
-            from dev_core.broker_sim import broker_snapshot
-            try:
-                from dev_core.broker_sim import broker_equity_at
-            except Exception:
-                return self.respond_json({
-                    "ok": False,
-                    "error": "broker_equity_at not available (update dev_core/broker_sim.py)",
-                })
-
-            bt = get_latest_portfolio_backtest()
-
-            if not bt or not bt.get("ok") or not bt.get("run"):
-                return self.respond_json({"ok": False, "error": "no portfolio backtest run available"})
-
-            run = bt.get("run") or {}
-            pts = run.get("points") or []
-            m = run.get("metrics") or {}
-
-            # Prefer last point ts/equity (most direct)
-            if pts:
-                bt_ts = int(pts[-1].get("ts_ms") or run.get("end_ts_ms") or 0)
-                bt_eq = float(pts[-1].get("equity") or m.get("end_equity") or 0.0)
-            else:
-                bt_ts = int(run.get("end_ts_ms") or 0)
-                bt_eq = float(m.get("end_equity") or 0.0)
-
-            # Broker MTM at the SAME timestamp (do not mutate broker_account)
-            br_at = broker_equity_at(bt_ts, include_prices=True)
-            diff = None
-            diff_pct = None
-            level = "UNKNOWN"
-            reason = ""
-            broker_eq_at = float(br_at.get("equity", 0.0)) if br_at and br_at.get("ok") else None
-
-            if br_at.get("ok") and bt_eq and abs(bt_eq) > 1e-12:
-                diff = float(broker_eq_at or 0.0) - float(bt_eq)
-                diff_pct = float(diff) / float(bt_eq)
-                level, reason = _classify_equity_diff(diff_pct, diff)
-
-            # record time-series (best-effort)
-            try:
-                _ensure_equity_drift()
-                con_d = _db_connect()
-                try:
-                    con_d.execute(
-                        "INSERT OR REPLACE INTO equity_drift(ts_ms, diff_equity, diff_equity_pct, level) VALUES(?,?,?,?)",
-                        (int(bt_ts), float(diff or 0.0), float(diff_pct or 0.0), str(level)),
-                    )
-                    con_d.commit()
-                finally:
-                    con_d.close()
-            except Exception:
-                pass
-
-            # Persist WARN / CRIT into job_history
-            if level in ("WARN", "CRIT"):
-                try:
-                    _write_job_history(
-                        job_name="reconcile_broker_backtest",
-                        event=f"equity_diff_{level.lower()}",
-                        detail=(
-                            f"{reason} | "
-                            f"bt_equity={bt_eq:.2f}, "
-                            f"broker_equity={float(broker_eq_at or 0.0):.2f}"
-                        ),
-                        exit_code=None,
-                    )
-                except Exception:
-                    pass
-
-            # ------------------------------------------------------------
-            # Sustained equity drift alert (trend-based)
-            # ------------------------------------------------------------
-            sustained_level = None
-            try:
-                con_s = _db_connect()
-                try:
-                    sustained_level = _detect_sustained_equity_drift(con_s)
-                finally:
-                    con_s.close()
-            except Exception:
-                sustained_level = None
-
-            if sustained_level in ("WARN", "CRIT"):
-                try:
-                    conA = _db_connect()
-                    try:
-                        now_ms = int(time.time() * 1000)
-                        cutoff_ms = now_ms - (EQ_DIFF_ALERT_COOLDOWN_S * 1000)
-
-                        row = conA.execute(
-                            """
-                            SELECT ts_ms
-                            FROM alerts
-                            WHERE rule_id = 'EQUITY_DRIFT_SUSTAINED'
-                              AND ts_ms >= ?
-                            ORDER BY ts_ms DESC
-                            LIMIT 1
-                            """,
-                            (int(cutoff_ms),),
-                        ).fetchone()
-
-                        if not row:
-                            conA.execute(
-                                """
-                                INSERT INTO alerts (
-                                    ts_ms,
-                                    severity,
-                                    symbol,
-                                    horizon_s,
-                                    expected_z,
-                                    confidence,
-                                    event_title,
-                                    rule_id,
-                                    explain_json
-                                ) VALUES (?,?,?,?,?,?,?,?,?)
-                                """,
-                                (
-                                    now_ms,
-                                    sustained_level,
-                                    "PORTFOLIO",
-                                    0,
-                                    0.0,
-                                    1.0,
-                                    "Sustained broker/backtest equity drift",
-                                    "EQUITY_DRIFT_SUSTAINED",
-                                    json.dumps({
-                                        "window": EQ_DRIFT_SUSTAINED_WINDOW,
-                                        "min_warn": EQ_DRIFT_SUSTAINED_MIN_WARN,
-                                        "min_crit": EQ_DRIFT_SUSTAINED_MIN_CRIT,
-                                        "current_level": sustained_level,
-                                    }),
-                                ),
-                            )
-                            conA.commit()
-                    finally:
-                        conA.close()
-                except Exception:
-                    pass
-
-            # ------------------------------------------------------------
-            # Find most recent active EQUITY_RECON alert (lookback)
-            # ------------------------------------------------------------
-            now_ms = int(time.time() * 1000)
-            lookback_ms = now_ms - int(EQ_DIFF_RESOLVE_LOOKBACK_S * 1000)
-            active_alert_id = None
-
-            try:
-                conA = _db_connect()
-                try:
-                    row = conA.execute(
-                        """
-                        SELECT a.id, a.ts_ms
-                        FROM alerts a
-                        LEFT JOIN alert_resolutions ar ON ar.alert_id = a.id
-                        WHERE a.rule_id IN ('EQUITY_RECON', 'EQUITY_DRIFT_SUSTAINED')
-                          AND a.ts_ms >= ?
-                          AND (ar.alert_id IS NULL)
-                        ORDER BY a.ts_ms DESC
-                        LIMIT 1
-                        """,
-                        (int(lookback_ms),),
-                    ).fetchone()
-                    if row:
-                        active_alert_id = int(row[0])
-                finally:
-                    conA.close()
-            except Exception:
-                active_alert_id = None
-
-            # ------------------------------------------------------------
-            # CRIT → emit alert (cooldown guarded)
-            # ------------------------------------------------------------
-            emitted_alert_id = None
-
-            if level == "CRIT":
-                # sustained drift check (last 3 samples): require >=2 CRIT
-                try:
-                    con_d = _db_connect()
-                    rows = con_d.execute(
-                        "SELECT level FROM equity_drift ORDER BY ts_ms DESC LIMIT 3"
-                    ).fetchall()
-                    con_d.close()
-                    if sum(1 for r in rows if r[0] == "CRIT") < 2:
-                        level = "WARN"  # downgrade if not sustained
-                except Exception:
-                    pass
-
-            if level == "CRIT":
-                try:
-                    con2 = _db_connect()
-                    try:
-                        cutoff_ms = now_ms - (EQ_DIFF_ALERT_COOLDOWN_S * 1000)
-
-                        row = con2.execute(
-                            """
-                            SELECT ts_ms
-                            FROM alerts
-                            WHERE rule_id = 'EQUITY_RECON'
-                              AND ts_ms >= ?
-                            ORDER BY ts_ms DESC
-                            LIMIT 1
-                            """,
-                            (int(cutoff_ms),),
-                        ).fetchone()
-
-                        if not row:
-                            con2.execute(
-                                """
-                                INSERT INTO alerts (
-                                    ts_ms,
-                                    severity,
-                                    symbol,
-                                    horizon_s,
-                                    expected_z,
-                                    confidence,
-                                    event_title,
-                                    rule_id,
-                                    explain_json
-                                ) VALUES (?,?,?,?,?,?,?,?,?)
-                                """,
-                                (
-                                    now_ms,
-                                    "CRIT",
-                                    "PORTFOLIO",
-                                    0,
-                                    0.0,
-                                    1.0,
-                                    "Broker vs Backtest equity mismatch",
-                                    "EQUITY_RECON",
-                                    json.dumps({
-                                        "diff_equity": diff,
-                                        "diff_equity_pct": diff_pct,
-                                        "thresholds": {
-                                            "warn_pct": EQ_DIFF_WARN_PCT,
-                                            "crit_pct": EQ_DIFF_CRIT_PCT,
-                                            "warn_abs": EQ_DIFF_WARN_ABS,
-                                            "crit_abs": EQ_DIFF_CRIT_ABS,
-                                            "resolve_pct": EQ_DIFF_RESOLVE_PCT,
-                                            "resolve_abs": EQ_DIFF_RESOLVE_ABS,
-                                        },
-                                        "reason": reason,
-                                    }),
-                                ),
-                            )
-                            con2.commit()
-                            emitted_alert_id = int(con2.execute("SELECT last_insert_rowid()").fetchone()[0])
-                    finally:
-                        con2.close()
-                except Exception:
-                    emitted_alert_id = None
-
-            # ------------------------------------------------------------
-            # Auto-resolve: if we have an active alert and diff is within RESOLVE thresholds
-            # ------------------------------------------------------------
-            resolved_now = False
-            if active_alert_id is not None:
-                ap = abs(float(diff_pct or 0.0))
-                aa = abs(float(diff or 0.0))
-                within = (ap <= EQ_DIFF_RESOLVE_PCT) and (aa <= EQ_DIFF_RESOLVE_ABS)
-
-                if within:
-                    try:
-                        _resolve_alert(
-                            active_alert_id,
-                            who="auto",
-                            reason="equity diff normalized",
-                            source="reconcile",
-                        )
-                        resolved_now = True
-                    except Exception:
-                        resolved_now = False
-
-            # Determine current flags for UI
-            show_alert_id = emitted_alert_id or active_alert_id
-            acked = False
-            resolved = False
-            if show_alert_id is not None:
-                try:
-                    acked = _is_alert_acked(show_alert_id)
-                except Exception:
-                    acked = False
-                try:
-                    resolved = _is_alert_resolved(show_alert_id)
-                except Exception:
-                    resolved = False
-
-            # ------------------------------------------------------------
-            # CRIT → notifications (email / webhook) ONLY when newly emitted and not already acked
-            # ------------------------------------------------------------
-            if emitted_alert_id is not None:
-                try:
-                    if not _is_alert_acked(emitted_alert_id) and not _is_alert_resolved(emitted_alert_id):
-
-                        subject = "CRIT: Broker vs Backtest equity mismatch"
-                        body = (
-                            f"Equity reconciliation FAILED\n\n"
-                            f"diff_equity={diff}\n"
-                            f"diff_equity_pct={diff_pct:.4%}\n\n"
-                            f"reason={reason}\n"
-                            f"bt_equity={bt_eq}\n"
-                            f"broker_equity_at_bt_ts={broker_eq_at}\n"
-                        )
-                        _send_eq_crit_email(subject, body)
-
-                        _send_eq_crit_webhook({
-                            "type": "EQUITY_RECON_CRIT",
-                            "alert_id": emitted_alert_id,
-                            "ts_ms": now_ms,
-                            "diff_equity": diff,
-                            "diff_equity_pct": diff_pct,
-                            "reason": reason,
-                            "bt": {
-                                "run_id": run.get("id"),
-                                "equity": bt_eq,
-                                "ts_ms": bt_ts,
-                            },
-                            "broker_equity": broker_eq_at,
-                        })
-                except Exception:
-                    pass
-
-            return self.respond_json({
-                "ok": True,
-                "bt_ts_ms": int(bt_ts),
-                "bt_equity": float(bt_eq),
-                "broker_equity_at_bt_ts": (float(broker_eq_at) if broker_eq_at is not None else None),
-                "diff_equity": diff,
-                "diff_equity_pct": diff_pct,
-                "level": str(level),
-                "reason": str(reason or ""),
-                "active_alert_id": (int(active_alert_id) if active_alert_id is not None else None),
-                "emitted_alert_id": (int(emitted_alert_id) if emitted_alert_id is not None else None),
-                "show_alert_id": (int(show_alert_id) if show_alert_id is not None else None),
-                "acked": bool(acked),
-                "resolved": bool(resolved),
-                "resolved_now": bool(resolved_now),
-                "sustained_level": sustained_level,
-            })
-
-        if parsed.path == "/api/backtest/portfolio/latest":
-            return self.respond_json(get_latest_portfolio_backtest())
-
-        if parsed.path == "/api/portfolio":
-            from dev_core.portfolio import get_portfolio_snapshot
-            return self.respond_json(get_portfolio_snapshot(limit_orders=50))
-
-        # ------------------------------------------------------------
-        # Server lifecycle (for 24/7 ops)
-        # ------------------------------------------------------------
-        if parsed.path == "/api/server/status":
-            now_ms = int(time.time() * 1000)
-            return self.respond_json({
-                "ok": True,
-                "pid": os.getpid(),
-                "started_at_ms": int(SERVER_STARTED_AT_MS),
-                "uptime_s": int((now_ms - int(SERVER_STARTED_AT_MS)) / 1000),
-                "auto_restart_daemons": bool(AUTO_RESTART_DAEMONS),
-            })
-
-elif path == "/api/system/auto_fix" and self.command == "POST":
-    try:
-        steps = []
-
-        from dev_core.storage import init_db, connect
-
-        init_db()
-        steps.append("core db ok")
-
-        # Ensure portfolio backtest tables
-        try:
-            import portfolio_backtest as p
-            con = connect()
-            con.executescript(p.SCHEMA)
-            con.commit()
-            con.close()
-            steps.append("portfolio backtest schema ok")
-        except Exception as e:
-            steps.append(f"portfolio schema error: {e}")
-
-        # Run phase jobs best-effort
-        def _run(cmd):
-            subprocess.check_call(
-                [sys.executable, "-u", cmd],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            steps.append(f"{cmd} ok")
-
-        try:
-            _run("compute_exec_labels.py")
-        except Exception as e:
-            steps.append(f"labels failed: {e}")
-
-        try:
-            _run("train_size_policy.py")
-        except Exception as e:
-            steps.append(f"size policy failed: {e}")
-
-        try:
-            _run("portfolio_backtest.py")
-        except Exception as e:
-            steps.append(f"backtest failed: {e}")
-
-        self._send_json({
-            "ok": True,
-            "steps": steps,
-        })
-    except Exception as e:
-        self._send_json({
-            "ok": False,
-            "error": str(e),
-        })
-    return
-
-        if parsed.path == "/api/model/watches":
-            con = _db_connect()
-            try:
-                rows = con.execute(
-                    """
-                    SELECT id, ts_ms, model_name, regime,
-                           from_model_kind, from_model_ts_ms,
-                           to_model_kind, to_model_ts_ms,
-                           watch_until_ts_ms, status, last_eval_ts_ms, note
-                    FROM model_post_promo_watch
-                    ORDER BY id DESC
-                    LIMIT 200
-                    """
-                ).fetchall()
-                out = []
-                for r in rows:
-                    out.append({
-                        "id": int(r[0]),
-                        "ts_ms": int(r[1]),
-                        "model_name": r[2],
-                        "regime": r[3],
-                        "from_kind": r[4],
-                        "from_ts_ms": r[5],
-                        "to_kind": r[6],
-                        "to_ts_ms": r[7],
-                        "watch_until_ts_ms": r[8],
-                        "status": r[9],
-                        "last_eval_ts_ms": r[10],
-                        "note": r[11],
-                    })
-                return self.respond_json({"ok": True, "watches": out})
-            finally:
-                con.close()
-
-        if parsed.path == "/api/model/watch_results":
-            q = parse_qs(parsed.query)
-            wid = int((q.get("watch_id") or ["0"])[0] or 0)
-            con = _db_connect()
-            try:
-                rows = con.execute(
-                    """
-                    SELECT id, watch_id, ts_ms, n, rmse, dir_acc, net_rmse, net_dir_acc, extra_json
-                    FROM model_post_promo_results
-                    WHERE watch_id = ?
-                    ORDER BY id DESC
-                    LIMIT 200
-                    """,
-                    (int(wid),),
-                ).fetchall()
-                out = []
-                for r in rows:
-                    out.append({
-                        "id": int(r[0]),
-                        "watch_id": int(r[1]),
-                        "ts_ms": int(r[2]),
-                        "n": int(r[3]),
-                        "rmse": r[4],
-                        "dir_acc": r[5],
-                        "net_rmse": r[6],
-                        "net_dir_acc": r[7],
-                        "extra": (json.loads(r[8]) if (r[8] or "").strip() else None),
-                    })
-                return self.respond_json({"ok": True, "watch_id": int(wid), "results": out})
-            finally:
-                con.close()
-
-        if parsed.path == "/api/server/shutdown":
-
-            # Optional token gate (recommended for any non-local exposure)
-            if SERVER_SHUTDOWN_TOKEN:
-                q = parse_qs(parsed.query)
-                tok = (q.get("token") or [""])[0].strip()
-                if tok != SERVER_SHUTDOWN_TOKEN:
-                    return self.respond_json({"ok": False, "error": "unauthorized"}, 403)
-
-            # Graceful: stop child jobs, then stop HTTP server
-            try:
-                JOBS.stop_all()
-            except Exception:
-                pass
-
-            def _shutdown_async():
-                global _HTTPD
-                try:
-                    if _HTTPD:
-                        _HTTPD.shutdown()
-                except Exception:
-                    pass
-
-            threading.Thread(target=_shutdown_async, daemon=True).start()
-            return self.respond_json({"ok": True, "status": "shutdown_started"})
-
-        return super().do_GET()
+        return self._dispatch()
 
     def do_POST(self):
-        parsed = urlparse(self.path)
+        return self._dispatch()
 
-        # Mutating endpoints require auth (token or localhost-only)
-        if parsed.path in (
-            "/api/training/set",
-            "/api/kill_switch/set",
-            "/api/kill_switch/clear",
-            "/api/execution_mode/set",
-            "/api/model/rollback",
-        ):
-
-            err = self._require_mutation_auth()
-            if err:
-                return self.respond_json(err, 403)
-        # ------------------------------------------------------------
-        # Voice / LLM explanation endpoint (SAFE, READ-ONLY)
-        # ------------------------------------------------------------
-        if parsed.path == "/api/voice/ask":
-
-            if not VOICE_ENABLED:
-                return self.respond_json(
-                    {"ok": False, "error": "voice_disabled"},
-                    403,
-                )
-
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8", errors="replace")
-
-            try:
-                payload = json.loads(body or "{}")
-            except Exception:
-                return self.respond_json({"ok": False, "error": "invalid_json"}, 400)
-
-            text = str(payload.get("text") or "").strip()
-            context = payload.get("context") or {}
-
-            if not text:
-                return self.respond_json({"ok": False, "error": "empty_text"}, 400)
-
-            # HARD SAFETY GUARDRAILS
-            # - explanation only
-            # - no execution
-            # - no instructions
-            # - no internal code references
-            prompt = f"""
-You are an operations co-pilot.
-You explain incidents calmly and concisely.
-
-Rules:
-- DO NOT suggest actions
-- DO NOT say "you should execute"
-- DO NOT reference internal code
-- Speak to a human operator
-
-Explain:
-- Recommended posture (monitor / prepare / act)
-- Decision confidence (human-facing)
-- If nothing changes, what happens next
-- Safe to ignore?
-
-Context:
-{json.dumps(context, indent=2)}
-
-User question:
-{text}
-""".strip()
-
-            # hard cap prompt size
-            prompt = prompt[:VOICE_MAX_PROMPT_CHARS]
-
-            try:
-                answer = _run_llm_explain_with_timeout(
-                    prompt,
-                    VOICE_TIMEOUT_S,
-                )
-            except TimeoutError:
-                return self.respond_json(
-                    {"ok": False, "error": "llm_timeout"},
-                    504,
-                )
-            except Exception as e:
-                return self.respond_json(
-                    {"ok": False, "error": str(e)},
-                    500,
-                )
-
-            return self.respond_json({
-                "ok": True,
-                "answer": answer[:VOICE_MAX_RESPONSE_CHARS],
-                "confidence": 0.6,
-            })
-
-        # Slack interactive button callback
-
-        if parsed.path == "/api/slack/interactive":
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8", errors="replace")
-
-            payload = parse_qs(body).get("payload", [""])[0]
-
-            try:
-                data = json.loads(payload)
-            except Exception:
-                return self.respond_json({"ok": False, "error": "invalid payload"})
-
-            action = (data.get("actions") or [{}])[0]
-            value = action.get("value", "")
-            user = (
-                data.get("user", {}).get("username")
-                or data.get("user", {}).get("name")
-                or "unknown"
-            )
-
-            if value.startswith("ACK_ALERT:"):
-                alert_id = int(value.split(":", 1)[1])
-                _ack_alert(alert_id, who=user, source="slack")
-
-                return self.respond_json({
-                    "ok": True,
-                    "message": f"Alert {alert_id} acknowledged by {user}",
-                })
-
-            return self.respond_json({"ok": True})
-
-        # ------------------------------------------------------------
-        # Training kill switch (dashboard control)
-        # ------------------------------------------------------------
-        if parsed.path == "/api/training/set":
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8", errors="replace")
-
-            try:
-                data = json.loads(body or "{}")
-            except Exception:
-                return self.respond_json({"ok": False, "error": "invalid JSON"}, 400)
-
-            mode = str(data.get("mode") or "").strip().lower()
-            actor = str(data.get("actor") or "dashboard")
-
-            if mode not in ("enabled", "disabled", "paused"):
-                return self.respond_json({
-                    "ok": False,
-                    "error": "mode must be one of: enabled, disabled, paused",
-                }, 400)
-
-            try:
-                out = set_training_mode(mode, actor=actor)
-
-                # persist into job_history (PATCH 23 hook)
-                try:
-                    _write_job_history(
-                        job_name="training_guard",
-                        event="set_mode",
-                        detail=f"mode={mode} actor={actor}",
-                        exit_code=None,
-                    )
-                except Exception:
-                    pass
-
-                return self.respond_json(out)
-            except Exception as e:
-                return self.respond_json({
-                    "ok": False,
-                    "error": str(e),
-                }, 500)
-
-        # ------------------------------------------------------------
-        # Execution mode (paper / shadow / live)
-        # ------------------------------------------------------------
-        if parsed.path == "/api/execution_mode/set":
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8", errors="replace")
-
-            try:
-                data = json.loads(body or "{}")
-            except Exception:
-                return self.respond_json({"ok": False, "error": "invalid JSON"}, 400)
-
-            mode = str(data.get("mode") or "").strip().lower()
-            actor = str(data.get("actor") or "dashboard").strip() or "dashboard"
-            reason = str(data.get("reason") or "").strip() or None
-
-            if mode not in ("paper", "shadow", "live"):
-                return self.respond_json(
-                    {"ok": False, "error": "mode must be one of: paper, shadow, live"},
-                    400,
-                )
-
-            try:
-                out = _exec_mode_set(mode=mode, actor=actor, reason=reason)
-            except TypeError:
-                # compatibility fallback if set_execution_mode signature is older
-                out = _exec_mode_set(mode)
-
-            try:
-                _write_job_history(
-                    job_name="execution_mode",
-                    event="set_mode",
-                    detail=f"mode={mode} actor={actor} reason={str(reason or '')}",
-                    exit_code=None,
-                )
-            except Exception:
-                pass
-
-            return self.respond_json(out)
-
-        # ------------------------------------------------------------
-        # Model rollback (operator control)
-        # ------------------------------------------------------------
-        if parsed.path == "/api/model/rollback":
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8", errors="replace")
-
-            try:
-                data = json.loads(body or "{}")
-            except Exception:
-                return self.respond_json({"ok": False, "error": "invalid JSON"}, 400)
-
-            model_name = str(data.get("model_name") or "").strip()
-            regime = str(data.get("regime") or "global").strip() or "global"
-            actor = str(data.get("actor") or "dashboard").strip() or "dashboard"
-            reason = data.get("reason")
-            clear_regime_kill = 1 if int(data.get("clear_regime_kill") or 0) else 0
-
-            if not model_name:
-                return self.respond_json({"ok": False, "error": "model_name required"}, 400)
-
-            rb = None
-            try:
-                rb = _manual_rollback(
-                    actor=actor,
-                    model_name=model_name,
-                    regime=regime,
-                    reason={"reason": reason, "source": "dashboard"},
-                )
-            except Exception as e:
-                return self.respond_json({"ok": False, "error": str(e)}, 500)
-
-            if not rb:
-                return self.respond_json({"ok": False, "error": "rollback_not_available"}, 409)
-
-            if clear_regime_kill:
-                try:
-                    _kill_switch_clear(
-                        scope="regime",
-                        key=str(regime),
-                        reason="manual_rollback_clear_regime_kill",
-                        actor=str(actor),
-                        meta={"model_name": str(model_name)},
-                    )
-                except Exception:
-                    pass
-
-            try:
-                _write_job_history(
-                    job_name="model_rollback",
-                    event="rollback",
-                    detail=f"model_name={model_name} regime={regime} actor={actor}",
-                    exit_code=None,
-                )
-            except Exception:
-                pass
-
-            return self.respond_json({"ok": True, "rolled_back_to": rb})
-
-        # ------------------------------------------------------------
-        # Kill switch (execution safety)
-        # ------------------------------------------------------------
-        if parsed.path == "/api/kill_switch/set":
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8", errors="replace")
-
-            try:
-                data = json.loads(body or "{}")
-            except Exception:
-                return self.respond_json({"ok": False, "error": "invalid JSON"}, 400)
-
-            scope = str(data.get("scope") or "").strip()
-            key = str(data.get("key") or "").strip()
-            enabled = 1 if int(data.get("enabled") or 0) else 0
-            reason = data.get("reason")
-            actor = str(data.get("actor") or "dashboard")
-            meta = data.get("meta")
-            action = str(data.get("action") or "SET")
-
-            if not scope:
-                return self.respond_json({"ok": False, "error": "scope required"}, 400)
-
-            try:
-                _kill_switch_set(
-                    scope=scope,
-                    key=key,
-                    enabled=enabled,
-                    reason=reason,
-                    actor=actor,
-                    meta=(meta if isinstance(meta, dict) else None),
-                    action=action,
-                )
-                try:
-                    _write_job_history(
-                        job_name="kill_switch",
-                        event="set",
-                        detail=f"scope={scope} key={key} enabled={enabled} actor={actor} reason={str(reason or '')}",
-                        exit_code=None,
-                    )
-                except Exception:
-                    pass
-                return self.respond_json({"ok": True})
-            except Exception as e:
-                return self.respond_json({"ok": False, "error": str(e)}, 500)
-
-        if parsed.path == "/api/kill_switch/clear":
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8", errors="replace")
-
-            try:
-                data = json.loads(body or "{}")
-            except Exception:
-                return self.respond_json({"ok": False, "error": "invalid JSON"}, 400)
-
-            scope = str(data.get("scope") or "").strip()
-            key = str(data.get("key") or "").strip()
-            reason = data.get("reason")
-            actor = str(data.get("actor") or "dashboard")
-            meta = data.get("meta")
-
-            if not scope:
-                return self.respond_json({"ok": False, "error": "scope required"}, 400)
-
-            try:
-                _kill_switch_clear(
-                    scope=scope,
-                    key=key,
-                    reason=reason,
-                    actor=actor,
-                    meta=(meta if isinstance(meta, dict) else None),
-                )
-                try:
-                    _write_job_history(
-                        job_name="kill_switch",
-                        event="clear",
-                        detail=f"scope={scope} key={key} actor={actor} reason={str(reason or '')}",
-                        exit_code=None,
-                    )
-                except Exception:
-                    pass
-                return self.respond_json({"ok": True})
-            except Exception as e:
-                return self.respond_json({"ok": False, "error": str(e)}, 500)
-
-        return self.respond_json({"ok": False, "error": "unknown POST endpoint"})
-
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # SERVER
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 
 def run_server():
     global _HTTPD
@@ -4422,9 +3352,9 @@ def run_server():
         _ensure_equity_drift()
     except Exception:
         pass
-    # ------------------------------------------------------------
+    # ------            -- ------------------------------------------------------
     # PREFLIGHT SNAPSHOT AT BOOT (safe startup checklist)
-    # ------------------------------------------------------------
+    # ------            -- ------------------------------------------------------
     try:
         p = run_preflight()
         if not p.get("ok"):

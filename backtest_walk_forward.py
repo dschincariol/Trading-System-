@@ -214,7 +214,9 @@ def main() -> int:
 
                 summary["per_key"][f"{sym}:{h}"] = {"n": n, "mae": mae, "dir_acc": acc}
 
-                con.execute(
+                pass
+
+        con.execute(
                     """
                     INSERT OR REPLACE INTO walk_forward_scores(run_id, symbol, horizon_s, ts_ms, n, mae, dir_acc)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -250,6 +252,8 @@ def main() -> int:
             }
         else:
             run_metrics = {"total_n": 0, "mae": None, "dir_acc": None, "n_keys": 0}
+
+        ok = 0 if had_error else 1
 
         con.execute(
             """

@@ -114,7 +114,9 @@ def main() -> int:
                     f"min_new={MIN_NEW_LABELS}"
                 )
 
-                con.execute(
+                pass
+
+        con.execute(
                     """
                     INSERT INTO model_runs(key, last_count, last_max_created_at_ms, last_run_ms)
                     VALUES(?,?,?,?)

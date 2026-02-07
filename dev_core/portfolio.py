@@ -60,8 +60,16 @@ PORTFOLIO_STRESS_VIX_Z_TH = float(os.environ.get("PORTFOLIO_STRESS_VIX_Z_TH", "1
 PORTFOLIO_STRESS_MIN_FACTOR = float(os.environ.get("PORTFOLIO_STRESS_MIN_FACTOR", "0.35"))
 PORTFOLIO_STRESS_Z_AT_MIN = float(os.environ.get("PORTFOLIO_STRESS_Z_AT_MIN", "3.0"))
 
-# Optional per-symbol "vol-of-vol" compression (uses price-only proxy)
-PORTFOLIO_USE_VOV_GATE = os.environ.get("PORTFOLIO_USE_VOV_GATE", "0") == "1"
+# -----------------------------
+# Social manipulation / attention gate (opt-in)
+# -----------------------------
+PORTFOLIO_USE_SOCIAL_GATE = os.environ.get("PORTFOLIO_USE_SOCIAL_GATE", "0") == "1"
+PORTFOLIO_SOCIAL_BUCKET_SEC = int(os.environ.get("PORTFOLIO_SOCIAL_BUCKET_SEC", "300"))
+PORTFOLIO_SOCIAL_MANIP_BLOCK_TH = float(os.environ.get("PORTFOLIO_SOCIAL_MANIP_BLOCK_TH", "0.85"))
+PORTFOLIO_SOCIAL_ATTEN_SHOCK_TH = float(os.environ.get("PORTFOLIO_SOCIAL_ATTEN_SHOCK_TH", "0.80"))
+PORTFOLIO_SOCIAL_SHOCK_FACTOR = float(os.environ.get("PORTFOLIO_SOCIAL_SHOCK_FACTOR", "0.60"))
+
+# Optional per-symbol "vol-of-vol" compression (uses price-only proxy)PORTFOLIO_USE_VOV_GATE = os.environ.get("PORTFOLIO_USE_VOV_GATE", "0") == "1"
 PORTFOLIO_VOV_ALPHA = float(os.environ.get("PORTFOLIO_VOV_ALPHA", "6.0"))  # strength of penalty
 PORTFOLIO_VOV_FLOOR = float(os.environ.get("PORTFOLIO_VOV_FLOOR", "0.0"))
 PORTFOLIO_VOV_CEIL = float(os.environ.get("PORTFOLIO_VOV_CEIL", "0.020"))
@@ -102,12 +110,12 @@ PORTFOLIO_EXEC_STALE_HALF_FACTOR = float(os.environ.get("PORTFOLIO_EXEC_STALE_HA
 # stress throttle (Market Stress Score 0..1)
 PORTFOLIO_EXEC_STRESS_TH = float(os.environ.get("PORTFOLIO_EXEC_STRESS_TH", "0.75"))
 PORTFOLIO_EXEC_STRESS_FACTOR = float(os.environ.get("PORTFOLIO_EXEC_STRESS_FACTOR", "0.60"))
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Execution realism sizing (opt-in, recommended)
 # - staleness per symbol (price age)
 # - global stress proxy (VIX z-score if available)
 # - volatility proxy (ATR% from price-only series)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 PORTFOLIO_USE_EXEC_REALISM = os.environ.get("PORTFOLIO_USE_EXEC_REALISM", "1") == "1"
 
 # If symbol price is older than this, size -> 0 (blocks new exposure via portfolio intents)
@@ -755,9 +763,9 @@ def _apply_impact_aware_sizing(con, desired: Dict[str, Dict]) -> Dict[str, Dict]
         except Exception:
             pass
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Execution realism overlay (opt-in): staleness + stress score
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         if PORTFOLIO_USE_EXEC_REALISM:
             for sym in list(desired.keys()):
                 try:
@@ -1024,9 +1032,9 @@ def compute_rebalance() -> Dict:
         alerts = _load_recent_alert_candidates(con, PORTFOLIO_LOOKBACK_S)
         state = _load_state(con)
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Build compact selector / RL feature snapshot (B2/C2)
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         best_for_features = _pick_best_per_symbol(alerts)
         best_vals = list(best_for_features.values())
 
@@ -1115,9 +1123,9 @@ def compute_rebalance() -> Dict:
 
         desired = norm
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Auto blacklist enforcement (skip symbols temporarily banned)
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             for sym in list(desired.keys()):
                 if is_blacklisted(con, sym, now_ms=int(now_ms)):
@@ -1125,9 +1133,9 @@ def compute_rebalance() -> Dict:
         except Exception:
             pass
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Exploration cap: if symbol has few realized labels, cap weight
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             for sym in list(desired.keys()):
                 row = con.execute(
@@ -1151,17 +1159,17 @@ def compute_rebalance() -> Dict:
         except Exception:
             pass
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Capital allocation optimizer (return vs drawdown utility)
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             desired = _optimize_capital_allocation(desired)
         except Exception:
             pass
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Impact-aware sizing (penalize symbols with bad realized slippage)
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             desired = _apply_impact_aware_sizing(con, desired)
         except Exception:
@@ -1172,10 +1180,10 @@ def compute_rebalance() -> Dict:
             items = sorted(desired.items(), key=lambda kv: abs(float(kv[1].get("weight", 0.0))), reverse=True)
             desired = dict(items[: int(PORTFOLIO_MAX_POSITIONS)])
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Correlation pruning (avoid redundant bets)
         # Keep highest-weight candidates, drop those too correlated.
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         if PORTFOLIO_CORR_PRUNE and len(desired) > 1:
             try:
                 from dev_core.risk import corr_from_prices
@@ -1203,9 +1211,9 @@ def compute_rebalance() -> Dict:
             for sym in list(desired.keys()):
                 desired[sym]["weight"] = float(desired[sym]["weight"]) * float(scale)
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # A) VOL TARGETING (opt-in): scale weights by realized vol
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             from dev_core.risk import PORTFOLIO_USE_VOL_TARGET, realized_vol_from_prices, vol_scale_weight
             if PORTFOLIO_USE_VOL_TARGET:
@@ -1223,9 +1231,9 @@ def compute_rebalance() -> Dict:
         except Exception:
             pass
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # B) STRESS / REGIME GATE (opt-in): compress exposure under stress
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             if PORTFOLIO_USE_STRESS_GATE and desired:
                 st = _vix_stress(con)
@@ -1246,14 +1254,59 @@ def compute_rebalance() -> Dict:
                     scale_s = float(PORTFOLIO_GROSS_CAP) / float(gross_s)
                     for sym in list(desired.keys()):
                         desired[sym]["weight"] = float(desired[sym]["weight"]) * float(scale_s)
+       except Exception:
+            pass
+
+        # ---            -- ------------------------------------------------------
+        # B2) SOCIAL GATE (opt-in): block/downsizing under manipulation risk
+        # ---            -- ------------------------------------------------------
+        try:
+            if PORTFOLIO_USE_SOCIAL_GATE and desired:
+                from dev_core.social_risk import social_gate_for_symbol
+
+                for sym in list(desired.keys()):
+                    g = social_gate_for_symbol(
+                        con,
+                        str(sym),
+                        int(now_ms),
+                        bucket_sec=int(PORTFOLIO_SOCIAL_BUCKET_SEC),
+                        manip_block_th=float(PORTFOLIO_SOCIAL_MANIP_BLOCK_TH),
+                        shock_th=float(PORTFOLIO_SOCIAL_ATTEN_SHOCK_TH),
+                        shock_factor=float(PORTFOLIO_SOCIAL_SHOCK_FACTOR),
+                    ) or {}
+
+                    if g.get("block"):
+                        desired[sym]["weight"] = 0.0
+                        desired[sym]["side"] = "FLAT"
+                        desired[sym].setdefault("reason", {})
+                        desired[sym]["reason"]["social_gate_block"] = 1
+                        desired[sym]["reason"]["social_manip_risk"] = float(g.get("manip_risk", 0.0))
+                        desired[sym]["reason"]["social_attention_shock"] = float(g.get("attention_shock", 0.0))
+                        desired[sym]["reason"]["social_promo_likelihood"] = float(g.get("promo_likelihood_mean", 0.0))
+                        continue
+
+                    f = float(g.get("factor", 1.0))
+                    if f < 1.0:
+                        desired[sym]["weight"] = float(desired[sym]["weight"]) * f
+                        desired[sym].setdefault("reason", {})
+                        desired[sym]["reason"]["social_gate_factor"] = float(f)
+                        desired[sym]["reason"]["social_manip_risk"] = float(g.get("manip_risk", 0.0))
+                        desired[sym]["reason"]["social_attention_shock"] = float(g.get("attention_shock", 0.0))
+                        desired[sym]["reason"]["social_promo_likelihood"] = float(g.get("promo_likelihood_mean", 0.0))
+
+                # renormalize gross after social compression (still respect gross cap)
+                gross_soc = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+                if gross_soc > float(PORTFOLIO_GROSS_CAP) and gross_soc > 1e-9:
+                    scale_soc = float(PORTFOLIO_GROSS_CAP) / float(gross_soc)
+                    for sym in list(desired.keys()):
+                        desired[sym]["weight"] = float(desired[sym]["weight"]) * float(scale_soc)
         except Exception:
             pass
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # C) VOL-OF-VOL GATE (opt-in): per-symbol compression in unstable regimes
         # Uses price-only proxy from dev_core.tech_indicators (if present).
-        # ---------------------------------------------------------
-        try:
+        # ---------------------------------------------------------        try:
             if PORTFOLIO_USE_VOV_GATE and desired:
                 try:
                     from dev_core.tech_indicators import compute_tech_features
@@ -1292,10 +1345,10 @@ def compute_rebalance() -> Dict:
         except Exception:
             pass
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Phase 5.2: POSITION SIZE POLICY (confidence -> factor)
         # (must happen BEFORE orders are emitted)
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
 
         try:
             from dev_core.size_policy import load_latest_size_policy, size_factor
@@ -1321,12 +1374,12 @@ def compute_rebalance() -> Dict:
         except Exception:
             pass
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Phase 5.3: EXECUTION REALISM (opt-in)
         # - blocks/downsizes intents when symbol prices are stale
         # - downsizes under elevated stress (VIX z) if VIX is present
         # - downsizes under high ATR% (volatility proxy)
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         if PORTFOLIO_USE_EXEC_REALISM:
             for sym in list(desired.keys()):
                 try:
@@ -1352,9 +1405,9 @@ def compute_rebalance() -> Dict:
             for sym in list(desired.keys()):
                 desired[sym]["weight"] = float(desired[sym]["weight"]) * float(scale3)
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Phase 6: REGIME-AWARE SIZE THROTTLE (LOW/MID/HIGH)
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             from dev_core.regime_size import regime_multiplier
             reg, mult = regime_multiplier()
@@ -1378,9 +1431,9 @@ def compute_rebalance() -> Dict:
         except Exception:
             pass
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Phase 2: PORTFOLIO HARD RISK GATE (net / turnover / dd add-block)
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             desired, _gate = apply_portfolio_risk_gate(con, desired, state, now_ms=int(now_ms))
             try:
@@ -1394,17 +1447,17 @@ def compute_rebalance() -> Dict:
         except Exception:
             _gate = None
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Burst control: temporal clustering dampener
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             desired = _apply_temporal_dampener(con, desired, now_ms=int(now_ms))
         except Exception:
             pass
 
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Capital-at-Risk gate (tail-risk budget)
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             desired, _car = _apply_capital_at_risk_gate(desired)
             try:
@@ -1534,9 +1587,9 @@ def compute_rebalance() -> Dict:
                 changed.append(sym)
 
         # (size policy applied earlier, before order emission)
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         # Update live drawdown meta (equity proxy from weights)
-        # ---------------------------------------------------------
+        # ---            -- ------------------------------------------------------
         try:
             # Simple proxy: peak gross vs current gross
             gross_now = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())

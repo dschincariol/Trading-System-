@@ -25,6 +25,8 @@ def audit(
     init_db()
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT INTO model_promotion_audit(

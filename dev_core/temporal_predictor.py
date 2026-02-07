@@ -38,9 +38,9 @@ except Exception:
 from dev_core.storage import connect
 from dev_core.asset_map import asset_class_for_symbol
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # Flags
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 TEMPORAL_SHADOW = os.environ.get("TEMPORAL_PRED_SHADOW", "0") == "1"
 
 # Sequence length used by predictor (must match training)
@@ -52,9 +52,9 @@ TEMPORAL_CONF_K = float(os.environ.get("TEMPORAL_CONF_K", "75.0"))
 # Use temporal embeddings table instead of base embeddings (if populated)
 USE_TEMPORAL_EMB = os.environ.get("USE_TEMPORAL_EMB_TABLE", "0") == "1"
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # Determinism (CPU inference; best-effort)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 _TORCH_SEED = 42
 torch.manual_seed(_TORCH_SEED)
 try:
@@ -67,14 +67,14 @@ try:
 except Exception:
     pass
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # Blob format
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 _TMAGIC = b"TMP1"
 
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # Shadow logging schema (A.7)
-# -------------------------------------------------------------------
+# -------------            -- ------------------------------------------------------
 # Shadow-mode only: write predictions for later evaluation.
 # This DOES NOT affect alerts/execution.
 _TEMPORAL_SHADOW_SCHEMA = """
@@ -150,6 +150,8 @@ def log_temporal_shadow_prediction(
         model_n = int(e.get("model_n") or 0)
 
         payload = json.dumps(e, separators=(",", ":"), sort_keys=True)
+
+        ok = 0 if had_error else 1
 
         con.execute(
             """

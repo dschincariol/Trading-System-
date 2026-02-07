@@ -15,7 +15,10 @@ from dev_core.storage import (
 )
 
 JOB_NAME = "calibrate_price_confidence"
-OWNER = os.environ.get("JOB_OWNER", os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")))
+OWNER = os.environ.get(
+    "JOB_OWNER",
+    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
+)
 PID = os.getpid()
 
 LOCK_STALE_AFTER_S = int(os.environ.get("JOB_LOCK_STALE_AFTER_S", "180"))
@@ -209,7 +212,9 @@ def build_labels_and_calibration():
                 "vol_proxy": float(vol),
             }
 
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT OR REPLACE INTO labels_price(
                   ts_pred_ms, ts_eval_ms, symbol, horizon_s,
@@ -232,7 +237,9 @@ def build_labels_and_calibration():
             inserted_labels += 1
 
             # price_realized_returns keyed on eval ts (so it lines up with “outcome time”)
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT OR REPLACE INTO price_realized_returns(ts_ms, symbol, ret)
                 VALUES (?,?,?)
@@ -287,7 +294,9 @@ def build_labels_and_calibration():
             payload["horizon_s"] = int(h)
             payload["updated_ts_ms"] = int(now_ms)
 
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT OR REPLACE INTO confidence_calibration(
                   symbol, horizon_s, method, updated_ts_ms, payload_json
@@ -305,7 +314,7 @@ def build_labels_and_calibration():
 
 
 def main():
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance is holding the job lock; exiting")
         raise SystemExit(2)
 

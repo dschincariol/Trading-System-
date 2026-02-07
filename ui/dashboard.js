@@ -1353,10 +1353,10 @@ async function loadSizePolicy() {
   }
 }
 
-// ------------------------------------------------------------
+// ------            -- ------------------------------------------------------
 // Equity Drift Chart (Broker vs Backtest)
 // Uses: GET /api/equity_drift
-// ------------------------------------------------------------
+// ------            -- ------------------------------------------------------
 async function loadEquityDrift() {
   const panel = document.getElementById("equityDriftPanel");
   const canvas = document.getElementById("equityDriftCanvas");
@@ -1611,7 +1611,116 @@ let _pauseRefresh = false;
 
 const _PROMO_PAUSED_KEY = "promo_paused_due_to_exec_v1";
 
+// ---------- HARD MANIPULATION KILL-SWITCH (STEP 5) ----------
+// IMPORTANT:
+// This kill-switch is UI-enforced only.
+// Server-side execution MUST independently enforce manipulation blocks
+// to guarantee "never trade" safety.
+// UI-enforced safety brake: blocks manual actions when alerts indicate
+// likely social manipulation / bot promo / coordinated pump risk.
+//
+// NOTE: This is UI-only enforcement based on your existing alerts stream.
+// Server-side must also enforce if you want "never trade" guarantees.
+const _MANIP_STATE_KEY = "ui_manip_killswitch_v1";
+
+let _manipBlockedSyms = new Set();
+let _manipReasons = []; // [{symbol, severity, why, id, ts_ms}]
+
+// restore last known manipulation state (best-effort)
+try {
+  const raw = localStorage.getItem(_MANIP_STATE_KEY);
+  if (raw) {
+    const st = JSON.parse(raw);
+    _manipBlockedSyms = new Set(st.blocked || []);
+    _manipReasons = st.reasons || [];
+  }
+} catch {}
+
+function _kwHit(s) {
+  return /(bot|promo|promot|manip|coordinat|astroturf|pump|dump|raid|brigad|shill|sockpuppet|spam)/i.test(String(s || ""));
+}
+
+function _isManipulationAlert(r) {
+  if (!r) return false;
+  const sev = String(r.severity || "").toUpperCase();
+  if (sev !== "WARN" && sev !== "CRIT") return false;
+
+  // Quantitative evidence (preferred when available)
+  if (typeof r.manip_risk === "number" && r.manip_risk >= 0.7) return true;
+  if (typeof r.bot_likelihood === "number" && r.bot_likelihood >= 0.7) return true;
+  if (typeof r.promo_likelihood === "number" && r.promo_likelihood >= 0.7) return true;
+
+  // Fallback: keyword scan
+  const t = `${r.event_title || ""} ${r.reason || ""} ${r.symbol || ""} ${r.rule_id || ""}`;
+  return _kwHit(t);
+}
+
+function _updateManipulationStateFromAlerts(rows) {
+  const blocked = new Set();
+  const reasons = [];
+
+  for (const r of (rows || [])) {
+    if (r && r.resolved) continue;
+    if (!_isManipulationAlert(r)) continue;
+
+    const sym = String(r.symbol || "").toUpperCase() || "UNKNOWN";
+    blocked.add(sym);
+
+    reasons.push({
+      symbol: sym,
+      severity: String(r.severity || ""),
+      why: String(r.reason || r.event_title || "manipulation risk"),
+      id: r.id,
+      ts_ms: r.ts_ms
+    });
+  }
+
+  _manipBlockedSyms = blocked;
+  _manipReasons = reasons.slice(0, 50);
+
+  // persist (best-effort)
+  try {
+    localStorage.setItem(_MANIP_STATE_KEY, JSON.stringify({
+      ts_ms: Date.now(),
+      blocked: Array.from(_manipBlockedSyms),
+      reasons: _manipReasons
+    }));
+  } catch {}
+}
+
+function _isManipulationBlocked(sym) {
+  if (!_manipBlockedSyms || _manipBlockedSyms.size === 0) return false;
+  const s = String(sym || "").toUpperCase();
+  if (!s) return true; // global block if unknown
+  return _manipBlockedSyms.has(s) || _manipBlockedSyms.has("GLOBAL") || _manipBlockedSyms.has("EXECUTION");
+}
+
+function _manipBlockSummary() {
+  const syms = Array.from(_manipBlockedSyms || []);
+  return syms.length ? syms.join(", ") : "(none)";
+}
+
+function _hardBlockActionIfManipulated(actionName, symbol) {
+  // HARD block unless explicitly Expert-unlocked
+  if (EXPERT_UNLOCK) return false;
+
+  if (_isManipulationBlocked(symbol || "")) {
+    const msg =
+      `HARD BLOCK (${actionName}) — manipulation risk flagged for: ${_manipBlockSummary()}`;
+
+    const el = document.getElementById("console");
+    if (el) el.textContent += `[kill-switch] ${msg}\n`;
+
+    toast(msg, "bad", 5200);
+    return true;
+  }
+  return false;
+}
+
 async function _maybeAutoResumePromotionsAfterRecovery() {
+  // Never auto-resume promotions during manipulation risk
+  if (_manipBlockedSyms && _manipBlockedSyms.size > 0) return;
+
   // Only attempt if we previously paused due to execution degradation
   if (localStorage.getItem(_PROMO_PAUSED_KEY) !== "1") return;
 
@@ -1706,6 +1815,14 @@ async function loadAlerts() {
       : [];
 
   _lastAlerts = rows;
+
+  // STEP 5: update manipulation kill-switch state (from existing alerts stream)
+  _updateManipulationStateFromAlerts(_lastAlerts);
+
+  // keep visuals + decision state in sync
+  const filtered = _filterAlerts(_lastAlerts || []);
+  renderHeatmap(filtered);
+  renderIncidentQueue(filtered);
 
   // explain_json fetched on-demand (no eager parsing)
 
@@ -1976,6 +2093,7 @@ async function loadMarketStress() {
       hdr.textContent = Number.isFinite(score)
         ? `Stress: ${score.toFixed(2)}`
         : "Stress: —";
+    }
 
     if (Number.isFinite(ts_ms) && ts_ms > 0) {
       updated.textContent = new Date(ts_ms).toLocaleString();
@@ -2503,6 +2621,97 @@ async function loadConfidenceMass() {
   }
 }
 
+// ------            -- ------------------------------------------------------
+// Social (read-only) panels
+// ------            -- ------------------------------------------------------
+
+async function loadSocialPressure() {
+  const body = document.getElementById("socialPressureBody");
+  if (!body) return;
+
+  const sym = (document.getElementById("globalSymbol")?.value || "SPY").toUpperCase();
+
+  try {
+    const d = await fetchJSON(`/api/social/features?symbol=${encodeURIComponent(sym)}&limit=50`);
+    const rows = (d && d.rows) ? d.rows : [];
+
+    body.innerHTML = "";
+    for (const r of rows.slice(0, 20)) {
+      body.insertAdjacentHTML("beforeend", `
+        <tr>
+          <td class="mono">${fmtTime(r.bucket_ts_ms)}</td>
+          <td class="mono">${Number(r.mention_rate_z).toFixed(2)}</td>
+          <td class="mono">${Number(r.attention_shock).toFixed(2)}</td>
+          <td class="mono">${Number(r.manip_risk).toFixed(2)}</td>
+          <td class="mono">${Number(r.cross_platform_confirm).toFixed(2)}</td>
+        </tr>
+      `);
+    }
+
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="5" class="small">(no social data)</td></tr>`;
+    }
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5" class="small">error loading social features</td></tr>`;
+  }
+}
+
+async function loadSocialRegimes() {
+  const body = document.getElementById("socialRegimeBody");
+  if (!body) return;
+
+  const sym = (document.getElementById("globalSymbol")?.value || "SPY").toUpperCase();
+
+  try {
+    const d = await fetchJSON(`/api/social/regimes?symbol=${encodeURIComponent(sym)}&limit=50`);
+    const rows = (d && d.rows) ? d.rows : [];
+
+    body.innerHTML = "";
+    for (const r of rows.slice(0, 20)) {
+      body.insertAdjacentHTML("beforeend", `
+        <tr>
+          <td class="mono">${fmtTime(r.bucket_ts_ms)}</td>
+          <td>${esc(r.regime)}</td>
+          <td class="mono">${Number(r.regime_conf).toFixed(2)}</td>
+        </tr>
+      `);
+    }
+
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="3" class="small">(no regimes)</td></tr>`;
+    }
+  } catch {
+    body.innerHTML = `<tr><td colspan="3" class="small">error loading regimes</td></tr>`;
+  }
+}
+
+async function loadSocialBlocks() {
+  const body = document.getElementById("socialBlocksBody");
+  if (!body) return;
+
+  try {
+    const d = await fetchJSON(`/api/social/blocks?limit=20`);
+    const rows = (d && d.rows) ? d.rows : [];
+
+    body.innerHTML = "";
+    for (const r of rows.slice(0, 10)) {
+      body.insertAdjacentHTML("beforeend", `
+        <tr>
+          <td class="mono">${fmtTime(r.ts_ms)}</td>
+          <td class="mono">${esc(r.symbol)}</td>
+          <td class="small"><code>${escapeHTML(JSON.stringify(r.reason || {}))}</code></td>
+        </tr>
+      `);
+    }
+
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="3" class="small">(no social blocks)</td></tr>`;
+    }
+  } catch {
+    body.innerHTML = `<tr><td colspan="3" class="small">error loading blocks</td></tr>`;
+  }
+}
+
 async function loadJobHistory() {
 
   const panel = document.getElementById("jobHistoryPanel");
@@ -2566,10 +2775,10 @@ async function loadConfidenceTrends() {
   }
 }
 
-// ------------------------------------------------------------
+// ------            -- ------------------------------------------------------
 // Portfolio Backtest (Latest) — equity curve + drawdown charts
 // Endpoint: GET /api/backtest/portfolio/latest
-// ------------------------------------------------------------
+// ------            -- ------------------------------------------------------
 function fmtNum(x) {
   if (x === null || x === undefined) return "";
   const v = Number(x);
@@ -2855,6 +3064,9 @@ _isExecutionDegraded()
   await Promise.allSettled([
     loadTemporalEval(),
     loadTemporalShadowEval(),
+    loadSocialPressure(),
+    loadSocialRegimes(),
+    loadSocialBlocks(),
     loadPromotionAudit(),
     refreshCalibCurves(),
     loadModelRegistry(),
@@ -2918,6 +3130,9 @@ function wirePromotionButtons() {
 
   if (btnToggle) {
     btnToggle.addEventListener("click", async () => {
+  // STEP 5: HARD manipulation kill-switch (UI enforcement)
+  if (_hardBlockActionIfManipulated("toggle promotions", "GLOBAL")) return;
+
   if (_isExecutionDegraded()) {
     localStorage.setItem("promo_paused_due_to_exec_v1", "1");
     toast("Promotions paused due to execution degradation", "warn", 4000);
@@ -3003,12 +3218,16 @@ function wireUI() {
 const btnPipeline = document.getElementById("btnRunPipeline");
 if (btnPipeline) {
   btnPipeline.addEventListener("click", async () => {
+    // STEP 5: HARD manipulation kill-switch (UI enforcement)
+    if (_hardBlockActionIfManipulated("pipeline", "GLOBAL")) return;
+
     if (_isExecutionDegraded() && !OPERATOR_MODE) {
       const ok = confirm(
         "Execution degradation detected.\n\nRunning full pipeline may amplify bad execution.\n\nProceed anyway?"
       );
       if (!ok) return;
     }
+
 
     setSelectedJob("pipeline");
 
@@ -3033,32 +3252,6 @@ if (btnPipeline) {
   });
 }
 
-  setSelectedJob("pipeline");
-
-  const el = document.getElementById("console");
-  if (el) el.textContent = "[ui] starting pipeline...\n";
-
-  try {
-    const res = await fetchJSON("/api/pipeline/run");
-    if (!res || !res.ok) throw new Error(res?.error || "pipeline failed");
-
-    if (el) el.textContent += "[ui] pipeline finished\n";
-toast("Pipeline finished successfully", "ok");
-
-    // refresh state-heavy panels
-    loadHealth();
-    loadPortfolio();
-    loadBroker();
-    loadPortfolioBacktestLatest();
-  } catch (e) {
-    if (el) el.textContent += `[ui] ERROR: ${e.message}\n`;
-toast(`Pipeline error: ${e.message}`, "bad", 4000);
-
-  }
-});
-
-  }
-
     const btnPortBt = document.getElementById("btnRunPortfolioBacktest");
   if (btnPortBt) {
     btnPortBt.addEventListener("click", async () => {
@@ -3077,6 +3270,9 @@ document.querySelectorAll("button[data-job]").forEach((btn) => {
   btn.addEventListener("click", async () => {
     const name = btn.getAttribute("data-job");
     const action = btn.getAttribute("data-action") || "start";
+
+    // STEP 5: HARD manipulation kill-switch (UI enforcement)
+    if (action === "start" && _hardBlockActionIfManipulated(`job:${name}`, "GLOBAL")) return;
 
     // FORCE CONFIRM ON JOB START when execution is degraded (non-operator mode)
     if (action === "start" && _isExecutionDegraded() && !OPERATOR_MODE) {
@@ -3168,6 +3364,9 @@ if (btnFix) {
     const btnCh = document.getElementById("btnRunChallenger");
   if (btnCh) {
     btnCh.addEventListener("click", async () => {
+      // STEP 5: HARD manipulation kill-switch (UI enforcement)
+      if (_hardBlockActionIfManipulated("challenger run", "GLOBAL")) return;
+
       btnCh.disabled = true;
       try {
         const el = document.getElementById("console");

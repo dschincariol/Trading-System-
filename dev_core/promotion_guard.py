@@ -7,15 +7,15 @@ from typing import Dict, Any, Tuple
 
 from dev_core.storage import connect, init_db
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Global enable switch (env default ON)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 PROMOTION_ENABLED_ENV = os.environ.get("PROMOTION_ENABLED", "1") == "1"
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Guard thresholds
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 PROMOTION_CRIT_ALERT_LOOKBACK_S = int(os.environ.get("PROMOTION_CRIT_ALERT_LOOKBACK_S", "7200"))  # 2h
 PROMOTION_MAX_CRIT_ALERTS = int(os.environ.get("PROMOTION_MAX_CRIT_ALERTS", "0"))  # 0 => any CRIT blocks
@@ -30,9 +30,9 @@ PROMOTION_BLOCK_IF_EQUITY_CRIT = os.environ.get(
     "PROMOTION_BLOCK_IF_EQUITY_CRIT", "1"
 ) == "1"
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Logging
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -40,29 +40,31 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [promotion_guard] %(message)s",
 )
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Coverage / sanity thresholds (metric-based promotion)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 MIN_EVAL_ROWS = int(os.environ.get("PROMOTE_MIN_EVAL_ROWS", "200"))
 MAX_ABS_RMSE = float(os.environ.get("PROMOTE_MAX_ABS_RMSE", "10.0"))
 MAX_ABS_BIAS = float(os.environ.get("PROMOTE_MAX_ABS_BIAS", "5.0"))
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Time helper
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Guard state (DB overrides env)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def set_guard(key: str, value: str) -> None:
     init_db()
     con = connect()
     try:
+        ok = 0 if had_error else 1
+
         con.execute(
             """
             INSERT OR REPLACE INTO model_promotion_guard(key, value, updated_ts_ms)
@@ -87,9 +89,9 @@ def get_guard(key: str, default: str) -> str:
     finally:
         con.close()
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # A) Metric-based promotion decision (RESTORED, not lost)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def promotion_allowed_by_metrics(
     challenger_metrics: Dict[str, Any],
@@ -153,9 +155,9 @@ def promotion_allowed_by_metrics(
         logging.error("PROMOTE_BLOCKED metrics exception=%r", e)
         return False
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # B) System-state promotion guard (public API)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def promotion_allowed() -> Tuple[bool, Dict[str, Any]]:
     """

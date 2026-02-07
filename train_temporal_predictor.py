@@ -28,9 +28,9 @@ from dev_core.storage import connect, init_db, acquire_job_lock, release_job_loc
 from dev_core.asset_map import asset_class_for_symbol
 from dev_core.training_guard import training_allowed
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Job identity
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 JOB_NAME = "train_temporal_predictor"
 OWNER = os.environ.get(
@@ -39,9 +39,9 @@ OWNER = os.environ.get(
 )
 PID = os.getpid()
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Constants / schema
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 _TMAGIC = b"TMP1"
 _TORCH_SEED = 42
@@ -78,9 +78,9 @@ CREATE TABLE IF NOT EXISTS temporal_model_eval (
 );
 """
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Model
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 class _TemporalMLP(nn.Module):
     def __init__(self, input_dim: int, hidden: List[int]):
@@ -97,9 +97,30 @@ class _TemporalMLP(nn.Module):
         return self.net(x).squeeze(-1)
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Helpers
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
+
+def _put_provider_health(con, ts_ms: int, provider: str, ok: int, latency_ms: int, n_symbols: int, error: str = None) -> None:
+    con.execute(
+        """
+        INSERT INTO price_provider_health(ts_ms, provider, ok, latency_ms, n_symbols, error)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(provider, ts_ms) DO UPDATE SET
+          ok=excluded.ok,
+          latency_ms=excluded.latency_ms,
+          n_symbols=excluded.n_symbols,
+          error=excluded.error
+        """,
+        (
+            int(ts_ms),
+            str(provider),
+            int(ok),
+            (int(latency_ms) if latency_ms is not None else None),
+            int(n_symbols),
+            (str(error) if error else None),
+        ),
+    )
 
 def _serialize_payload(payload: Dict) -> bytes:
     buf = io.BytesIO()
@@ -253,9 +274,9 @@ def _set_deterministic(seed: int = _TORCH_SEED) -> None:
         pass
 
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Main
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def main() -> int:
     init_db()

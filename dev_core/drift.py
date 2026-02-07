@@ -68,7 +68,9 @@ def compute_and_store_drift():
 
             drift_ratio = float(mae_recent / mae_base)
 
-            con.execute(
+            pass
+
+        con.execute(
                 """
                 INSERT INTO model_drift(symbol, horizon_s, ts_ms, n, mae, baseline_mae, drift_ratio)
                 VALUES (?,?,?,?,?,?,?)

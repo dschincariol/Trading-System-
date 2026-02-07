@@ -36,18 +36,18 @@ from dev_core.kill_switch import execution_allowed, activate
 from dev_core.model_v2 import get_current_regime
 from dev_core.rules_engine import evaluate_rules
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Optional health gate (fail-closed if present)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 try:
     from dev_core.health import get_health_snapshot
 except Exception:
     def get_health_snapshot() -> Dict[str, Any]:
         return {"ok": True}
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Job / runtime config
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 JOB_NAME = "portfolio_rebalance"
 OWNER = os.environ.get(
@@ -71,9 +71,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [portfolio_rebalance] %(message)s",
 )
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Risk state (fail-closed)
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def _risk_state(con) -> Tuple[bool, str]:
     """
@@ -114,14 +114,14 @@ def _risk_state(con) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"risk_state_error {e}"
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Main loop
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 def main() -> int:
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance is holding the job lock; exiting")
         return 2
 
@@ -131,9 +131,9 @@ def main() -> int:
         while True:
             con = connect()
             try:
-                # ---------------------------------------------------------
+                # ---            -- ------------------------------------------------------
                 # Phase 5/6/7: rules engine (global + per-symbol halts)
-                # ---------------------------------------------------------
+                # ---            -- ------------------------------------------------------
                 try:
                     evaluate_rules()
                 except Exception:
@@ -198,9 +198,9 @@ def main() -> int:
                 executed: List[Dict[str, Any]] = []
                 skipped: List[Dict[str, Any]] = []
 
-                # ------------------------------------------------------------
+                # ------            -- ------------------------------------------------------
                 # Filter + execute intents (paper/intent-only)
-                # ------------------------------------------------------------
+                # ------            -- ------------------------------------------------------
                 for it in intents:
                     conf = float(it.get("confidence", 0.0))
                     if conf < MIN_CONFIDENCE:
@@ -251,9 +251,9 @@ def main() -> int:
             finally:
                 con.close()
 
-            # ------------------------------------------------------------
+            # ------            -- ------------------------------------------------------
             # Heartbeat + sleep
-            # ------------------------------------------------------------
+            # ------            -- ------------------------------------------------------
             now_s = time.time()
             if (now_s - last_hb_s) >= HEARTBEAT_EVERY_S:
                 try:
@@ -284,9 +284,9 @@ def main() -> int:
         except Exception:
             pass
 
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 # Ensure lock release on shutdown
-# ------------------------------------------------------------
+# ------            -- ------------------------------------------------------
 
 if __name__ == "__main__":
     try:

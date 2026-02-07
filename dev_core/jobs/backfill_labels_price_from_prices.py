@@ -31,7 +31,10 @@ from dev_core.storage import (
 )
 
 JOB_NAME = "backfill_labels_price"
-OWNER = os.environ.get("JOB_OWNER", os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")))
+OWNER = os.environ.get(
+    "JOB_OWNER",
+    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
+)
 PID = os.getpid()
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -106,7 +109,7 @@ def _rolling_z(con, symbol: str, horizon_s: int, new_ret: float) -> float:
 def main():
     init_db()
 
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S):
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
         logging.error("another instance holds lock; exiting")
         raise SystemExit(2)
 
@@ -172,7 +175,9 @@ def main():
                     ret_z = _rolling_z(con, sym, int(h), float(ret))
 
                     try:
-                        con.execute(
+                        pass
+
+        con.execute(
                             """
                             INSERT OR REPLACE INTO labels_price(
                               ts_pred_ms, ts_eval_ms, symbol, horizon_s,
