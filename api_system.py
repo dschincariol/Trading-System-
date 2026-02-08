@@ -6,3 +6,5 @@ ROUTE_SPECS = [
     ("GET", "/api/system/kill_switches", "api_get_kill_switches"),
     ("GET", "/api/health", "api_get_health"),
 ]
+
+ROUTE_SPECS_SYSTEM = ROUTE_SPECS

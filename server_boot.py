@@ -89,6 +89,7 @@ from api_ops import ROUTE_SPECS_OPS
 
 from api_handlers import (
     api_get_health,
+    api_get_kill_switches,
     api_get_jobs,
     api_get_job_log,
     api_get_job_history,
@@ -101,7 +102,148 @@ from api_handlers import (
     api_post_pipeline_run,
 )
 
+# Many ops endpoints are implemented in dashboard_server.py (legacy),
+# but are still part of ROUTE_SPECS_OPS. Import + adapt them here.
+try:
+    from dashboard_server import (
+        get_model_registry,
+        get_embed_model_eval,
+        get_embed_conf_calib,
+        get_temporal_eval,
+        get_temporal_models,
+        get_latest_portfolio_backtest,
+        get_execution_metrics_by_symbol,
+        get_execution_cost_by_confidence,
+        get_social_features,
+        get_social_regimes,
+        get_social_blocks,
+        api_get_validation,
+        api_get_confidence_mass,
+        api_post_rollback,
+    )
+except Exception:
+    get_model_registry = None
+    get_embed_model_eval = None
+    get_embed_conf_calib = None
+    get_temporal_eval = None
+    get_temporal_models = None
+    get_latest_portfolio_backtest = None
+    get_execution_metrics_by_symbol = None
+    get_execution_cost_by_confidence = None
+    get_social_features = None
+    get_social_regimes = None
+    get_social_blocks = None
+    api_get_validation = None
+    api_get_confidence_mass = None
+    api_post_rollback = None
+
 ROUTE_SPECS = list(ROUTE_SPECS_SYSTEM) + list(ROUTE_SPECS_JOBS) + list(ROUTE_SPECS_OPS)
+
+def _qs(parsed):
+    try:
+        q = parse_qs(parsed.query or "", keep_blank_values=True)
+        return {k: (v[0] if isinstance(v, list) and v else "") for k, v in q.items()}
+    except Exception:
+        return {}
+
+def _missing(name: str):
+    return {"ok": False, "error": f"handler_unavailable:{name}"}
+
+def _wrap_get_model_registry(parsed, _ctx):
+    if not get_model_registry:
+        return _missing("get_model_registry")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "50") or "50")
+    return get_model_registry(limit=limit)
+
+def _wrap_get_embed_model_eval(parsed, _ctx):
+    if not get_embed_model_eval:
+        return _missing("get_embed_model_eval")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "500") or "500")
+    return get_embed_model_eval(limit=limit)
+
+def _wrap_get_embed_conf_calib(parsed, _ctx):
+    if not get_embed_conf_calib:
+        return _missing("get_embed_conf_calib")
+    qs = _qs(parsed)
+    horizon_s = int(qs.get("horizon_s", "0") or "0")
+    model_kind = str(qs.get("model_kind", "") or "")
+    limit = int(qs.get("limit", "200") or "200")
+    return get_embed_conf_calib(horizon_s=horizon_s, model_kind=model_kind, limit=limit)
+
+def _wrap_get_temporal_eval(parsed, _ctx):
+    if not get_temporal_eval:
+        return _missing("get_temporal_eval")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "50") or "50")
+    return get_temporal_eval(limit=limit)
+
+def _wrap_get_temporal_models(parsed, _ctx):
+    if not get_temporal_models:
+        return _missing("get_temporal_models")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "20") or "20")
+    return get_temporal_models(limit=limit)
+
+def _wrap_get_latest_portfolio_backtest(_parsed, _ctx):
+    if not get_latest_portfolio_backtest:
+        return _missing("get_latest_portfolio_backtest")
+    return get_latest_portfolio_backtest()
+
+def _wrap_get_execution_metrics_by_symbol(parsed, _ctx):
+    if not get_execution_metrics_by_symbol:
+        return _missing("get_execution_metrics_by_symbol")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "50") or "50")
+    return get_execution_metrics_by_symbol(limit=limit)
+
+def _wrap_get_execution_cost_by_confidence(_parsed, _ctx):
+    if not get_execution_cost_by_confidence:
+        return _missing("get_execution_cost_by_confidence")
+    return get_execution_cost_by_confidence()
+
+def _wrap_get_social_features(parsed, _ctx):
+    if not get_social_features:
+        return _missing("get_social_features")
+    qs = _qs(parsed)
+    symbol = str(qs.get("symbol", "") or "").strip()
+    if not symbol:
+        return {"ok": False, "error": "missing_symbol"}
+    limit = int(qs.get("limit", "200") or "200")
+    return get_social_features(symbol=symbol, limit=limit)
+
+def _wrap_get_social_regimes(parsed, _ctx):
+    if not get_social_regimes:
+        return _missing("get_social_regimes")
+    qs = _qs(parsed)
+    symbol = str(qs.get("symbol", "") or "").strip()
+    if not symbol:
+        return {"ok": False, "error": "missing_symbol"}
+    limit = int(qs.get("limit", "200") or "200")
+    return get_social_regimes(symbol=symbol, limit=limit)
+
+def _wrap_get_social_blocks(parsed, _ctx):
+    if not get_social_blocks:
+        return _missing("get_social_blocks")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "200") or "200")
+    return get_social_blocks(limit=limit)
+
+def _wrap_api_get_validation(parsed, _ctx):
+    if not api_get_validation:
+        return _missing("api_get_validation")
+    return api_get_validation(parsed)
+
+def _wrap_api_get_confidence_mass(parsed, _ctx):
+    if not api_get_confidence_mass:
+        return _missing("api_get_confidence_mass")
+    return api_get_confidence_mass(parsed)
+
+def _wrap_api_post_rollback(parsed, body, _ctx):
+    if not api_post_rollback:
+        return _missing("api_post_rollback")
+    return api_post_rollback(parsed, body)
 
 
 def _ensure_equity_drift():
@@ -192,17 +334,40 @@ def _ensure_temporal_models():
 
 def _build_api_handlers():
     return {
+        # system
         "api_get_health": api_get_health,
+        "api_get_kill_switches": api_get_kill_switches,
+
+        # jobs
         "api_get_jobs": api_get_jobs,
         "api_get_job_log": api_get_job_log,
         "api_get_job_history": api_get_job_history,
+        "api_post_job_start": api_post_job_start,
+        "api_post_job_stop": api_post_job_stop,
+        "api_post_pipeline_run": api_post_pipeline_run,
+
+        # ops (direct)
         "api_get_alerts": api_get_alerts,
         "api_get_model_diagnostics": api_get_model_diagnostics,
         "api_get_execution_metrics": api_get_execution_metrics,
         "api_get_execution_metrics_rolling": api_get_execution_metrics_rolling,
-        "api_post_job_start": api_post_job_start,
-        "api_post_job_stop": api_post_job_stop,
-        "api_post_pipeline_run": api_post_pipeline_run,
+
+        # ops (legacy dashboard_server functions, adapted to (parsed, ctx))
+        "api_get_validation": _wrap_api_get_validation,
+        "api_get_confidence_mass": _wrap_api_get_confidence_mass,
+        "api_post_rollback": _wrap_api_post_rollback,
+
+        "get_model_registry": _wrap_get_model_registry,
+        "get_embed_model_eval": _wrap_get_embed_model_eval,
+        "get_embed_conf_calib": _wrap_get_embed_conf_calib,
+        "get_temporal_eval": _wrap_get_temporal_eval,
+        "get_temporal_models": _wrap_get_temporal_models,
+        "get_latest_portfolio_backtest": _wrap_get_latest_portfolio_backtest,
+        "get_execution_metrics_by_symbol": _wrap_get_execution_metrics_by_symbol,
+        "get_execution_cost_by_confidence": _wrap_get_execution_cost_by_confidence,
+        "get_social_features": _wrap_get_social_features,
+        "get_social_regimes": _wrap_get_social_regimes,
+        "get_social_blocks": _wrap_get_social_blocks,
     }
 
 
@@ -405,7 +570,7 @@ def run_server():
 
     if AUTO_PIPELINE:
         print(f"[auto_pipeline] enabled interval_s={AUTO_PIPELINE_INTERVAL_S}")
-        t = threading.Thread(target=_auto_pipeline_loop, args=(JOBS,), daemon=True)
+        t = threading.Thread(target=auto_pipeline_loop, args=(JOBS,), daemon=True)
         t.start()
         threads.append(t)
 
@@ -413,7 +578,7 @@ def run_server():
         print(
             f"[auto_challenger] enabled interval_s={AUTO_CHALLENGER_INTERVAL_S} drift_gate={AUTO_CHALLENGER_MIN_DRIFT}"
         )
-        t = threading.Thread(target=_auto_challenger_loop, args=(JOBS,), daemon=True)
+        t = threading.Thread(target=auto_challenger_loop, args=(JOBS,), daemon=True)
         t.start()
         threads.append(t)
 
@@ -429,6 +594,7 @@ def run_server():
         "LAST_AUTO_CHALLENGER_TS": None,
         "LAST_AUTO_SIZE_POLICY_TS": None,
     }
+    httpd.CTX = CTX
 
     # Kill-switch / shutdown hardening:
     # - use handle_request loop with timeout so stop_event can end the server promptly

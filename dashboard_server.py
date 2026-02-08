@@ -66,7 +66,17 @@ from dev_core.execution_mode import (
 
 from dev_core.market_stress import get_market_stress_snapshot as _market_stress_snapshot
 
+try:
+    from api_handlers import api_get_kill_switches as _api_get_kill_switches_impl
+    from api_handlers import api_get_job_log as _api_get_job_log_impl
+    from api_handlers import api_get_job_history as _api_get_job_history_impl
+except Exception:
+    _api_get_kill_switches_impl = None
+    _api_get_job_log_impl = None
+    _api_get_job_history_impl = None
+
 ALLOWED_JOBS = {
+
     "post_promotion_monitor": ("post_promotion_monitor.py", "oneshot"),
     "kill_slippage_monitor": ("kill_slippage_monitor.py", "oneshot"),
     "kill_drift_monitor": ("kill_drift_monitor.py", "oneshot"),
@@ -3164,20 +3174,237 @@ from api_ops import ROUTE_SPECS_OPS
 
 ROUTE_SPECS = list(ROUTE_SPECS_SYSTEM) + list(ROUTE_SPECS_JOBS) + list(ROUTE_SPECS_OPS)
 
+def _qs(parsed):
+    try:
+        q = parse_qs(parsed.query or "", keep_blank_values=True)
+        return {k: (v[0] if isinstance(v, list) and v else "") for k, v in q.items()}
+    except Exception:
+        return {}
+
+def _missing(name: str):
+    return {"ok": False, "error": f"handler_unavailable:{name}"}
+
+def _wrap_get_model_registry(parsed, _ctx):
+    if not get_model_registry:
+        return _missing("get_model_registry")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "50") or "50")
+    return get_model_registry(limit=limit)
+
+def _wrap_get_embed_model_eval(parsed, _ctx):
+    if not get_embed_model_eval:
+        return _missing("get_embed_model_eval")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "500") or "500")
+    return get_embed_model_eval(limit=limit)
+
+def _wrap_get_embed_conf_calib(parsed, _ctx):
+    if not get_embed_conf_calib:
+        return _missing("get_embed_conf_calib")
+    qs = _qs(parsed)
+    horizon_s = int(qs.get("horizon_s", "0") or "0")
+    model_kind = str(qs.get("model_kind", "") or "")
+    limit = int(qs.get("limit", "200") or "200")
+    return get_embed_conf_calib(horizon_s=horizon_s, model_kind=model_kind, limit=limit)
+
+def _wrap_get_temporal_eval(parsed, _ctx):
+    if not get_temporal_eval:
+        return _missing("get_temporal_eval")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "50") or "50")
+    return get_temporal_eval(limit=limit)
+
+def _wrap_get_temporal_models(parsed, _ctx):
+    if not get_temporal_models:
+        return _missing("get_temporal_models")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "20") or "20")
+    return get_temporal_models(limit=limit)
+
+def _wrap_get_latest_portfolio_backtest(_parsed, _ctx):
+    if not get_latest_portfolio_backtest:
+        return _missing("get_latest_portfolio_backtest")
+    return get_latest_portfolio_backtest()
+
+def _wrap_get_execution_metrics_by_symbol(parsed, _ctx):
+    if not get_execution_metrics_by_symbol:
+        return _missing("get_execution_metrics_by_symbol")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "50") or "50")
+    return get_execution_metrics_by_symbol(limit=limit)
+
+def _wrap_get_execution_cost_by_confidence(_parsed, _ctx):
+    if not get_execution_cost_by_confidence:
+        return _missing("get_execution_cost_by_confidence")
+    return get_execution_cost_by_confidence()
+
+def _wrap_get_social_features(parsed, _ctx):
+    if not get_social_features:
+        return _missing("get_social_features")
+    qs = _qs(parsed)
+    symbol = str(qs.get("symbol", "") or "").strip()
+    if not symbol:
+        return {"ok": False, "error": "missing_symbol"}
+    limit = int(qs.get("limit", "200") or "200")
+    return get_social_features(symbol=symbol, limit=limit)
+
+def _wrap_get_social_regimes(parsed, _ctx):
+    if not get_social_regimes:
+        return _missing("get_social_regimes")
+    qs = _qs(parsed)
+    symbol = str(qs.get("symbol", "") or "").strip()
+    if not symbol:
+        return {"ok": False, "error": "missing_symbol"}
+    limit = int(qs.get("limit", "200") or "200")
+    return get_social_regimes(symbol=symbol, limit=limit)
+
+def _wrap_get_social_blocks(parsed, _ctx):
+    if not get_social_blocks:
+        return _missing("get_social_blocks")
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "200") or "200")
+    return get_social_blocks(limit=limit)
+
+def _wrap_api_get_validation(parsed, _ctx):
+    if not api_get_validation:
+        return _missing("api_get_validation")
+    return api_get_validation(parsed)
+
+def _wrap_api_get_confidence_mass(parsed, _ctx):
+    if not api_get_confidence_mass:
+        return _missing("api_get_confidence_mass")
+    return api_get_confidence_mass(parsed)
+
+def _wrap_api_post_rollback(parsed, body, _ctx):
+    if not api_post_rollback:
+        return _missing("api_post_rollback")
+    return api_post_rollback(parsed, body)
+
 # ------------------------------
 # API HANDLER BINDINGS
 # ------------------------------
+def _qs(parsed):
+    try:
+        q = parse_qs(parsed.query or "", keep_blank_values=True)
+        return {k: (v[0] if isinstance(v, list) and v else "") for k, v in q.items()}
+    except Exception:
+        return {}
+
+
+def api_get_kill_switches(parsed):
+    return _api_get_kill_switches_impl(parsed, {}) if _api_get_kill_switches_impl else {"ok": False, "error": "kill_switches_unavailable"}
+
+
+def api_get_job_log(parsed):
+    return _api_get_job_log_impl(parsed, {}) if _api_get_job_log_impl else {"ok": False, "error": "job_log_unavailable"}
+
+
+def api_get_job_history(parsed):
+    return _api_get_job_history_impl(parsed, {}) if _api_get_job_history_impl else {"ok": False, "error": "job_history_unavailable"}
+
+
+def api_get_execution_metrics(_parsed):
+    return get_execution_metrics()
+
+
+def api_get_execution_metrics_rolling(_parsed):
+    return get_execution_metrics_rolling()
+
+
+def api_get_model_registry(parsed):
+    qs = _qs(parsed)
+    limit = qs.get("limit", "50")
+    return get_model_registry(limit=int(limit or 50))
+
+
+def api_get_embed_model_eval(parsed):
+    qs = _qs(parsed)
+    limit = qs.get("limit", "500")
+    return get_embed_model_eval(limit=int(limit or 500))
+
+
+def api_get_embed_conf_calib(parsed):
+    qs = _qs(parsed)
+    horizon_s = int(qs.get("horizon_s", "0") or "0")
+    model_kind = str(qs.get("model_kind", "") or "")
+    limit = int(qs.get("limit", "200") or "200")
+    return get_embed_conf_calib(horizon_s=horizon_s, model_kind=model_kind, limit=limit)
+
+
+def api_get_temporal_eval(parsed):
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "50") or "50")
+    return get_temporal_eval(limit=limit)
+
+
+def api_get_temporal_models(parsed):
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "20") or "20")
+    return get_temporal_models(limit=limit)
+
+
+def api_get_latest_portfolio_backtest(_parsed):
+    return get_latest_portfolio_backtest()
+
+
+def api_get_execution_metrics_by_symbol(parsed):
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "50") or "50")
+    return get_execution_metrics_by_symbol(limit=limit)
+
+
+def api_get_execution_cost_by_confidence(_parsed):
+    return get_execution_cost_by_confidence()
+
+
+def api_get_social_features(parsed):
+    qs = _qs(parsed)
+    symbol = str(qs.get("symbol", "") or "").strip()
+    if not symbol:
+        return {"ok": False, "error": "missing_symbol"}
+    limit = int(qs.get("limit", "200") or "200")
+    return get_social_features(symbol=symbol, limit=limit)
+
+
+def api_get_social_regimes(parsed):
+    qs = _qs(parsed)
+    symbol = str(qs.get("symbol", "") or "").strip()
+    if not symbol:
+        return {"ok": False, "error": "missing_symbol"}
+    limit = int(qs.get("limit", "200") or "200")
+    return get_social_regimes(symbol=symbol, limit=limit)
+
+
+def api_get_social_blocks(parsed):
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "200") or "200")
+    return get_social_blocks(limit=limit)
+
+
 API_HANDLERS = {
     # GET
     "api_get_kill_switches": api_get_kill_switches,
     "api_get_health": api_get_health,
     "api_get_jobs": api_get_jobs,
+    "api_get_job_log": api_get_job_log,
+    "api_get_job_history": api_get_job_history,
     "api_get_alerts": api_get_alerts,
     "api_get_validation": api_get_validation,
     "api_get_model_diagnostics": api_get_model_diagnostics,
+    "api_get_model_registry": api_get_model_registry,
+    "api_get_embed_model_eval": api_get_embed_model_eval,
+    "api_get_embed_conf_calib": api_get_embed_conf_calib,
+    "api_get_temporal_eval": api_get_temporal_eval,
+    "api_get_temporal_models": api_get_temporal_models,
+    "api_get_latest_portfolio_backtest": api_get_latest_portfolio_backtest,
+    "api_get_execution_metrics": api_get_execution_metrics,
+    "api_get_execution_metrics_rolling": api_get_execution_metrics_rolling,
+    "api_get_execution_metrics_by_symbol": api_get_execution_metrics_by_symbol,
+    "api_get_execution_cost_by_confidence": api_get_execution_cost_by_confidence,
+    "api_get_social_features": api_get_social_features,
+    "api_get_social_regimes": api_get_social_regimes,
+    "api_get_social_blocks": api_get_social_blocks,
     "api_get_confidence_mass": api_get_confidence_mass,
-    "api_get_execution_metrics": get_execution_metrics,
-    "api_get_execution_metrics_rolling": get_execution_metrics_rolling,
 
     # POST
     "api_post_job_start": api_post_job_start,

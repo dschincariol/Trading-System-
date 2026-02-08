@@ -10,3 +10,5 @@ ROUTE_SPECS = [
     ("POST", "/api/jobs/stop", "api_post_job_stop"),
     ("POST", "/api/pipeline/run", "api_post_pipeline_run"),
 ]
+
+ROUTE_SPECS_JOBS = ROUTE_SPECS
