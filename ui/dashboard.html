@@ -1486,11 +1486,22 @@ tbody tr:hover td{
       </div>
     </div>
 
-    <!-- System State -->
-    <div class="card collapsible">
-      <h2>🧭 System State</h2>
-      <pre id="systemStateText" class="mono small"></pre>
-    </div>
+<!-- System State -->
+<div class="card collapsible">
+  <h2>🧭 System State</h2>
+
+  <div class="small" style="margin-bottom:6px;">
+    Automation kill-switches (read-only)
+  </div>
+
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+    <span id="ksAutoPipeline" class="pill dim">auto_pipeline: —</span>
+    <span id="ksAutoChallenger" class="pill dim">auto_challenger: —</span>
+    <span id="ksAutoSizePolicy" class="pill dim">auto_size_policy: —</span>
+  </div>
+
+  <pre id="systemStateText" class="mono small"></pre>
+</div>
 
   </div>
 

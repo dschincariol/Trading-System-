@@ -3169,6 +3169,7 @@ ROUTE_SPECS = list(ROUTE_SPECS_SYSTEM) + list(ROUTE_SPECS_JOBS) + list(ROUTE_SPE
 # ------------------------------
 API_HANDLERS = {
     # GET
+    "api_get_kill_switches": api_get_kill_switches,
     "api_get_health": api_get_health,
     "api_get_jobs": api_get_jobs,
     "api_get_alerts": api_get_alerts,

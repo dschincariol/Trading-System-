@@ -3,5 +3,6 @@
 # This file contains only route metadata (no runtime imports from dashboard_server.py).
 
 ROUTE_SPECS = [
+    ("GET", "/api/system/kill_switches", "api_get_kill_switches"),
     ("GET", "/api/health", "api_get_health"),
 ]

@@ -1,12 +1,93 @@
 "use strict";
+import {
+  esc,
+  escapeHTML,
+  fmtTime,
+  fmtNum,
+  _fmtPct,
+  _clamp,
+  barWidth,
+  _debounce
+} from "./utils.js";
+
+import {
+  drawSpark,
+  renderLineChart,
+  drawCalibration
+} from "./charts.js";
+
+import {
+  filterAlerts,
+  renderHeatmap,
+  renderIncidentQueue,
+  severityRank
+} from "./alerts.js";
+
+import {
+  loadPolicyState,
+  saveOperatorMode,
+  saveExpertUnlock,
+  applyPolicyToDOM,
+  requireExpertUnlock,
+  requireConfirmIfDegraded
+} from "./policy.js";
+
+import { renderKillSwitchPills } from "./kill_switch_ui.js";
+
+import {
+  initDecisionBarEngine,
+  wireDecisionBarClicks,
+  updateDecisionHeader
+} from "./decision_bar.js";
+
+import {
+  detectExecutionDegradation,
+  isExecutionDegraded,
+  buildExecutionAlert
+} from "./execution_degradation.js";
+
+import {
+  updateManipulationStateFromAlerts,
+  hardBlockActionIfManipulated
+} from "./safety_banner.js";
+
+import {
+  initPromotionSafetyEngine,
+  maybeAutoResumePromotionsAfterRecovery,
+  handlePromotionToggle,
+  handleAutoFix
+} from "./promotion_safety.js";
+
+import { scheduleRefreshTasks } from "./refresh_scheduler.js";
+
+import {
+  isReadOnlyMode,
+  setReadOnlyMode,
+  applyReadOnlyBanner,
+  hardBlockIfReadOnly
+} from "./read_only_mode.js";
 
 /* ui/dashboard.js — Market Impact Dashboard controller */
 
-function esc(x) {
-  return String(x ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+// -----------------------------
+// Compatibility + globals (Phase 7–10)
+// -----------------------------
+
+// Some older code paths still call these names:
+function _isExecutionDegraded() { return !!isExecutionDegraded(); }
+
+// Used by loadHealth() for localStorage parsing (safe default)
+const _EXEC_CONF_STATE_KEY = "exec_conf_state_v1";
+
+// Debounced renderer holder (global filters use it)
+let _debouncedRender = null;
+
+// Some older UI paths call applyModeToDOM(); keep it as a thin wrapper.
+function applyModeToDOM() {
+  applyPolicyToDOM({
+    operatorMode: OPERATOR_MODE,
+    expertUnlocked: EXPERT_UNLOCK
+  });
 }
 
 function setOpsError(msg) {
@@ -81,61 +162,16 @@ async function postJSON(path, obj) {
   return data;
 }
 
-function escapeHTML(s) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
 // -----------------------------
 // Mode + visibility helpers
 // -----------------------------
-function applyModeToDOM() {
-  document.body.classList.toggle("mode-operator", !!OPERATOR_MODE);
-  document.body.classList.toggle("mode-expert", !OPERATOR_MODE);
-  const legacy = document.getElementById("alerts");
-  if (legacy) legacy.style.display = OPERATOR_MODE ? "none" : "";
-
-  document.body.classList.toggle("expert-unlocked", !!EXPERT_UNLOCK);
-
-  const b = document.getElementById("btnOperatorMode");
-  if (b) b.textContent = `👷 Operator Mode: ${OPERATOR_MODE ? "ON" : "OFF"}`;
-}
-
 function _setExpertUnlock(on) {
   EXPERT_UNLOCK = !!on;
-  localStorage.setItem(_EXPERT_UNLOCK_KEY, EXPERT_UNLOCK ? "1" : "0");
-  applyModeToDOM();
-
-  const btn = document.getElementById("btnExpertUnlock");
-  if (btn) btn.textContent = `🛡 Unlock Advanced: ${EXPERT_UNLOCK ? "ON" : "OFF"}`;
-}
-
-// -----------------------------
-// Decision bar helpers
-// -----------------------------
-function _setPill(id, text, cls) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.textContent = text;
-  el.className = `pill clickable ${cls || "dim"}`;
-}
-
-function _jumpToCard(titleContains) {
-  const cards = Array.from(document.querySelectorAll(".card"));
-  const hit = cards.find((c) => (c.querySelector("h2")?.textContent || "").includes(titleContains));
-  if (hit) hit.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-function _severityRank(s) {
-  if (!s) return 0;
-  if (s === "CRIT") return 3;
-  if (s === "WARN") return 2;
-  if (s === "INFO") return 1;
-  return 0;
+  saveExpertUnlock(EXPERT_UNLOCK);
+  applyPolicyToDOM({
+    operatorMode: OPERATOR_MODE,
+    expertUnlocked: EXPERT_UNLOCK
+  });
 }
 
 function _parseRangeToMs(r) {
@@ -186,53 +222,6 @@ function _isAckedLocal(id) {
   return !!m[String(id)];
 }
 
-function _debounce(fn, ms=120) {
-  let t;
-  return (...a) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...a), ms);
-  };
-}
-
-// -----------------------------
-// Mini sparkline (tiny canvas)
-// -----------------------------
-function drawSpark(canvas, values) {
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  const w = canvas.width = 86;
-  const h = canvas.height = 18;
-  ctx.clearRect(0,0,w,h);
-
-  const arr = (values || []).map(Number).filter((x)=>Number.isFinite(x));
-  if (arr.length < 2) return;
-
-  let mn = Math.min(...arr);
-  let mx = Math.max(...arr);
-  if (mn === mx) { mn -= 1; mx += 1; }
-
-  const pad = 2;
-  const sx = (i) => pad + (i * (w - pad*2) / (arr.length - 1));
-  const sy = (v) => h - pad - ((v - mn) * (h - pad*2) / (mx - mn));
-
-  // baseline
-  ctx.globalAlpha = 0.35;
-  ctx.beginPath();
-  ctx.moveTo(pad, sy(0));
-  ctx.lineTo(w - pad, sy(0));
-  ctx.stroke();
-  ctx.globalAlpha = 1.0;
-
-  // line
-  ctx.beginPath();
-  for (let i=0;i<arr.length;i++){
-    const x = sx(i);
-    const y = sy(arr[i]);
-    if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-  }
-  ctx.stroke();
-}
-
 // -----------------------------
 // Heatmap + incident queue rendering
 // -----------------------------
@@ -240,7 +229,7 @@ function _scoreCell(rows) {
   // severity * confidence * |z|
   let best = null;
   for (const r of rows) {
-    const sevR = _severityRank(r.severity);
+    const sevR = severityRank(r.severity);
     const conf = Number(r.confidence);
     const z = Math.abs(Number(r.expected_z));
     if (!Number.isFinite(conf) || !Number.isFinite(z)) continue;
@@ -250,84 +239,6 @@ function _scoreCell(rows) {
   return best ? best.r : null;
 }
 
-function _cellColor(r) {
-  if (!r) return { cls:"dim", sw:"#2f3640" };
-  if (r.resolved) return { cls:"ok", sw:"#2ea043" };
-  if (r.severity === "CRIT") return { cls:"crit", sw:"#ff6b6b" };
-  if (r.severity === "WARN") return { cls:"warn", sw:"#d29922" };
-  return { cls:"ok", sw:"#58a6ff" };
-}
-
-function renderHeatmap(rows) {
-  const host = document.getElementById("alertsHeatmap");
-  if (!host) return;
-
-  const horizons = [ "60", "300", "3600", "14400" ]; // 1m, 5m, 1h, 4h buckets (seconds) — works with your data
-  const horizonLabels = { "60":"1m", "300":"5m", "3600":"1h", "14400":"4h" };
-
-  // group by symbol + nearest horizon bucket
-  const by = {};
-  for (const r of rows || []) {
-    const sym = String(r.symbol || "").toUpperCase();
-    if (!sym) continue;
-    const hs = Number(r.horizon_s);
-    if (!Number.isFinite(hs)) continue;
-
-    // bucket horizon to one of the columns
-    let b = "3600";
-    if (hs <= 120) b = "60";
-    else if (hs <= 900) b = "300";
-    else if (hs <= 7200) b = "3600";
-    else b = "14400";
-
-    by[sym] = by[sym] || {};
-    by[sym][b] = by[sym][b] || [];
-    by[sym][b].push(r);
-  }
-
-  const syms = Object.keys(by).sort((a,b)=>a.localeCompare(b)).slice(0, 22);
-
-  host.innerHTML = "";
-  const mk = (cls, txt, extra) => {
-    const d = document.createElement("div");
-    d.className = `hmCell ${cls||""}`;
-    if (extra) Object.assign(d, extra);
-    d.innerHTML = txt;
-    return d;
-  };
-
-  // header row
-  host.appendChild(mk("hmCell hmHead", `<span class="mono">symbol</span>`));
-  for (const h of horizons) {
-    host.appendChild(mk("hmCell hmHead", `<span class="mono">${horizonLabels[h] || (h+"s")}</span>`));
-  }
-
-  for (const sym of syms) {
-    // symbol label
-    host.appendChild(mk("hmCell hmSym", `<span class="mono">${esc(sym)}</span>`));
-
-    for (const h of horizons) {
-      const best = _scoreCell((by[sym] && by[sym][h]) ? by[sym][h] : []);
-      const c = _cellColor(best);
-      const z = best ? Number(best.expected_z) : 0;
-      const conf = best ? Number(best.confidence) : 0;
-
-      const sw = `<span class="hmSwatch" style="background:${c.sw};"></span>`;
-      const meta = best ? `<span class="hmMeta">${best.severity} • z=${z.toFixed(2)} • c=${conf.toFixed(2)}</span>` : `<span class="hmMeta">—</span>`;
-      const cell = mk("hmCell", `${sw}<span class="mono">${esc(sym)}</span>${meta}`);
-
-      cell.addEventListener("click", () => {
-        document.getElementById("globalSymbol").value = sym;
-        document.getElementById("globalSev").value = "ALL";
-        _jumpToCard("Alerts");
-        // rerender happens on next refresh tick; do now too:
-        renderIncidentQueue(_filterAlerts(_lastAlerts || []));
-      });
-
-      host.appendChild(cell);
-    }
-  }
-}
 
 function _meaningForAlert(r) {
   const sym = (r.symbol === "EXECUTION") ? "Execution" : r.symbol;
@@ -472,152 +383,9 @@ function closeIncidentDrawer() {
   if (overlay) overlay.style.display = "none";
 }
 
-function _filterAlerts(rows) {
-  const f = _getGlobalFilters();
-  const minRank = (f.sev === "ALL") ? 0 : _severityRank(f.sev);
-  const sinceMs = Date.now() - _parseRangeToMs(f.range);
-
-  const out = [];
-  for (const r of (rows || [])) {
-    const ts = Number(r.ts_ms);
-    if (Number.isFinite(ts) && ts < sinceMs) continue;
-
-    const sym = String(r.symbol || "").toUpperCase();
-    if (f.sym && sym !== f.sym) continue;
-
-    if (_severityRank(r.severity) < minRank) continue;
-
-    if (f.changedOnly) {
-      // "changed only": hide resolved, hide local-acked, hide snoozed
-      if (r.resolved) continue;
-      if (_isAckedLocal(r.id)) continue;
-      if (_isSnoozedLocal(r.id)) continue;
-    } else {
-      // always hide snoozed from operator list
-      if (_isSnoozedLocal(r.id)) continue;
-    }
-
-    out.push(r);
-  }
-  return out;
-}
-
-function renderIncidentQueue(rows) {
-  const host = document.getElementById("incidentList");
-  if (!host) return;
-
-  host.innerHTML = "";
-  const perSymZ = {};
-  for (const r of rows || []) {
-    const sym = String(r.symbol || "").toUpperCase();
-    perSymZ[sym] = perSymZ[sym] || [];
-    perSymZ[sym].push(Number(r.expected_z));
-    if (perSymZ[sym].length > 10) perSymZ[sym].shift();
-  }
-
-  // sort: CRIT first, then WARN, then newest
-  const sorted = (rows || []).slice().sort((a,b)=>{
-    const sa = _severityRank(a.severity), sb = _severityRank(b.severity);
-    if (sb !== sa) return sb - sa;
-    return Number(b.ts_ms) - Number(a.ts_ms);
-  }).slice(0, 18);
-
-  if (sorted.length === 0) {
-    host.innerHTML = `<div class="small" style="color:var(--muted);">No alerts in the selected window.</div>`;
-    return;
-  }
-
-  for (const r of sorted) {
-    const ageMin = Math.max(0, Math.floor((Date.now() - Number(r.ts_ms)) / 60000));
-    const z = Number(r.expected_z);
-    const conf = Number(r.confidence);
-    const c = _cellColor(r);
-
-    const item = document.createElement("div");
-    item.className = "incidentItem";
-    item.innerHTML = `
-      <div class="incidentTop">
-        <span class="pill ${c.cls}">${r.resolved ? "RESOLVED" : (r.severity || "INFO")}</span>
-        <div class="incidentTitle">${esc(r.symbol)} • ${esc(r.event_title)}</div>
-        <div class="incidentActions">
-          <button class="btn btnSmall" data-ack="${Number(r.id)}">${_isAckedLocal(r.id) ? "Acked" : "Ack"}</button>
-          <button class="btn btnSmall" data-snooze="${Number(r.id)}">Snooze 30m</button>
-          <button class="btn btnSmall" data-open="${Number(r.id)}">Open</button>
-        </div>
-      </div>
-      <div class="incidentSub">
-        <span class="pill dim">h=${esc(r.horizon_s)}s</span>
-        <span class="pill dim">z=${Number.isFinite(z) ? z.toFixed(2) : "—"}</span>
-        <span class="pill dim">c=${Number.isFinite(conf) ? conf.toFixed(2) : "—"}</span>
-        <span class="pill dim">${ageMin}m ago</span>
-        <canvas class="spark" data-spark="${esc(String(r.symbol||"").toUpperCase())}"></canvas>
-      </div>
-      ${r.reason ? `<div class="small" style="margin-top:8px; color:var(--muted);">${esc(r.reason)}</div>` : ""}
-    `;
-
-    // wire buttons
-    item.querySelectorAll("button[data-ack]").forEach((b)=>{
-      b.addEventListener("click", (e)=>{
-        e.stopPropagation();
-        _ackAlertLocal(b.getAttribute("data-ack"));
-        renderIncidentQueue(_filterAlerts(_lastAlerts || []));
-      });
-    });
-    item.querySelectorAll("button[data-snooze]").forEach((b)=>{
-      b.addEventListener("click", (e)=>{
-        e.stopPropagation();
-        _snoozeAlertLocal(b.getAttribute("data-snooze"), 30);
-        renderIncidentQueue(_filterAlerts(_lastAlerts || []));
-      });
-    });
-    item.querySelectorAll("button[data-open]").forEach((b)=>{
-      b.addEventListener("click", async (e)=>{
-        e.stopPropagation();
-        await openIncidentDrawer(r);
-      });
-    });
-
-    // click row opens drawer
-    item.addEventListener("click", async ()=>{ await openIncidentDrawer(r); });
-
-    host.appendChild(item);
-  }
-
-  // draw sparklines
-  host.querySelectorAll("canvas[data-spark]").forEach((c)=>{
-    const sym = c.getAttribute("data-spark");
-    drawSpark(c, perSymZ[sym] || []);
-  });
-}
-
-function updateDecisionBarFromState(state) {
-  // state: { system, crit, warn, data, model, exec, updated }
-  _setPill("pillSystem", `SYSTEM: ${state.system}`, state.system === "CRIT" ? "crit" : state.system === "WARN" ? "warn" : "ok");
-  _setPill("pillCrit", `CRIT: ${state.crit}`, state.crit > 0 ? "crit" : "dim");
-  _setPill("pillWarn", `WARN: ${state.warn}`, state.warn > 0 ? "warn" : "dim");
-  _setPill("pillData", `Data: ${state.data}`, state.data === "BAD" ? "crit" : state.data === "WARN" ? "warn" : "ok");
-  _setPill("pillModel", `Model: ${state.model}`, state.model === "BLOCKED" ? "warn" : "ok");
-  _setPill("pillExec", `Exec: ${state.exec}`, state.exec === "DEGRADED" ? "warn" : "ok");
-
-  const up = document.getElementById("pillUpdated");
-  if (up) up.textContent = `Updated: ${state.updated}`;
-
-  // jump wiring
-  document.getElementById("pillSystem")?.addEventListener("click", ()=>_jumpToCard("System Health"));
-  document.getElementById("pillCrit")?.addEventListener("click", ()=>_jumpToCard("Alerts"));
-  document.getElementById("pillWarn")?.addEventListener("click", ()=>_jumpToCard("Alerts"));
-  document.getElementById("pillData")?.addEventListener("click", ()=>_jumpToCard("System Health"));
-  document.getElementById("pillModel")?.addEventListener("click", ()=>_jumpToCard("Promotions"));
-  document.getElementById("pillExec")?.addEventListener("click", ()=>_jumpToCard("Execution"));
-}
-
 // -----------------------------
 // Existing code continues
 // -----------------------------
-function fmtTime(ms) {
-
-  try { return new Date(Number(ms)).toLocaleTimeString(); } catch { return ""; }
-}
 
 function setPill(id, ok, text) {
   const el = document.getElementById(id);
@@ -660,20 +428,27 @@ function wirePromotionExplainUI() {
 
 let selectedJob = "poll_prices";
 
-// Operator mode defaults ON for guided ops clarity.
-// If user has never set it, force ON once.
-if (localStorage.getItem("operator_mode") == null) {
-  localStorage.setItem("operator_mode", "1");
-}
-let OPERATOR_MODE =
-  localStorage.getItem("operator_mode") === "1";
-
-// Expert unlock (separate from Operator Mode): reveals risky actions while staying operator-friendly
-const _EXPERT_UNLOCK_KEY = "expert_unlock";
-let EXPERT_UNLOCK = localStorage.getItem(_EXPERT_UNLOCK_KEY) === "1";
 
 let _killSwitchSnapshot = null;
 
+let { operatorMode: OPERATOR_MODE, expertUnlocked: EXPERT_UNLOCK } =
+  loadPolicyState();
+
+initPromotionSafetyEngine({
+  isExecutionDegraded,
+  hardBlockActionIfManipulated,
+  toast,
+  fetchJSON,
+  loadPromotionStatus,
+  loadSizePolicy,
+  refresh,
+  getManipBlockedSyms: () => (typeof _manipBlockedSyms !== "undefined" ? _manipBlockedSyms : new Set())
+});
+
+applyPolicyToDOM({
+  operatorMode: OPERATOR_MODE,
+  expertUnlocked: EXPERT_UNLOCK
+});
 
 function setSelectedJob(name) {
   selectedJob = name;
@@ -708,105 +483,7 @@ function setJobButtonState(name, state) {
   });
 }
 
-function barWidth(pct) {
-  const v = Math.max(0, Math.min(100, pct));
-  return `${v.toFixed(1)}%`;
-}
-
 // ---------- Execution degradation detection ----------
-
-const _EXEC_CONF_BASELINE_KEY = "exec_conf_baseline_v2";
-const _EXEC_CONF_STATE_KEY    = "exec_conf_state_v2";
-
-function _detectExecutionDegradation(rows) {
-  if (!Array.isArray(rows) || !rows.length) return [];
-
-  const stateRaw = localStorage.getItem(_EXEC_CONF_STATE_KEY);
-  const state = stateRaw ? JSON.parse(stateRaw) : {};
-
-  const now = Date.now();
-  const alerts = [];
-
-  // group by symbol
-  const bySym = {};
-  for (const r of rows) {
-    if (
-      Number(r.conf_lo) >= 0.75 &&
-      Number(r.n || 0) >= 20 &&
-      Number.isFinite(Number(r.mean_cost))
-    ) {
-      const sym = r.symbol || "GLOBAL";
-      (bySym[sym] ||= []).push(r);
-    }
-  }
-
-  for (const sym of Object.keys(bySym)) {
-    const avgCost =
-      bySym[sym].reduce((a, r) => a + Number(r.mean_cost), 0) /
-      bySym[sym].length;
-
-    const s = state[sym] || {
-      baseline: avgCost,
-      degraded_since: null,
-      level: "OK",
-      acked: false,
-    };
-
-    // initialize baseline
-    if (!Number.isFinite(s.baseline)) {
-      s.baseline = avgCost;
-      state[sym] = s;
-      continue;
-    }
-
-    const worsenPct = (avgCost - s.baseline) / Math.abs(s.baseline || 1e-9);
-
-    // -------- DEGRADED --------
-    if (worsenPct > 0.3) {
-      if (!s.degraded_since) s.degraded_since = now;
-
-      const ageMin = (now - s.degraded_since) / 60000;
-
-      // escalate to CRIT after 30 minutes
-      if (ageMin >= 30) s.level = "CRIT";
-      else s.level = "WARN";
-
-      s.acked = false;
-
-      alerts.push({
-        symbol: sym,
-        level: s.level,
-        prev: s.baseline,
-        cur: avgCost,
-        worsenPct,
-        ageMin,
-      });
-    }
-
-    // -------- RECOVERY --------
-    else if (avgCost <= s.baseline * 1.05) {
-      if (s.level !== "OK") {
-        s.level = "OK";
-        s.acked = true;
-        s.degraded_since = null;
-
-        toast(
-          `Execution recovered for ${sym}`,
-          "ok",
-          2500
-        );
-      }
-
-      // slowly adapt baseline downward
-      s.baseline = s.baseline * 0.8 + avgCost * 0.2;
-    }
-
-    state[sym] = s;
-  }
-
-  localStorage.setItem(_EXEC_CONF_STATE_KEY, JSON.stringify(state));
-  return alerts;
-}
 
 function _safeParseJSON(s) {
   try { return JSON.parse(String(s)); } catch { return null; }
@@ -1341,7 +1018,7 @@ async function loadSizePolicy() {
         <td class="mono">${fmt(r.mean_net_ret,6)}</td>
         <td class="mono">${fmt(r.std_net_ret,6)}</td>
         <td class="mono">${
-  _isExecutionDegraded()
+  isExecutionDegraded()
     ? Math.min(Number(r.factor), 0.5).toFixed(3) + " (throttled)"
     : fmt(r.factor,3)
 }</td>
@@ -1370,7 +1047,7 @@ async function loadEquityDrift() {
     if (!res || !res.ok || !Array.isArray(res.points)) {
       meta.textContent = "n/a";
       meta.className = "pill dim";
-      _renderLineChart(canvas, []);
+      renderLineChart(canvas, []);
       return;
     }
 
@@ -1378,7 +1055,7 @@ async function loadEquityDrift() {
     if (!pts.length) {
       meta.textContent = "empty";
       meta.className = "pill dim";
-      _renderLineChart(canvas, []);
+      renderLineChart(canvas, []);
       return;
     }
 
@@ -1388,7 +1065,7 @@ async function loadEquityDrift() {
     // Plot % drift (preferred for scale)
     const ys = pts.map(p => Number(p.diff_equity_pct)).filter(Number.isFinite);
 
-    _renderLineChart(canvas, ys, {
+    renderLineChart(canvas, ys, {
       topLabel: "equity drift (%)",
       fmtY: (v) => `${(v * 100).toFixed(2)}%`,
       stroke: "#d29922", // amber
@@ -1399,7 +1076,7 @@ async function loadEquityDrift() {
   } catch (e) {
     meta.textContent = "error";
     meta.className = "pill bad";
-    _renderLineChart(canvas, []);
+    renderLineChart(canvas, []);
   }
 }
 
@@ -1447,16 +1124,17 @@ async function loadExecutionByConfidence() {
     body.innerHTML = "";
 
     // ---- execution degradation detection ----
-    const execAlerts = _detectExecutionDegradation(rows);
-    for (const a of execAlerts) {
+    const execAlerts = detectExecutionDegradation(rows, toast);
+    for (const a of execAlerts || []) {
+
       toast(
         `${a.level}: execution degraded for ${a.symbol} (+${(a.worsenPct * 100).toFixed(1)}%)`,
         a.level === "CRIT" ? "bad" : "warn",
         a.level === "CRIT" ? 7000 : 5000
       );
-      _emitExecutionDegradationAlert(a);
-    }
+      buildExecutionAlert(a);
 
+    }
     if (!rows.length) {
       body.innerHTML = `
         <tr>
@@ -1609,200 +1287,16 @@ async function loadPortfolio() {
 let _lastAlerts = [];
 let _pauseRefresh = false;
 
-const _PROMO_PAUSED_KEY = "promo_paused_due_to_exec_v1";
+// last successful /api/health snapshot (for decision bar derivation)
+let _lastHealth = null;
 
-// ---------- HARD MANIPULATION KILL-SWITCH (STEP 5) ----------
-// IMPORTANT:
-// This kill-switch is UI-enforced only.
-// Server-side execution MUST independently enforce manipulation blocks
-// to guarantee "never trade" safety.
-// UI-enforced safety brake: blocks manual actions when alerts indicate
-// likely social manipulation / bot promo / coordinated pump risk.
-//
-// NOTE: This is UI-only enforcement based on your existing alerts stream.
-// Server-side must also enforce if you want "never trade" guarantees.
-const _MANIP_STATE_KEY = "ui_manip_killswitch_v1";
+// Decision bar engine (Phase 7)
+initDecisionBarEngine({
+  getLastAlerts: () => _lastAlerts,
+  getLastHealth: () => _lastHealth,
+  isExecutionDegraded: isExecutionDegraded
+});
 
-let _manipBlockedSyms = new Set();
-let _manipReasons = []; // [{symbol, severity, why, id, ts_ms}]
-
-// restore last known manipulation state (best-effort)
-try {
-  const raw = localStorage.getItem(_MANIP_STATE_KEY);
-  if (raw) {
-    const st = JSON.parse(raw);
-    _manipBlockedSyms = new Set(st.blocked || []);
-    _manipReasons = st.reasons || [];
-  }
-} catch {}
-
-function _kwHit(s) {
-  return /(bot|promo|promot|manip|coordinat|astroturf|pump|dump|raid|brigad|shill|sockpuppet|spam)/i.test(String(s || ""));
-}
-
-function _isManipulationAlert(r) {
-  if (!r) return false;
-  const sev = String(r.severity || "").toUpperCase();
-  if (sev !== "WARN" && sev !== "CRIT") return false;
-
-  // Quantitative evidence (preferred when available)
-  if (typeof r.manip_risk === "number" && r.manip_risk >= 0.7) return true;
-  if (typeof r.bot_likelihood === "number" && r.bot_likelihood >= 0.7) return true;
-  if (typeof r.promo_likelihood === "number" && r.promo_likelihood >= 0.7) return true;
-
-  // Fallback: keyword scan
-  const t = `${r.event_title || ""} ${r.reason || ""} ${r.symbol || ""} ${r.rule_id || ""}`;
-  return _kwHit(t);
-}
-
-function _updateManipulationStateFromAlerts(rows) {
-  const blocked = new Set();
-  const reasons = [];
-
-  for (const r of (rows || [])) {
-    if (r && r.resolved) continue;
-    if (!_isManipulationAlert(r)) continue;
-
-    const sym = String(r.symbol || "").toUpperCase() || "UNKNOWN";
-    blocked.add(sym);
-
-    reasons.push({
-      symbol: sym,
-      severity: String(r.severity || ""),
-      why: String(r.reason || r.event_title || "manipulation risk"),
-      id: r.id,
-      ts_ms: r.ts_ms
-    });
-  }
-
-  _manipBlockedSyms = blocked;
-  _manipReasons = reasons.slice(0, 50);
-
-  // persist (best-effort)
-  try {
-    localStorage.setItem(_MANIP_STATE_KEY, JSON.stringify({
-      ts_ms: Date.now(),
-      blocked: Array.from(_manipBlockedSyms),
-      reasons: _manipReasons
-    }));
-  } catch {}
-}
-
-function _isManipulationBlocked(sym) {
-  if (!_manipBlockedSyms || _manipBlockedSyms.size === 0) return false;
-  const s = String(sym || "").toUpperCase();
-  if (!s) return true; // global block if unknown
-  return _manipBlockedSyms.has(s) || _manipBlockedSyms.has("GLOBAL") || _manipBlockedSyms.has("EXECUTION");
-}
-
-function _manipBlockSummary() {
-  const syms = Array.from(_manipBlockedSyms || []);
-  return syms.length ? syms.join(", ") : "(none)";
-}
-
-function _hardBlockActionIfManipulated(actionName, symbol) {
-  // HARD block unless explicitly Expert-unlocked
-  if (EXPERT_UNLOCK) return false;
-
-  if (_isManipulationBlocked(symbol || "")) {
-    const msg =
-      `HARD BLOCK (${actionName}) — manipulation risk flagged for: ${_manipBlockSummary()}`;
-
-    const el = document.getElementById("console");
-    if (el) el.textContent += `[kill-switch] ${msg}\n`;
-
-    toast(msg, "bad", 5200);
-    return true;
-  }
-  return false;
-}
-
-async function _maybeAutoResumePromotionsAfterRecovery() {
-  // Never auto-resume promotions during manipulation risk
-  if (_manipBlockedSyms && _manipBlockedSyms.size > 0) return;
-
-  // Only attempt if we previously paused due to execution degradation
-  if (localStorage.getItem(_PROMO_PAUSED_KEY) !== "1") return;
-
-  // Still degraded? do nothing.
-  if (_isExecutionDegraded()) return;
-
-  try {
-    const st = await fetchJSON("/api/promotion/status");
-    if (!st || !st.ok) return;
-
-    const enabledDb = (st && st.promotion_enabled_db) ? String(st.promotion_enabled_db) : "1";
-    if (enabledDb === "1") {
-      // already enabled; clear flag
-      localStorage.removeItem(_PROMO_PAUSED_KEY);
-      return;
-    }
-
-    // If not in Operator Mode, require explicit confirmation
-    if (!OPERATOR_MODE) {
-      const ok = confirm(
-        "Execution has recovered.\n\nResume promotions automatically now?"
-      );
-      if (!ok) return;
-    }
-
-    const res = await fetchJSON("/api/promotion/enable?on=1");
-    if (res && res.ok) {
-      toast("Promotions resumed after execution recovery", "ok", 3500);
-      localStorage.removeItem(_PROMO_PAUSED_KEY);
-      // refresh pill
-      await loadPromotionStatus();
-    }
-    _clearExecutionDegradationFlag();
-
-  } catch {
-    // ignore
-  }
-}
-
-// execution degradation global flag (derived)
-function _isExecutionDegraded() {
-  const raw = localStorage.getItem(_EXEC_CONF_STATE_KEY);
-  if (!raw) return false;
-  try {
-    const st = JSON.parse(raw);
-    return Object.values(st).some(s => s.level === "WARN" || s.level === "CRIT");
-  } catch {
-    return false;
-  }
-}
-
-function _emitExecutionDegradationAlert(info) {
-  const id = `exec-degradation-${info.symbol}`;
-
-  const alert = {
-    id,
-    ts_ms: Date.now(),
-    severity: info.level,
-    symbol: info.symbol,
-    horizon_s: "-",
-    expected_z: null,
-    confidence: 0.99,
-    event_title:
-      info.level === "CRIT"
-        ? "Execution degradation persists (CRIT)"
-        : "Execution degradation detected",
-    resolved: false,
-    acked: false,
-    resolved_reason: "",
-    acked_by: "",
-    reason:
-      `Avg cost ${info.prev.toFixed(6)} → ${info.cur.toFixed(6)} ` +
-      `(+${(info.worsenPct * 100).toFixed(1)}%, ${info.ageMin.toFixed(1)}m)`
-  };
-
-  // dedupe
-  const exists = _lastAlerts.some(a => a.id === id);
-  if (!exists) {
-    _lastAlerts.unshift(alert);
-    _lastAlerts = _lastAlerts.slice(0, 50);
-  }
-}
 
 // explain_json is fetched on-demand via /api/alerts/by_id
 
@@ -1814,15 +1308,33 @@ async function loadAlerts() {
       ? data.items
       : [];
 
-  _lastAlerts = rows;
+_lastAlerts = rows || [];
 
   // STEP 5: update manipulation kill-switch state (from existing alerts stream)
-  _updateManipulationStateFromAlerts(_lastAlerts);
+  updateManipulationStateFromAlerts(_lastAlerts);
 
   // keep visuals + decision state in sync
-  const filtered = _filterAlerts(_lastAlerts || []);
-  renderHeatmap(filtered);
-  renderIncidentQueue(filtered);
+  const filtered = filterAlerts(
+  _lastAlerts || [],
+  _getGlobalFilters(),
+  {
+    isAcked: _isAckedLocal,
+    isSnoozed: _isSnoozedLocal
+  }
+);
+  renderHeatmap(
+  document.getElementById("alertsHeatmap"),
+  filtered,
+  (sym) => {
+    document.getElementById("globalSymbol").value = sym;
+  }
+);
+
+renderIncidentQueue(
+  document.getElementById("incidentList"),
+  filtered,
+  { onOpen: openIncidentDrawer }
+);
 
   // explain_json fetched on-demand (no eager parsing)
 
@@ -1903,8 +1415,10 @@ tbody.scrollTop = 0;
       if (row) openWhyModal(row);
     });
   });
-}
 
+  // decision header follows alerts
+  updateDecisionHeader(fmtTime(Date.now()));
+}
 async function loadValidation() {
   const rows = await fetchJSON("/api/validation");
   const tbody = document.getElementById("validation"); // tbody id="validation"
@@ -2043,9 +1557,6 @@ async function loadHealth() {
   const pricesOk = !!(h.prices && h.prices.ok);
   const labelsOk = !!(h.labels && h.labels.ok);
   const modelOk  = !!(h.model && h.model.ok);
-  const execStateRaw = localStorage.getItem(_EXEC_CONF_STATE_KEY);
-  const execState = execStateRaw ? JSON.parse(execStateRaw) : {};
-  const execCrit = Object.values(execState).some(s => s.level === "CRIT");
 
   // execution degradation flag (UI-only)
 const execDegraded = _isExecutionDegraded();
@@ -2302,47 +1813,6 @@ async function loadPromotionAudit() {
   }
 }
 
-function _drawCalib(canvas, pts) {
-  if (!canvas || !Array.isArray(pts) || pts.length < 2) return;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const W = canvas.width, H = canvas.height;
-  ctx.clearRect(0, 0, W, H);
-
-  // axes padding
-  const pad = 18;
-  const x0 = pad, y0 = H - pad;
-  const x1 = W - pad, y1 = pad;
-
-  // diagonal y=x reference
-  ctx.beginPath();
-  ctx.moveTo(x0, y0);
-  ctx.lineTo(x1, y1);
-  ctx.strokeStyle = "rgba(160,160,160,0.35)";
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  const xs = pts.map(p => Number(p.conf || 0));
-  const ys = pts.map(p => Number(p.acc || 0));
-
-  const clamp01 = (v) => Math.max(0, Math.min(1, v));
-
-  ctx.beginPath();
-  for (let i = 0; i < pts.length; i++) {
-    const x = clamp01(xs[i]);
-    const y = clamp01(ys[i]);
-
-    const px = x0 + x * (x1 - x0);
-    const py = y0 - y * (y0 - y1);
-
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  }
-  ctx.strokeStyle = "rgba(220,220,220,0.85)";
-  ctx.lineWidth = 2;
-  ctx.stroke();
-}
 
 async function refreshCalibCurves() {
   const hEl = document.getElementById("calibHorizon");
@@ -2369,7 +1839,7 @@ if (
   out.ok &&
   Array.isArray(out.points)
 ) {
-  _drawCalib(canvas, out.points);
+  drawCalibration(canvas, out.points);
 }
 }
 
@@ -2435,11 +1905,6 @@ async function loadModelRegistry() {
 
     const champ = j.champion || {};
     const chall = j.challenger || {};
-
-    function fmtNum(x) {
-      if (x === null || x === undefined || !Number.isFinite(Number(x))) return "";
-      return Number(x).toFixed(4);
-    }
 
     const champRmse = champ.metrics ? champ.metrics.rmse : null;
     const challRmse = chall.metrics ? chall.metrics.rmse : null;
@@ -2779,21 +2244,6 @@ async function loadConfidenceTrends() {
 // Portfolio Backtest (Latest) — equity curve + drawdown charts
 // Endpoint: GET /api/backtest/portfolio/latest
 // ------            -- ------------------------------------------------------
-function fmtNum(x) {
-  if (x === null || x === undefined) return "";
-  const v = Number(x);
-  if (!isFinite(v)) return "";
-  return v.toFixed(4);
-}
-
-function _fmtPct(x) {
-  if (!Number.isFinite(x)) return "?";
-  return `${(x * 100).toFixed(2)}%`;
-}
-
-function _clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
-}
 
 function _chartClear(ctx, w, h) {
   ctx.clearRect(0, 0, w, h);
@@ -2811,86 +2261,6 @@ function _chartText(ctx, x, y, s) {
   ctx.fillText(String(s), x, y);
 }
 
-function _renderLineChart(canvas, ys, opts = {}) {
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const w = canvas.width;
-  const h = canvas.height;
-
-  const padL = 44;
-  const padR = 10;
-  const padT = 12;
-  const padB = 20;
-
-  _chartClear(ctx, w, h);
-  _chartFrame(ctx, w, h);
-
-  if (!Array.isArray(ys) || ys.length < 2) {
-    _chartText(ctx, 12, 24, "(no data)");
-    return;
-  }
-
-  // sanitize
-  const vals = ys.map(v => Number(v)).filter(v => Number.isFinite(v));
-  if (vals.length < 2) {
-    _chartText(ctx, 12, 24, "(no numeric data)");
-    return;
-  }
-
-  let yMin = Number.isFinite(opts.yMin) ? Number(opts.yMin) : Math.min(...vals);
-  let yMax = Number.isFinite(opts.yMax) ? Number(opts.yMax) : Math.max(...vals);
-
-  if (yMin === yMax) {
-    yMin -= 1;
-    yMax += 1;
-  }
-
-  // small padding so line doesn't sit on border
-  const yPad = (yMax - yMin) * 0.08;
-  yMin -= yPad;
-  yMax += yPad;
-
-  // axes labels
-  _chartText(ctx, 8, padT + 10, (opts.topLabel || ""));
-  _chartText(ctx, 8, h - 8, (opts.bottomLabel || ""));
-
-  // y labels (min/max)
-  _chartText(ctx, 8, padT + 22, (opts.fmtY ? opts.fmtY(yMax) : yMax.toFixed(3)));
-  _chartText(ctx, 8, h - padB - 4, (opts.fmtY ? opts.fmtY(yMin) : yMin.toFixed(3)));
-
-  const plotW = w - padL - padR;
-  const plotH = h - padT - padB;
-
-  function xFor(i) {
-    return padL + (plotW * (i / (ys.length - 1)));
-  }
-  function yFor(v) {
-    const t = (Number(v) - yMin) / (yMax - yMin);
-    return padT + plotH * (1 - _clamp(t, 0, 1));
-  }
-
-  // gridline mid
-  ctx.strokeStyle = "#20252c";
-  ctx.lineWidth = 1;
-  const midY = padT + plotH / 2;
-  ctx.beginPath();
-  ctx.moveTo(padL, midY);
-  ctx.lineTo(w - padR, midY);
-  ctx.stroke();
-
-  // line
-  ctx.strokeStyle = (opts.stroke || "#2ea043");
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(xFor(0), yFor(ys[0]));
-  for (let i = 1; i < ys.length; i++) {
-    ctx.lineTo(xFor(i), yFor(ys[i]));
-  }
-  ctx.stroke();
-}
-
 async function loadPortfolioBacktestLatest() {
   const meta = document.getElementById("portfolioBtMeta");
   const sumBody = document.getElementById("portfolioBtSummaryBody");
@@ -2906,8 +2276,8 @@ async function loadPortfolioBacktestLatest() {
       meta.textContent = "no runs";
       meta.className = "pill dim";
       sumBody.innerHTML = "";
-      _renderLineChart(cEq, []);
-      _renderLineChart(cDd, []);
+      renderLineChart(cEq, []);
+      renderLineChart(cDd, []);
       return;
     }
 
@@ -2938,13 +2308,13 @@ for (const p of pts) {
 }
 
     // Render charts
-    _renderLineChart(cEq, equity, {
+    renderLineChart(cEq, equity, {
       topLabel: "equity",
       fmtY: (v) => Number(v).toFixed(3),
       stroke: "#2ea043",
     });
 
-    _renderLineChart(cDd, dd, {
+    renderLineChart(cDd, dd, {
       topLabel: "drawdown",
       fmtY: (v) => _fmtPct(v),
       stroke: "#ff6b6b",
@@ -2997,14 +2367,44 @@ sumBody.insertAdjacentHTML("beforeend", `
     meta.textContent = "error";
     meta.className = "pill bad";
     sumBody.innerHTML = "";
-    _renderLineChart(cEq, []);
-    _renderLineChart(cDd, []);
+    renderLineChart(cEq, []);
+    renderLineChart(cDd, []);
   }
 }
 
 /* -----------------------------
    Actions
 ----------------------------- */
+async function loadSystemState() {
+  const el = document.getElementById("systemStateText");
+  if (!el) return;
+
+  try {
+    const state = await fetchJSON("/api/system_state");
+
+    let killSwitches = null;
+    try {
+      const k = await fetchJSON("/api/system/kill_switches");
+      if (k && k.ok) killSwitches = k.kill_switches || null;
+    } catch {
+      killSwitches = null;
+    }
+
+    _killSwitchSnapshot = killSwitches;
+if (typeof renderKillSwitchPills === "function") {
+  renderKillSwitchPills(killSwitches);
+}
+
+    const out = {
+      system_state: state,
+      kill_switches: killSwitches
+    };
+
+    el.textContent = JSON.stringify(out.system_state, null, 2);
+  } catch (e) {
+    el.textContent = `[error] ${e.message || String(e)}`;
+  }
+}
 
 async function jobAction(name, action) {
   setSelectedJob(name);
@@ -3014,32 +2414,38 @@ async function jobAction(name, action) {
     await fetchJSON(`/api/jobs/stop?name=${encodeURIComponent(name)}`);
   }
   await refresh();
+applyReadOnlyBanner();
 }
 
 async function refresh() {
-
-
-  try {
+try {
     const health = await fetchJSON("/api/health");
 
-let trainingStatus = null;
-try {
-  trainingStatus = await fetchJSON("/api/training_status");
-} catch (e) {
-  trainingStatus = { mode: "unknown", allowed: false };
-}
+    // snapshot for decision derivation
+    _lastHealth = health || null;
+
+    let trainingStatus = null;
+    try {
+      trainingStatus = await fetchJSON("/api/training_status");
+    } catch (e) {
+      trainingStatus = { mode: "unknown", allowed: false };
+    }
 
     const hEl = document.getElementById("healthStatus");
     const hDet = document.getElementById("healthDetails");
 
     setStatus(
-  hEl,
-health.ok && !_isExecutionDegraded(),
-_isExecutionDegraded()
-  ? "DEGRADED (execution)"
-  : (health.ok ? "OK" : "DEGRADED")
-);
+      hEl,
+      health.ok && !_isExecutionDegraded(),
+      _isExecutionDegraded()
+        ? "DEGRADED (execution)"
+        : (health.ok ? "OK" : "DEGRADED")
+    );
+
     hDet.textContent = JSON.stringify(health, null, 2);
+
+    // keep decision header fresh even if alerts haven’t ticked yet
+    updateDecisionHeader("just now");
   } catch (e) {
     console.error(e);
   }
@@ -3061,42 +2467,49 @@ _isExecutionDegraded()
   }
 
   if (_pauseRefresh) return;
-  await Promise.allSettled([
-    loadTemporalEval(),
-    loadTemporalShadowEval(),
-    loadSocialPressure(),
-    loadSocialRegimes(),
-    loadSocialBlocks(),
-    loadPromotionAudit(),
-    refreshCalibCurves(),
-    loadModelRegistry(),
-    loadValidation(),
-    loadStrategyStatus(),
-    loadStrategyMetrics(),
-    loadModelMetrics(),
-    loadJobs(),
-    loadLog(),
-    loadHealth(),
-    loadMarketStress(),
-    loadMarketStressHistory(),
-    loadExecutionOverlays(),
-    loadModelDiagnostics(),
-    loadConfidenceMass(),
-    loadJobHistory(),
-    loadConfidenceTrends(),
-    loadRelevanceStats(),
-    loadExecutionByConfidence(),
 
-    // portfolio layer
-    (typeof loadPortfolio === "function") ? loadPortfolio() : Promise.resolve(),
-    (typeof loadBroker === "function") ? loadBroker() : Promise.resolve(),
-    loadPortfolioBacktestLatest(),
-    loadEquityReconciliation(),
-    loadEquityDrift(),
-  ]);
+await Promise.allSettled([
+  loadHealth(),
+  loadTemporalEval(),
+  loadTemporalShadowEval(),
+  loadSocialPressure(),
+  loadSocialRegimes(),
+  loadSocialBlocks(),
+  loadPromotionAudit(),
+  refreshCalibCurves(),
+  loadModelRegistry(),
+  loadValidation(),
+  loadStrategyStatus(),
+  loadStrategyMetrics(),
+  loadModelMetrics(),
+  loadJobs(),
+  loadLog(),
+  loadMarketStress(),
+  loadMarketStressHistory(),
+  loadExecutionOverlays(),
+  loadModelDiagnostics(),
+  loadConfidenceMass(),
+  loadJobHistory(),
+  loadConfidenceTrends(),
+  loadRelevanceStats(),
+  loadExecutionByConfidence(),
+  loadSystemState(),
+
+  // portfolio layer
+  (typeof loadPortfolio === "function") ? loadPortfolio() : Promise.resolve(),
+  (typeof loadBroker === "function") ? loadBroker() : Promise.resolve(),
+  loadPortfolioBacktestLatest(),
+  loadEquityReconciliation(),
+  loadEquityDrift(),
+]);
 
   // If we paused promotions due to exec degradation, try to resume after recovery
-  await _maybeAutoResumePromotionsAfterRecovery();
+await maybeAutoResumePromotionsAfterRecovery({
+  operatorMode: OPERATOR_MODE
+});
+
+applyReadOnlyBanner();
+
 
 }
 
@@ -3130,30 +2543,34 @@ function wirePromotionButtons() {
 
   if (btnToggle) {
     btnToggle.addEventListener("click", async () => {
-  // STEP 5: HARD manipulation kill-switch (UI enforcement)
-  if (_hardBlockActionIfManipulated("toggle promotions", "GLOBAL")) return;
+      if (hardBlockIfReadOnly({ actionName: "toggle promotions", toastFn: toast })) return;
 
-  if (_isExecutionDegraded()) {
-    localStorage.setItem("promo_paused_due_to_exec_v1", "1");
-    toast("Promotions paused due to execution degradation", "warn", 4000);
-    return;
-  }
+      // STEP 5: HARD manipulation kill-switch (UI enforcement)
+      if (hardBlockActionIfManipulated({
+        actionName: "toggle promotions",
+        symbol: "GLOBAL",
+        expertUnlocked: EXPERT_UNLOCK,
+        toastFn: toast
+      })) return;
 
-      if (!OPERATOR_MODE) {
-    if (!confirm("Toggle promotions? This affects model promotion safety.")) return;
-  }
+      if (!requireConfirmIfDegraded({
+        executionDegraded: _isExecutionDegraded(),
+        operatorMode: OPERATOR_MODE,
+        message:
+          "Execution degradation detected.\n\nToggling promotions during degradation may increase risk.\n\nProceed anyway?"
+      })) return;
+
       btnToggle.disabled = true;
       try {
-        // read current, then flip
-        const st = await fetchJSON("/api/promotion/status");
-        const enabledDb = (st && st.promotion_enabled_db) ? st.promotion_enabled_db : "1";
-        const next = (enabledDb === "1") ? "0" : "1";
-        const res = await fetchJSON(`/api/promotion/enable?on=${next}`);
-        if (!res || !res.ok) throw new Error((res && res.error) || "toggle failed");
+        await handlePromotionToggle({
+          operatorMode: OPERATOR_MODE,
+          expertUnlocked: EXPERT_UNLOCK
+        });
         await loadPromotionStatus();
       } catch (e) {
         const el = document.getElementById("console");
         if (el) el.textContent += `[ui] toggle promotions ERROR: ${e.message}\n`;
+        toast(`Toggle promotions failed: ${e.message}`, "bad", 4000);
       } finally {
         btnToggle.disabled = false;
       }
@@ -3162,15 +2579,37 @@ function wirePromotionButtons() {
 
   if (btnRollback) {
     btnRollback.addEventListener("click", async () => {
+      if (hardBlockIfReadOnly({ actionName: "champion rollback", toastFn: toast })) return;
+
+      // STEP 5: HARD manipulation kill-switch (UI enforcement)
+      if (hardBlockActionIfManipulated({
+        actionName: "champion rollback",
+        symbol: "GLOBAL",
+        expertUnlocked: EXPERT_UNLOCK,
+        toastFn: toast
+      })) return;
+
+      if (!requireConfirmIfDegraded({
+        executionDegraded: _isExecutionDegraded(),
+        operatorMode: OPERATOR_MODE,
+        message:
+          "Execution degradation detected.\n\nRollback during degradation may be unsafe.\n\nProceed anyway?"
+      })) return;
+
       btnRollback.disabled = true;
       try {
         const res = await fetchJSON("/api/champion/rollback");
         if (!res || !res.ok) throw new Error((res && res.error) || "rollback failed");
+
         const el = document.getElementById("console");
         if (el) el.textContent += `[ui] rollback ok -> ${JSON.stringify(res.champion || {})}\n`;
+
+        toast("Rollback complete", "ok", 3000);
+        await loadModelRegistry();
       } catch (e) {
         const el = document.getElementById("console");
         if (el) el.textContent += `[ui] rollback ERROR: ${e.message}\n`;
+        toast(`Rollback failed: ${e.message}`, "bad", 4000);
       } finally {
         btnRollback.disabled = false;
       }
@@ -3190,19 +2629,34 @@ function wireCollapsibles() {
 }
 
 /* -----------------------------
-   Wiring
+   Boot (single authoritative entrypoint)
 ----------------------------- */
+
+function wireUI() {
+  wireDecisionBarClicks();
+  wireCollapsibles();
+  wirePromotionButtons();
+  wirePromotionExplainUI();
+
+  // -----------------------------
+  // Size policy training button
+  // -----------------------------
   const btnSP = document.getElementById("btnTrainSizePolicy");
   if (btnSP) {
     btnSP.addEventListener("click", async () => {
+      if (hardBlockIfReadOnly({ actionName: "train size policy", toastFn: toast })) return;
+
       btnSP.disabled = true;
       try {
         const el = document.getElementById("console");
         if (el) el.textContent += "[ui] training size policy...\n";
+
         const res = await fetchJSON("/api/size_policy/train");
-        if (!res || !res.ok) throw new Error((res && res.error) || "train_size_policy failed");
+        if (!res || !res.ok) {
+          throw new Error((res && res.error) || "train_size_policy failed");
+        }
+
         if (el) el.textContent += "[ui] size policy train job started\n";
-        // allow a moment for job to finish (oneshot is usually quick)
         setTimeout(loadSizePolicy, 1000);
       } catch (e) {
         const el = document.getElementById("console");
@@ -3212,376 +2666,38 @@ function wireCollapsibles() {
       }
     });
   }
-
-function wireUI() {
-
-const btnPipeline = document.getElementById("btnRunPipeline");
-if (btnPipeline) {
-  btnPipeline.addEventListener("click", async () => {
-    // STEP 5: HARD manipulation kill-switch (UI enforcement)
-    if (_hardBlockActionIfManipulated("pipeline", "GLOBAL")) return;
-
-    if (_isExecutionDegraded() && !OPERATOR_MODE) {
-      const ok = confirm(
-        "Execution degradation detected.\n\nRunning full pipeline may amplify bad execution.\n\nProceed anyway?"
-      );
-      if (!ok) return;
-    }
-
-
-    setSelectedJob("pipeline");
-
-    const el = document.getElementById("console");
-    if (el) el.textContent = "[ui] starting pipeline...\n";
-
-    try {
-      const res = await fetchJSON("/api/pipeline/run");
-      if (!res || !res.ok) throw new Error(res?.error || "pipeline failed");
-
-      if (el) el.textContent += "[ui] pipeline finished\n";
-      toast("Pipeline finished successfully", "ok");
-
-      loadHealth();
-      loadPortfolio();
-      loadBroker();
-      loadPortfolioBacktestLatest();
-    } catch (e) {
-      if (el) el.textContent += `[ui] ERROR: ${e.message}\n`;
-      toast(`Pipeline error: ${e.message}`, "bad", 4000);
-    }
-  });
 }
 
-    const btnPortBt = document.getElementById("btnRunPortfolioBacktest");
-  if (btnPortBt) {
-    btnPortBt.addEventListener("click", async () => {
-      btnPortBt.disabled = true;
-      try {
-        await fetchJSON("/api/jobs/start?name=portfolio_backtest");
-      } catch {}
-      setTimeout(() => {
-        btnPortBt.disabled = false;
-        loadPortfolioBacktestLatest();
-      }, 2000);
-    });
-  }
+function bootDashboard() {
+  // Core UI wiring
+if (typeof wireUI === "function") wireUI();
 
-document.querySelectorAll("button[data-job]").forEach((btn) => {
-  btn.addEventListener("click", async () => {
-    const name = btn.getAttribute("data-job");
-    const action = btn.getAttribute("data-action") || "start";
+  // Voice UI (optional)
+  if (typeof wireVoiceUI === "function") wireVoiceUI();
 
-    // STEP 5: HARD manipulation kill-switch (UI enforcement)
-    if (action === "start" && _hardBlockActionIfManipulated(`job:${name}`, "GLOBAL")) return;
+  // Initial paint
+  applyReadOnlyBanner();
+  refresh();
 
-    // FORCE CONFIRM ON JOB START when execution is degraded (non-operator mode)
-    if (action === "start" && _isExecutionDegraded() && !OPERATOR_MODE) {
-      const ok = confirm(
-        `Execution degradation detected.\n\nStarting "${name}" may amplify bad execution.\n\nProceed anyway?`
+  // Auto voice summary on load (CRIT only, once per session)
+  setTimeout(() => {
+    if (sessionStorage.getItem("voice_autosummary_done")) return;
+
+    const rows = Array.isArray(window._lastAlerts) ? window._lastAlerts : [];
+    const crits = rows.filter(r => r.severity === "CRIT" && !r.resolved);
+
+    if (crits.length > 0 && typeof _sayAndToast === "function") {
+      _sayAndToast(
+        `Attention. ${crits.length} critical alert${crits.length > 1 ? "s" : ""} detected. Say “open latest critical” to review.`,
+        "warn",
+        6000
       );
-      if (!ok) return;
     }
-
-    // SELECT + FOLLOW LOG IMMEDIATELY
-    setSelectedJob(name);
-    followJob(name);
-
-    const el = document.getElementById("console");
-    if (el) el.textContent = `[ui] starting ${name}...\n`;
-
-    try {
-      await jobAction(name, action);
-    } catch (e) {
-      if (el) el.textContent += `[ui] error: ${e.message || e}\n`;
-      setOpsError(`[job] ${name} failed to start`);
-    }
-  });
-});
-
-const btnFix = document.getElementById("btnFixIssues");
-if (btnFix) {
-  btnFix.addEventListener("click", async () => {
-    if (!OPERATOR_MODE) {
-      const ok = confirm(
-        "This will automatically attempt to fix startup issues:\n" +
-        "- Initialize / migrate databases\n" +
-        "- Rebuild labels\n" +
-        "- Train size policy if missing\n\n" +
-        "Proceed?"
-      );
-      if (!ok) return;
-    }
-
-    const el = document.getElementById("console");
-    if (el) el.textContent += "[ui] running automatic fix...\n";
-
-    btnFix.disabled = true;
-    try {
-      const res = await fetchJSON("/api/system/fix");
-      if (!res || !res.ok) {
-        throw new Error(res?.error || "fix failed");
-      }
-
-      if (el) {
-        el.textContent += "[ui] automatic fix complete\n";
-        if (res.actions) {
-          el.textContent += JSON.stringify(res.actions, null, 2) + "\n";
-        }
-      }
-
-      toast("Automatic fixes applied", "ok", 3500);
-
-      // refresh everything
-      await refresh();
-      await loadPromotionStatus();
-      await loadSizePolicy();
-
-    } catch (e) {
-      if (el) el.textContent += `[ui] FIX ERROR: ${e.message}\n`;
-      toast(`Fix failed: ${e.message}`, "bad", 4000);
-    } finally {
-      btnFix.disabled = false;
-    }
-  });
+  }, 600);
 }
 
-  const btnClear = document.getElementById("btnClear");
-  if (btnClear) {
-    btnClear.addEventListener("click", () => {
-      const el = document.getElementById("console");
-      if (el) el.textContent = "";
-    });
-  }
-
-    const btnBt = document.getElementById("btnLoadPortfolioBT");
-  if (btnBt) {
-    btnBt.addEventListener("click", async () => {
-      btnBt.disabled = true;
-      try { await loadPortfolioBacktestLatest(); } finally { btnBt.disabled = false; }
-    });
-  }
-
-    const btnCh = document.getElementById("btnRunChallenger");
-  if (btnCh) {
-    btnCh.addEventListener("click", async () => {
-      // STEP 5: HARD manipulation kill-switch (UI enforcement)
-      if (_hardBlockActionIfManipulated("challenger run", "GLOBAL")) return;
-
-      btnCh.disabled = true;
-      try {
-        const el = document.getElementById("console");
-        if (el) el.textContent = "[ui] running challenger training/eval...\n";
-        const res = await fetchJSON("/api/challenger/run");
-        if (!res || !res.ok) throw new Error((res && res.error) || "challenger failed");
-        if (el) el.textContent += "[ui] challenger complete\n";
-        await loadModelRegistry();
-      } catch (e) {
-        const el = document.getElementById("console");
-        if (el) el.textContent += `[ui] challenger ERROR: ${e.message}\n`;
-      } finally {
-        btnCh.disabled = false;
-      }
-    });
-  }
-
-  const btnRefresh = document.getElementById("btnRefresh");
-  if (btnRefresh) {
-    btnRefresh.addEventListener("click", refresh);
-  }
-
-  // Expert unlock button (separate from operator mode)
-  const btnUnlock = document.getElementById("btnExpertUnlock");
-  if (btnUnlock) {
-    btnUnlock.addEventListener("click", () => {
-      if (!EXPERT_UNLOCK) {
-        const ok = confirm(
-          "Unlock Advanced Actions?\n\nThese actions can increase risk (pipeline/promotions/rollback)."
-        );
-        if (!ok) return;
-      }
-      _setExpertUnlock(!EXPERT_UNLOCK);
-      toast(EXPERT_UNLOCK ? "Advanced actions unlocked" : "Advanced actions locked", EXPERT_UNLOCK ? "warn" : "dim", 2500);
-    });
-  }
-
-  // Incident drawer close
-  const btnCloseIncident = document.getElementById("btnCloseIncident");
-  if (btnCloseIncident) btnCloseIncident.addEventListener("click", closeIncidentDrawer);
-
-  const incidentOverlay = document.getElementById("incidentOverlay");
-  if (incidentOverlay) {
-    incidentOverlay.addEventListener("click", (e) => {
-      // click outside drawer closes
-      if (e.target === incidentOverlay) closeIncidentDrawer();
-    });
-  }
-
-  // apply mode classes immediately
-  applyModeToDOM();
-  const btnOperator = document.getElementById("btnOperatorMode");
-  if (btnOperator) btnOperator.textContent = `👷 Operator Mode: ${OPERATOR_MODE ? "ON" : "OFF"}`;
-  const btnUnlock2 = document.getElementById("btnExpertUnlock");
-  if (btnUnlock2) btnUnlock2.textContent = `🛡 Unlock Advanced: ${EXPERT_UNLOCK ? "ON" : "OFF"}`;
-
-  // global filters: rerender alerts instantly (no need to wait)
-  ["globalRange","globalSev","globalSymbol","globalChangedOnly"].forEach((id)=>{
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener("input", () => {
-      const filtered = _filterAlerts(_lastAlerts || []);
-(_debouncedRender ||= _debounce((rows)=>{
-  renderHeatmap(rows);
-  renderIncidentQueue(rows);
-}))(filtered);
-
-    });
-    el.addEventListener("change", () => {
-      const filtered = _filterAlerts(_lastAlerts || []);
-(_debouncedRender ||= _debounce((rows)=>{
-  renderHeatmap(rows);
-  renderIncidentQueue(rows);
-}))(filtered);
-
-    });
-  });
-
-  const btnOperator2 = document.getElementById("btnOperatorMode");
-  if (btnOperator2) {
-
-    btnOperator2.addEventListener("click", async () => {
-      OPERATOR_MODE = !OPERATOR_MODE;
-      localStorage.setItem("operator_mode", OPERATOR_MODE ? "1" : "0");
-      btnOperator.textContent = `👷 Operator Mode: ${OPERATOR_MODE ? "ON" : "OFF"}`;
-      applyModeToDOM();
-      toast(
-        OPERATOR_MODE
-          ? "Operator Mode enabled (guided ops view)"
-          : "Operator Mode disabled (expert/raw view)",
-        OPERATOR_MODE ? "warn" : "dim"
-      );
-      await refresh();
-    });
-  }
-
-  const btnJobHist = document.getElementById("btnShowJobHistory");
-  if (btnJobHist) {
-    btnJobHist.addEventListener("click", async () => {
-      const p = document.getElementById("jobHistoryPanel");
-      if (!p) return;
-      p.style.display = (p.style.display === "none") ? "" : "none";
-      await refresh();
-    });
-  }
-
-  const btnTrends = document.getElementById("btnShowTrends");
-  if (btnTrends) {
-    btnTrends.addEventListener("click", async () => {
-      const p = document.getElementById("confidenceTrendPanel");
-      if (!p) return;
-      p.style.display = (p.style.display === "none") ? "" : "none";
-      await refresh();
-    });
-  }
-
-  const btnCloseWhy = document.getElementById("btnCloseWhy");
-  if (btnCloseWhy) btnCloseWhy.addEventListener("click", closeWhyModal);
-
-  const modal = document.getElementById("whyModal");
-  if (modal) {
-    modal.addEventListener("click", (e) => {
-      if (e.target === modal) closeWhyModal();
-    });
-  }
-
-  const btnPromoWhy = document.getElementById("btnWhyNotPromoted");
-  if (btnPromoWhy) {
-    btnPromoWhy.addEventListener("click", openPromoWhyModal);
-  }
-
-  const btnClosePromoWhy = document.getElementById("btnClosePromoWhy");
-  if (btnClosePromoWhy) btnClosePromoWhy.addEventListener("click", closePromoWhyModal);
-
-  const promoModal = document.getElementById("promoWhyModal");
-  if (promoModal) {
-    promoModal.addEventListener("click", (e) => {
-      if (e.target === promoModal) closePromoWhyModal();
-    });
-  }
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", bootDashboard);
+} else {
+  bootDashboard();
 }
-
-
-async function loadSystemState() {
-  const el = document.getElementById("systemStateText");
-  if (!el) return;
-  try {
-    const j = await fetchJSON("/api/system_state");
-    el.textContent = JSON.stringify(j, null, 2);
-  } catch {}
-}
-
-/* -----------------------------
-   Boot
------------------------------ */
-
-// ensureExtrasUI is optional; guard if not present
-if (typeof ensureExtrasUI === "function") ensureExtrasUI();
-
-wireUI();
-wireCollapsibles();
-setSelectedJob("poll_prices");
-wirePromotionButtons();
-refresh();
-loadPromotionStatus(),
-loadRelevanceStats();
-loadPortfolioBacktestLatest();
-loadSizePolicy(),
-loadSystemState();
-
-loadAlerts();
-
-    // Decision header summary
-    const critN = (_lastAlerts || []).filter((a)=>!a.resolved && a.severity === "CRIT").length;
-    const warnN = (_lastAlerts || []).filter((a)=>!a.resolved && a.severity === "WARN").length;
-
-    // Data health proxy from pills (set elsewhere in your refresh)
-    const hp = document.getElementById("healthPrices")?.textContent || "";
-    const hl = document.getElementById("healthLabels")?.textContent || "";
-    const dataBad = /stale|missing|error/i.test(hp + " " + hl);
-    const dataWarn = /warn/i.test(hp + " " + hl);
-
-    // Model/promotion proxy (uses your existing pill)
-    const promo = document.getElementById("promotionPill")?.textContent || "";
-    const modelBlocked = /blocked|off|0|false|disable/i.test(promo);
-
-    const execDegraded = _isExecutionDegraded();
-    const system =
-      (critN > 0 || dataBad) ? "CRIT" :
-      (warnN > 0 || dataWarn || execDegraded) ? "WARN" :
-      "OK";
-
-    updateDecisionBarFromState({
-      system,
-      crit: critN,
-      warn: warnN,
-      data: dataBad ? "BAD" : dataWarn ? "WARN" : "OK",
-      model: modelBlocked ? "BLOCKED" : "OK",
-      exec: execDegraded ? "DEGRADED" : "OK",
-      updated: "just now",
-    });
-
-
-let _refreshRunning = false;
-setInterval(async () => {
-  if (_refreshRunning) return;
-  _refreshRunning = true;
-  try { await refresh(); }
-  finally { _refreshRunning = false; }
-}, 5000);
-
-let _alertsRunning = false;
-setInterval(async () => {
-  if (_alertsRunning) return;
-  _alertsRunning = true;
-  try { await loadAlerts(); }
-  finally { _alertsRunning = false; }
-}, 7000);
