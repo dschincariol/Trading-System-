@@ -53,19 +53,38 @@ TEMPORAL_CONF_K = float(os.environ.get("TEMPORAL_CONF_K", "75.0"))
 USE_TEMPORAL_EMB = os.environ.get("USE_TEMPORAL_EMB_TABLE", "0") == "1"
 
 # -------------            -- ------------------------------------------------------
-# Determinism (CPU inference; best-effort)
+# Determinism / performance knobs
 # -------------            -- ------------------------------------------------------
 _TORCH_SEED = 42
 torch.manual_seed(_TORCH_SEED)
+
+# Default: favor performance (especially on RTX PRO 2000) unless explicitly requested.
+_DET = os.environ.get("TORCH_DETERMINISTIC", "0") == "1"
 try:
-    torch.use_deterministic_algorithms(True)
+    torch.use_deterministic_algorithms(_DET)
+except Exception:
+    pass
+
+try:
+    torch.backends.cudnn.deterministic = _DET
+    torch.backends.cudnn.benchmark = (not _DET) and (os.environ.get("CUDNN_BENCHMARK", "1") == "1")
+except Exception:
+    pass
+
+# TF32 is a big win on newer RTX cards for matmul-heavy workloads.
+try:
+    torch.set_float32_matmul_precision(os.environ.get("TORCH_MATMUL_PRECISION", "high"))
 except Exception:
     pass
 try:
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cuda.matmul.allow_tf32 = os.environ.get("TORCH_ALLOW_TF32", "1") == "1"
 except Exception:
     pass
+try:
+    torch.backends.cudnn.allow_tf32 = os.environ.get("CUDNN_ALLOW_TF32", "1") == "1"
+except Exception:
+    pass
+
 
 # -------------            -- ------------------------------------------------------
 # Blob format

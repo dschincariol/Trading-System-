@@ -25,6 +25,23 @@ from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import torch
+from pathlib import Path
+
+# -----------------------------
+# CUDA stream separation
+# -----------------------------
+_LIVE_STREAM = None
+_SHADOW_STREAM = None
+
+# Prevent iGPU/NPU from being used implicitly
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+os.environ.setdefault("TORCH_DEVICE", "cuda")
+
+# Prevent CPU oversubscription (keeps GPU fed)
+os.environ.setdefault("OMP_NUM_THREADS", "8")
+os.environ.setdefault("MKL_NUM_THREADS", "8")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "8")
 
 # ------            -- ------------------------------------------------------
 # In-memory cache for recent embeddings (novelty acceleration)
@@ -33,12 +50,25 @@ import torch
 _RECENT_EMB_CACHE: List[np.ndarray] = []
 _RECENT_EMB_CACHE_MAX = int(os.environ.get("NOVELTY_CACHE_MAX", "500"))
 
-# Explicit CPU threading (important on many-core Ryzen)
-torch.set_num_threads(int(os.environ.get("TORCH_NUM_THREADS", "16")))
-torch.set_num_interop_threads(int(os.environ.get("TORCH_INTEROP_THREADS", "4")))
+# Explicit CPU threading (single source of truth)
+try:
+    torch.set_num_threads(int(os.environ.get("TORCH_CPU_THREADS", "8")))
+    torch.set_num_interop_threads(int(os.environ.get("TORCH_INTEROP_THREADS", "4")))
+except Exception:
+    pass
+
+# Initialize CUDA streams (live = default, shadow = low priority)
+if torch.cuda.is_available():
+    try:
+        _LIVE_STREAM = torch.cuda.default_stream()
+        _SHADOW_STREAM = torch.cuda.Stream(priority=1)
+    except Exception:
+        _LIVE_STREAM = None
+        _SHADOW_STREAM = None
 
 from dev_core.storage import (
     connect,
+    connect_ro,
     init_db,
     acquire_job_lock,
     release_job_lock,
@@ -46,6 +76,7 @@ from dev_core.storage import (
     put_job_heartbeat,
     put_event,
 )
+
 from dev_core.predictor import predict_event
 from dev_core.alerts import emit_alert, init_alerts_db
 from dev_core.validation import store_prediction, init_validation_db
@@ -127,27 +158,6 @@ logging.basicConfig(
 # ------            -- ------------------------------------------------------
 # Helpers
 # ------            -- ------------------------------------------------------
-
-def _put_provider_health(con, ts_ms: int, provider: str, ok: int, latency_ms: int, n_symbols: int, error: str = None) -> None:
-    con.execute(
-        """
-        INSERT INTO price_provider_health(ts_ms, provider, ok, latency_ms, n_symbols, error)
-        VALUES (?,?,?,?,?,?)
-        ON CONFLICT(provider, ts_ms) DO UPDATE SET
-          ok=excluded.ok,
-          latency_ms=excluded.latency_ms,
-          n_symbols=excluded.n_symbols,
-          error=excluded.error
-        """,
-        (
-            int(ts_ms),
-            str(provider),
-            int(ok),
-            (int(latency_ms) if latency_ms is not None else None),
-            int(n_symbols),
-            (str(error) if error else None),
-        ),
-    )
 
 def _sleep_with_jitter(seconds: float) -> None:
     if seconds <= 0:
@@ -250,14 +260,13 @@ def _update_event_meta_json(con, event_id: int, meta: Dict[str, Any]) -> None:
     Best-effort UPDATE events.meta_json. Fail-soft if column doesn't exist.
     """
     try:
-        ok = 0 if had_error else 1
-
         con.execute(
             "UPDATE events SET meta_json=? WHERE id=?",
             (json.dumps(meta or {}, separators=(",", ":"), sort_keys=True), int(event_id)),
         )
     except Exception:
         pass
+
 
 def _exec_cost_context(con, symbol: str) -> Dict[str, Any]:
     try:
@@ -661,9 +670,7 @@ def discover_symbols_from_text(text: str):
 def upsert_watch_symbols(con, symbols, ts_ms: int):
     for sym in symbols:
         try:
-            pass
-
-        con.execute(
+            con.execute(
                 """
                 INSERT INTO symbol_universe(symbol, status, first_seen_ms, last_seen_ms, seen_n)
                 VALUES (?, 'WATCH', ?, ?, 1)
@@ -693,7 +700,39 @@ _model: Optional[SentenceTransformer] = None
 def _get_model() -> SentenceTransformer:
     global _model
     if _model is None:
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
+        # Prefer GPU when available (RTX PRO 2000), allow override.
+        dev = os.environ.get("EMBED_DEVICE", "").strip().lower()
+        if not dev:
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # Performance flags (safe to apply even if CPU-only)
+        try:
+            torch.set_float32_matmul_precision(os.environ.get("TORCH_MATMUL_PRECISION", "high"))
+        except Exception:
+            pass
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = os.environ.get("TORCH_ALLOW_TF32", "1") == "1"
+        except Exception:
+            pass
+        try:
+            torch.backends.cudnn.allow_tf32 = os.environ.get("CUDNN_ALLOW_TF32", "1") == "1"
+        except Exception:
+            pass
+        try:
+            torch.backends.cudnn.benchmark = os.environ.get("CUDNN_BENCHMARK", "1") == "1"
+        except Exception:
+            pass
+
+        # Allow separate disks via env (avoid OS drive fallback)
+        for _k in ("HF_HOME", "TRANSFORMERS_CACHE", "SENTENCE_TRANSFORMERS_HOME"):
+            if _k in os.environ:
+                try:
+                    Path(os.environ[_k]).mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+
+        _model = SentenceTransformer("all-MiniLM-L6-v2", device=dev)
+
     return _model
 
 # ------            -- ------------------------------------------------------
@@ -713,42 +752,15 @@ def main() -> None:
         logging.error("another instance is holding the job lock; exiting")
         raise SystemExit(2)
 
-    # ---            -- ------------------------------------------------------
-    # Rules engine (single pass)
-    # ---            -- ------------------------------------------------------
-    try:
-        evaluate_rules()
-    except Exception:
-        pass
-
     last_hb_s = 0.0
     started_ms = int(time.time() * 1000)
 
     try:
-        # --            -- ------------------------------------------------------
         # Phase 3: Global rules engine (auto kill-switch)
-        # --            -- ------------------------------------------------------
         try:
             evaluate_rules()
         except Exception:
             pass
-
-        if not execution_allowed():
-            logging.warning("execution blocked by rules engine; sleeping")
-            _sleep_with_jitter(2.0)
-            return
-        # --            -- ------------------------------------------------------
-        # Phase 5: rules engine (per-symbol halts + global stops)
-        # --            -- ------------------------------------------------------
-
-        allow0, _, _ = execution_allowed(symbol=None, regime=None)
-        if not allow0:
-            logging.warning("execution blocked by kill switch; exiting process_events pass")
-            return
-
-        # --            -- ------------------------------------------------------
-        # Phase 5/6/7: rules engine (global + per-symbol halts)
-        # --            -- ------------------------------------------------------
 
         allow0, _, _ = execution_allowed(symbol=None, regime=None)
         if not allow0:
@@ -756,7 +768,8 @@ def main() -> None:
             return
 
         # Load dynamic universe (ACTIVE + WATCH). Fallback if empty.
-        conu = connect()
+        conu = connect_ro()
+
         try:
             try:
                 symbols = get_active_symbols(conu, limit=int(os.environ.get("PROCESS_SYMBOL_LIMIT", "2000")))
@@ -768,16 +781,12 @@ def main() -> None:
 
             symbols = list(dict.fromkeys(symbols))  # de-dup, preserve order
 
-            # --            -- ------------------------------------------------------
             # Feature 4: Kill-switch on execution cost spikes (spread)
-            # --            -- ------------------------------------------------------
             try:
                 spike_info = _detect_exec_cost_spike(conu)
                 if spike_info and spike_info.get("spike"):
-                    # hard stop this pass (prevents any downstream action)
                     logging.error("EXEC_COST_SPIKE spike_info=%s", spike_info)
 
-                    # Best-effort operator-visible alert (if alerts subsystem uses symbols)
                     try:
                         emit_alert(
                             event_title="Execution cost spike — trading halted",
@@ -795,6 +804,7 @@ def main() -> None:
                         pass
 
                     return
+
             except Exception:
                 pass
 
@@ -807,15 +817,11 @@ def main() -> None:
             except Exception:
                 symbol_status = {}
         finally:
-            try:
-                conu.close()
-            except Exception:
-                pass
+            pass
 
-        # --            -- ------------------------------------------------------
         # Read candidate events (no write txn)
-        # --            -- ------------------------------------------------------
-        con = connect()
+        con = connect_ro()
+
         try:
             rows = con.execute(
                 """
@@ -828,10 +834,7 @@ def main() -> None:
                 """
             ).fetchall()
         finally:
-            try:
-                con.close()
-            except Exception:
-                pass
+            pass
 
         if not rows:
             logging.info("no new events to process")
@@ -839,15 +842,32 @@ def main() -> None:
 
         # Embed outside write transaction
         titles = [(r[3] or "") for r in rows]
-        embeddings = _get_model().encode(
-            titles,
-            batch_size=int(os.environ.get("EMBED_BATCH_SIZE", "64")),
-            show_progress_bar=False,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        ).astype(np.float32, copy=False)
+        if _LIVE_STREAM is not None and torch.cuda.is_available():
+            with torch.cuda.stream(_LIVE_STREAM):
+                embeddings = _get_model().encode(
 
-        conw = connect()
+                    titles,
+                    batch_size=int(os.environ.get("EMBED_BATCH_SIZE", "64")),
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                )
+                torch.cuda.synchronize(_LIVE_STREAM)
+
+                embeddings = embeddings.astype(np.float32, copy=False)
+                embeddings.setflags(write=False)
+
+        else:
+            embeddings = _get_model().encode(
+                titles,
+                batch_size=int(os.environ.get("EMBED_BATCH_SIZE", "64")),
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            ).astype(np.float32, copy=False)
+
+        conw = connect(readonly=False)
+
         try:
             cur = conw.cursor()
 
@@ -866,7 +886,6 @@ def main() -> None:
                                 sort_keys=True,
                             ),
                         )
-
                     except Exception:
                         pass
                     last_hb_s = now_s
@@ -912,26 +931,40 @@ def main() -> None:
                     "meta": event_meta,
                 }
 
-                preds = predict_event(
-                    vec,
-                    symbols,
-                    HORIZONS,
-                    top_k=8,
-                    event=event_ctx,
-                )
-
+                # Batched prediction per horizon (reduces GPU launches)
+                preds = {}
+                for h in HORIZONS:
+                    ph = predict_event(
+                        vec,
+                        symbols,
+                        [int(h)],
+                        top_k=8,
+                        event=event_ctx,
+                    )
+                    for k, v in ph.items():
+                        preds[k] = v
 
                 # Temporal predictor (shadow-mode only)
                 temporal_shadow = None
                 if predict_temporal_shadow_for_event:
                     try:
-                        temporal_shadow = predict_temporal_shadow_for_event(
-                            conw,
-                            event_id=int(eid),
-                            ts_ms=int(ts_ms),
-                            symbols=symbols,
-                            horizons=HORIZONS,
-                        )
+                        if _SHADOW_STREAM is not None:
+                            with torch.cuda.stream(_SHADOW_STREAM):
+                                temporal_shadow = predict_temporal_shadow_for_event(
+                                    conw,
+                                    event_id=int(eid),
+                                    ts_ms=int(ts_ms),
+                                    symbols=symbols,
+                                    horizons=HORIZONS,
+                                )
+                        else:
+                            temporal_shadow = predict_temporal_shadow_for_event(
+                                conw,
+                                event_id=int(eid),
+                                ts_ms=int(ts_ms),
+                                symbols=symbols,
+                                horizons=HORIZONS,
+                            )
                     except Exception:
                         temporal_shadow = None
 
@@ -966,7 +999,6 @@ def main() -> None:
 
                 # Store predictions + decisions + alerts
                 for sym in symbols:
-                    # Skip symbols that are currently non-tradable
                     st = symbol_status.get(sym)
                     if st in ("DISABLED", "COOLDOWN"):
                         continue
@@ -978,7 +1010,6 @@ def main() -> None:
                         adj_explain = {}
                         explain = dict(explain or {})
 
-                        # attach event metadata for UI/modeling
                         if event_meta:
                             explain["event_meta"] = event_meta
 
@@ -992,28 +1023,22 @@ def main() -> None:
                             novelty=float(novelty),
                         )
 
-                        # Options IV / OI context (explain + confidence shaping)
                         opt_ctx = _options_context(conw, sym)
                         if opt_ctx:
                             explain["options"] = opt_ctx
 
-                        # 5.2: News × Options anomaly interaction features
                         opt_anom = _options_anomaly(conw, sym)
                         if opt_anom:
                             explain["options_anomaly"] = opt_anom
 
-                        # 5.3: regime-specific news sensitivity (regime is per-symbol)
                         reg = get_current_regime(sym)
                         explain["regime"] = str(reg)
 
-                        # 5.4: domain blacklist (global + per-symbol)
                         if domain and is_domain_blocked(domain, sym):
                             continue
-
                         if domain:
                             explain["domain"] = domain
 
-                        # Earnings + SEC filings context (explain + confidence shaping)
                         earn_ctx = _earnings_context(conw, sym)
                         if earn_ctx:
                             explain["earnings"] = earn_ctx
@@ -1027,9 +1052,6 @@ def main() -> None:
                         if cluster_info:
                             explain["cluster"] = cluster_info
 
-                        # ---            -- ------------------------------------------------------
-                        # Feature 3: Spread-aware confidence decay
-                        # ---            -- ------------------------------------------------------
                         try:
                             cost_ctx = _exec_cost_context(conw, sym)
                             if cost_ctx:
@@ -1059,8 +1081,6 @@ def main() -> None:
                         except Exception:
                             pass
 
-
-                        # Temporal predictor payload (shadow-only)
                         if isinstance(temporal_shadow, dict):
                             try:
                                 k = (str(sym).upper().strip(), int(h))
@@ -1074,7 +1094,6 @@ def main() -> None:
                             except Exception:
                                 pass
 
-                        # Always store prediction + decision log (independent of temporal shadow)
                         store_prediction(
                             event_id=eid,
                             symbol=sym,
@@ -1083,9 +1102,6 @@ def main() -> None:
                             confidence=float(adj_conf),
                         )
 
-                        # ------------------------------------------------
-                        # Confidence adjustments (staleness / vol proxy)
-                        # ------------------------------------------------
                         try:
                             adj_conf, adj_explain = get_adjusted_confidence(
                                 conw,
@@ -1099,17 +1115,15 @@ def main() -> None:
                         explain["confidence_adjust"] = adj_explain
                         if opt_ctx and opt_ctx.get("avg_iv"):
                             iv = float(opt_ctx["avg_iv"])
-                            if iv > 1.0:  # extreme implied vol
+                            if iv > 1.0:
                                 adj_conf = adj_conf * 0.85
 
-                        # Earnings proximity downweight (scheduled catalyst)
                         if earn_ctx and earn_ctx.get("earnings_date"):
                             try:
                                 adj_conf = adj_conf * float(os.environ.get("EARNINGS_CONF_DOWNWEIGHT", "0.85"))
                             except Exception:
                                 adj_conf = adj_conf * 0.85
 
-                        # Recent SEC filing downweight (unscheduled info risk, esp 8-K)
                         if filing_ctx and filing_ctx.get("form"):
                             form = str(filing_ctx.get("form") or "").upper()
                             if form == "8-K":
@@ -1118,7 +1132,6 @@ def main() -> None:
                                 except Exception:
                                     adj_conf = adj_conf * 0.90
 
-                        # 5.2 interaction: if IV is spiking vs baseline, be more conservative
                         try:
                             if opt_anom and opt_anom.get("iv_ratio_1h_24h") is not None:
                                 ivr = float(opt_anom["iv_ratio_1h_24h"])
@@ -1127,7 +1140,6 @@ def main() -> None:
                         except Exception:
                             pass
 
-                        # 5.3 regime-specific domain sensitivity multiplier (learned later)
                         try:
                             if domain:
                                 mult = domain_conf_multiplier(domain, sym, reg, int(h))
@@ -1157,10 +1169,8 @@ def main() -> None:
                                 "domain": domain,
                                 "regime": str(reg),
                             },
-
                         )
 
-                        # Emit alert (preserve legacy optional downweight behavior)
                         alert_conf = float(adj_conf)
                         if ALERT_DOWNWEIGHT_NEG_NET:
                             try:
@@ -1170,7 +1180,7 @@ def main() -> None:
                                     alert_conf = alert_conf * float(ALERT_DOWNWEIGHT_MULT)
                             except Exception:
                                 pass
-                        # Feature 4: stop emitting alerts if execution costs spike mid-pass
+
                         try:
                             spike_info2 = _detect_exec_cost_spike(conw)
                             if spike_info2 and spike_info2.get("spike"):
@@ -1179,16 +1189,15 @@ def main() -> None:
                         except Exception:
                             pass
 
-                        if not execution_allowed():
-                            continue
+                        allow_global, _, _ = execution_allowed(symbol=None, regime=None)
+                        if not allow_global:
+                            return
 
                         allow_sym, _, _ = execution_allowed(symbol=sym, regime=None)
                         if not allow_sym:
                             continue
-
                         try:
                             emit_alert(
-
                                 event_title=title,
                                 symbol=sym,
                                 horizon_s=int(h),
@@ -1199,13 +1208,10 @@ def main() -> None:
                         except Exception:
                             pass
 
-                conw.commit()
+            conw.commit()
 
         finally:
-            try:
-                conw.close()
-            except Exception:
-                pass
+            pass
 
         dur_ms = int(time.time() * 1000) - started_ms
         logging.info("PROCESS COMPLETE dur_ms=%s", dur_ms)

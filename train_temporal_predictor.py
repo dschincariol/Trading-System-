@@ -20,9 +20,39 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-# Shadow-mode safety: force CPU unless explicitly allowed
+# Shadow-mode safety: default to CPU unless explicitly allowed.
+# Set TEMPORAL_USE_CUDA=1 to train on RTX PRO 2000.
 if os.environ.get("TEMPORAL_USE_CUDA", "0") != "1":
     torch.set_default_device("cpu")
+else:
+    try:
+        torch.set_default_device("cuda")
+    except Exception:
+        pass
+
+# Performance flags (TF32 + cuDNN benchmark when not deterministic)
+_DET = os.environ.get("TORCH_DETERMINISTIC", "0") == "1"
+try:
+    torch.use_deterministic_algorithms(_DET)
+except Exception:
+    pass
+try:
+    torch.backends.cudnn.deterministic = _DET
+    torch.backends.cudnn.benchmark = (not _DET) and (os.environ.get("CUDNN_BENCHMARK", "1") == "1")
+except Exception:
+    pass
+try:
+    torch.set_float32_matmul_precision(os.environ.get("TORCH_MATMUL_PRECISION", "high"))
+except Exception:
+    pass
+try:
+    torch.backends.cuda.matmul.allow_tf32 = os.environ.get("TORCH_ALLOW_TF32", "1") == "1"
+except Exception:
+    pass
+try:
+    torch.backends.cudnn.allow_tf32 = os.environ.get("CUDNN_ALLOW_TF32", "1") == "1"
+except Exception:
+    pass
 
 from dev_core.storage import connect, init_db, acquire_job_lock, release_job_lock
 from dev_core.asset_map import asset_class_for_symbol

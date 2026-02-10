@@ -13,6 +13,7 @@ Implements:
 """
 
 from pathlib import Path
+import os
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import torch
@@ -49,7 +50,11 @@ HORIZONS = [300, 3600]
 # Boot
 # ---------------------------
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
+dev = os.environ.get("EMBED_DEVICE", "").strip().lower()
+if not dev:
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+model = SentenceTransformer("all-MiniLM-L6-v2", device=dev)
+
 init_db()
 init_alerts_db()
 init_validation_db()

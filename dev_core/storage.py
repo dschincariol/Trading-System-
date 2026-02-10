@@ -1,9 +1,11 @@
 # dev_core/storage.py
 import os
 import sqlite3
+import threading
+import time
 from pathlib import Path
 
-DB_PATH = Path("dev.db")
+DB_PATH = Path(os.environ.get("DB_PATH", "dev.db"))
 
 # Production-stable WAL defaults + performance tuning (env-controlled)
 #
@@ -13,7 +15,32 @@ DB_PATH = Path("dev.db")
 #   SQLITE_WAL_AUTOCHECKPOINT=2000
 #   SQLITE_JOURNAL_SIZE_LIMIT=268435456
 #
+# -----------------------------
+# Connection pooling + safety
+# -----------------------------
+_TLS = threading.local()
+
+# WAL checkpoint batching (env-controlled)
+#   SQLITE_WAL_CHECKPOINT_EVERY_WRITES=250
+#   SQLITE_WAL_CHECKPOINT_EVERY_S=30
+#   SQLITE_WAL_CHECKPOINT_MODE=PASSIVE|RESTART|TRUNCATE
+_WAL_CKPT_EVERY_WRITES = int(os.environ.get("SQLITE_WAL_CHECKPOINT_EVERY_WRITES", "250"))
+_WAL_CKPT_EVERY_S = float(os.environ.get("SQLITE_WAL_CHECKPOINT_EVERY_S", "30"))
+_WAL_CKPT_MODE = os.environ.get("SQLITE_WAL_CHECKPOINT_MODE", "PASSIVE").strip().upper()
+
+# Corruption hardening (practical)
+#   SQLITE_QUICK_CHECK_EVERY_S=600   (10 min; set 0 to disable)
+#   SQLITE_INTEGRITY_CHECK_ON_START=0/1
+_QUICK_CHECK_EVERY_S = float(os.environ.get("SQLITE_QUICK_CHECK_EVERY_S", "600"))
+_INTEGRITY_CHECK_ON_START = os.environ.get("SQLITE_INTEGRITY_CHECK_ON_START", "0") == "1"
+
+# Internal counters (per-process; good enough for single-process workers)
+_LAST_CKPT_MS = 0
+_WRITE_SINCE_CKPT = 0
+_LAST_QUICK_CHECK_MS = 0
+
 _SQLITE_PRAGMAS = [
+
     "PRAGMA journal_mode=WAL;",
     "PRAGMA synchronous=NORMAL;",
     "PRAGMA temp_store=MEMORY;",
@@ -25,14 +52,7 @@ _SQLITE_PRAGMAS = [
     f"PRAGMA journal_size_limit={int(os.environ.get('SQLITE_JOURNAL_SIZE_LIMIT', '268435456'))};",
 ]
 
-
-def connect():
-    con = sqlite3.connect(
-        DB_PATH,
-        timeout=30.0,
-        isolation_level=None,  # autocommit
-        check_same_thread=False,
-    )
+def _apply_pragmas(con: sqlite3.Connection, readonly: bool) -> None:
     con.row_factory = sqlite3.Row
 
     for p in _SQLITE_PRAGMAS:
@@ -41,16 +61,157 @@ def connect():
         except Exception:
             pass
 
-    # Safety: enforce FK every connection
+    # Defense-in-depth: block writes on read connections
+    if readonly:
+        try:
+            con.execute("PRAGMA query_only=ON;")
+        except Exception:
+            pass
+
+    # Safer defaults that reduce "foot-guns"
     try:
-        con.execute("PRAGMA foreign_keys=ON;")
+        con.execute("PRAGMA trusted_schema=OFF;")
+    except Exception:
+        pass
+    try:
+        con.execute("PRAGMA recursive_triggers=ON;")
     except Exception:
         pass
 
+
+def _new_connection(*, readonly: bool) -> sqlite3.Connection:
+    try:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    # Use URI mode for readonly connections when possible
+    if readonly:
+        # If DB doesn't exist yet, readonly open will fail; fall back to normal open.
+        uri = f"file:{str(DB_PATH)}?mode=ro"
+        try:
+            con = sqlite3.connect(
+                uri,
+                uri=True,
+                timeout=30.0,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+        except Exception:
+            con = sqlite3.connect(
+                str(DB_PATH),
+                timeout=30.0,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+    else:
+        con = sqlite3.connect(
+            str(DB_PATH),
+            timeout=30.0,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+
+    _apply_pragmas(con, readonly=readonly)
+
+    # Optional deep check at startup (expensive; off by default)
+    if _INTEGRITY_CHECK_ON_START and not readonly:
+        try:
+            con.execute("PRAGMA integrity_check;").fetchone()
+        except Exception:
+            pass
+
+    return con
+
+def connect(readonly: bool = False) -> sqlite3.Connection:
+    """
+    Pooled connection (per-thread):
+      - readonly=False -> write-capable connection
+      - readonly=True  -> read-only connection (query_only)
+    """
+    key = "ro" if readonly else "rw"
+    slot = getattr(_TLS, key, None)
+    if slot is not None:
+        try:
+            slot.execute("SELECT 1;").fetchone()
+            return slot
+        except Exception:
+            try:
+                slot.close()
+            except Exception:
+                pass
+            setattr(_TLS, key, None)
+
+    con = _new_connection(readonly=readonly)
+    setattr(_TLS, key, con)
     return con
 
 
+def connect_ro() -> sqlite3.Connection:
+    return connect(readonly=True)
+
+def _maybe_wal_checkpoint(con: sqlite3.Connection, *, force: bool = False) -> None:
+    """
+    Batched WAL checkpoints to keep WAL size bounded without constant stalls.
+    Triggered by write volume and/or elapsed time.
+    """
+    global _LAST_CKPT_MS, _WRITE_SINCE_CKPT
+
+    now_ms = int(time.time() * 1000)
+    due_time = (now_ms - int(_LAST_CKPT_MS)) >= int(_WAL_CKPT_EVERY_S * 1000)
+    due_writes = _WRITE_SINCE_CKPT >= int(max(1, _WAL_CKPT_EVERY_WRITES))
+
+    if not force and not (due_time or due_writes):
+        return
+
+    mode = _WAL_CKPT_MODE
+    if mode not in ("PASSIVE", "RESTART", "TRUNCATE"):
+        mode = "PASSIVE"
+
+    try:
+        con.execute(f"PRAGMA wal_checkpoint({mode});").fetchall()
+    except Exception:
+        try:
+            con.execute("PRAGMA wal_checkpoint(PASSIVE);").fetchall()
+        except Exception:
+            pass
+
+    _LAST_CKPT_MS = now_ms
+    _WRITE_SINCE_CKPT = 0
+
+
+def _maybe_quick_check(con: sqlite3.Connection) -> None:
+    """
+    Practical corruption hardening: periodic quick_check on the write connection.
+    Disabled if SQLITE_QUICK_CHECK_EVERY_S=0.
+    """
+    global _LAST_QUICK_CHECK_MS
+    if _QUICK_CHECK_EVERY_S <= 0:
+        return
+
+    now_ms = int(time.time() * 1000)
+    if _LAST_QUICK_CHECK_MS and (now_ms - int(_LAST_QUICK_CHECK_MS)) < int(_QUICK_CHECK_EVERY_S * 1000):
+        return
+
+    try:
+        con.execute("PRAGMA quick_check;").fetchone()
+        _LAST_QUICK_CHECK_MS = now_ms
+    except Exception:
+        pass
+
+
+def _note_write(con: sqlite3.Connection) -> None:
+    """
+    Called after successful writes to increment counters and maybe checkpoint.
+    """
+    global _WRITE_SINCE_CKPT
+    _WRITE_SINCE_CKPT += 1
+    _maybe_quick_check(con)
+    _maybe_wal_checkpoint(con, force=False)
+
+
 def _has_column(con, table: str, col: str) -> bool:
+
     rows = con.execute(f"PRAGMA table_info({table});").fetchall()
     return any(str(r[1]).lower() == col.lower() for r in rows)
 
@@ -332,10 +493,10 @@ def _ensure_kill_switch_schema(con):
         """
     )
 
-
 def init_db():
-    con = connect()
+    con = connect(readonly=False)
     try:
+
         con.executescript(
             """
             -- -            -- ------------------------------------------------------
@@ -1186,7 +1347,6 @@ def init_db():
         _ensure_domain_perf_schema(con)
         _ensure_promotion_audit_columns(con)
         _ensure_promotion_watch_schema(con)
-        _ensure_kill_switch_schema(con)
 
         # Additive: ensure symbols table exists even for older DBs
         try:
@@ -1220,25 +1380,25 @@ def init_db():
 
 def put_event(ts_ms, source, title, body, url, event_key, meta_json=None):
 
-    con = connect()
+    con = connect(readonly=False)
     try:
         cur = con.cursor()
+
         cur.execute(
             """
             INSERT OR IGNORE INTO events
               (ts_ms, source, title, body, url, event_key, meta_json)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-
             (
-    int(ts_ms),
-    str(source),
-    str(title),
-    body,
-    url,
-    str(event_key),
-    meta_json,
-),
+                int(ts_ms),
+                str(source),
+                str(title),
+                body,
+                url,
+                str(event_key),
+                meta_json,
+            ),
         )
 
         row = cur.execute(
@@ -1248,15 +1408,20 @@ def put_event(ts_ms, source, title, body, url, event_key, meta_json=None):
 
         return int(row[0])
     finally:
+        try:
+            _maybe_wal_checkpoint(con, force=True)
+        except Exception:
+            pass
         con.close()
 
 def put_price(ts_ms, symbol, price):
-    con = connect()
+    con = connect(readonly=False)
     try:
 
         con.execute(
             """
             INSERT INTO prices(ts_ms, symbol, price)
+
             VALUES (?, ?, ?)
             ON CONFLICT(symbol, ts_ms) DO UPDATE SET
               price=excluded.price
@@ -1280,7 +1445,8 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> b
     now_ms = int(time.time() * 1000)
     stale_ms = int(ttl_s) * 1000
 
-    con = connect()
+    con = connect(readonly=False)
+
     try:
         con.execute("BEGIN IMMEDIATE;")
         row = con.execute(
@@ -1324,20 +1490,25 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> b
             pass
         return False
     finally:
-        con.close()
+        # pooled connection; do not close
+        pass
 
 
 def release_job_lock(job_name: str, owner: str, pid: int) -> None:
-    con = connect()
+    con = connect(readonly=False)
     try:
-        ok = 0 if had_error else 1
 
         con.execute(
             "DELETE FROM job_locks WHERE job_name=? AND owner=? AND pid=?",
             (str(job_name), str(owner), int(pid)),
         )
     finally:
-        con.close()
+        try:
+            con.commit()
+        except Exception:
+            pass
+        _note_write(con)
+        # pooled connection; do not close
 
 
 def touch_job_lock(job_name: str, owner: str, pid: int) -> None:
@@ -1346,8 +1517,6 @@ def touch_job_lock(job_name: str, owner: str, pid: int) -> None:
     now_ms = int(time.time() * 1000)
     con = connect()
     try:
-        ok = 0 if had_error else 1
-
         con.execute(
             """
             UPDATE job_locks
@@ -1364,10 +1533,9 @@ def put_job_heartbeat(job_name: str, owner: str, pid: int, extra_json: str = Non
     import time
 
     now_ms = int(time.time() * 1000)
-    con = connect()
-    try:
-        ok = 0 if had_error else 1
+    con = connect(readonly=False)
 
+    try:
         con.execute(
             """
             INSERT INTO job_heartbeats(job_name, owner, pid, ts_ms, extra_json)
@@ -1381,4 +1549,19 @@ def put_job_heartbeat(job_name: str, owner: str, pid: int, extra_json: str = Non
             (str(job_name), str(owner), int(pid), now_ms, extra_json),
         )
     finally:
-        con.close()
+        try:
+            con.commit()
+        except Exception:
+            pass
+        _note_write(con)
+        # pooled connection; do not close
+
+def close_pooled_connections() -> None:
+    for key in ("rw", "ro"):
+        con = getattr(_TLS, key, None)
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+            setattr(_TLS, key, None)
