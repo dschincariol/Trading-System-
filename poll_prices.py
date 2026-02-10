@@ -317,7 +317,7 @@ def _put_prices_batch(con, rows):
 
     now_ms = int(time.time() * 1000)
     for ts_ms, sym, _ in rows:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -336,7 +336,7 @@ def _put_prices_batch(con, rows):
 def _put_bar(tf_s: int, ts_ms: int, symbol: str, o: float, h: float, l: float, c: float, v) -> None:
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

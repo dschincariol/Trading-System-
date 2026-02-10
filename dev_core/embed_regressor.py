@@ -301,7 +301,6 @@ def _fit_isotonic_curve(xs, ys) -> Optional[Tuple[List[float], List[float]]]:
 
     return out_x, out_y
 
-
 def train_embed_models(
     symbols: List[str],
     horizons: List[int],
@@ -336,7 +335,7 @@ def train_embed_models(
     if mlp_hidden is None:
         mlp_hidden = [128, 64]
 
-        now_ms = int(time.time() * 1000)
+    now_ms = int(time.time() * 1000)
 
     cutoff_ms = now_ms - int(lookback_days) * 24 * 3600 * 1000
 
@@ -355,12 +354,23 @@ def train_embed_models(
 
         rows = con.execute(
             """
-            SELECT l.event_id, l.symbol, l.horizon_s, l.impact_z, emb.vec, e.ts_ms
+            SELECT
+              l.event_id,
+              l.symbol,
+              l.horizon_s,
+              COALESCE(le.net_z, l.impact_z) AS impact_z,
+              emb.vec,
+              e.ts_ms
             FROM labels l
             JOIN events e ON e.id = l.event_id
             JOIN event_embeddings emb ON emb.event_id = l.event_id
+            LEFT JOIN labels_exec le
+              ON le.event_id = l.event_id
+             AND le.symbol   = l.symbol
+             AND le.horizon_s = l.horizon_s
+             AND le.realized = 1
             WHERE e.ts_ms >= ?
-              AND l.impact_z IS NOT NULL
+              AND COALESCE(le.net_z, l.impact_z) IS NOT NULL
             """,
             (int(cutoff_ms),),
         ).fetchall()
@@ -494,9 +504,7 @@ def train_embed_models(
                     pw = mw.predict(Xw[split:])
                     wrmse, wsp, _ = _eval_predictions(yw[split:], pw)
 
-                    pass
-
-        con.execute(
+                    con.execute(
                         """
                         INSERT OR REPLACE INTO model_weather_effect(
                           key_type, key, horizon_s, ts_ms,
@@ -521,6 +529,7 @@ def train_embed_models(
                 pass
 
             # --- Ridge ---
+
             try:
                 model_r = Ridge(alpha=float(alpha), fit_intercept=True)
                 model_r.fit(Xtr, ytr)
@@ -598,9 +607,7 @@ def train_embed_models(
 
             # A1: store eval rows for all trained kinds
             for mk, (_b, em) in (results or {}).items():
-                pass
-
-        con.execute(
+                con.execute(
                     """
                     INSERT OR REPLACE INTO embed_model_eval(
                       key_type, key, horizon_s, model_kind, ts_ms,
@@ -622,23 +629,25 @@ def train_embed_models(
                     ),
                 )
 
-                # A2: collect calibration sample: conf_raw from n_train -> directional_acc
+                # A2 calibration samples
                 try:
                     _calib.setdefault((int(h_i), str(mk)), {"x": [], "y": []})
-                    _calib[(int(h_i), str(mk))]["x"].append(_conf_from_n(int(em["n_train"]), float(conf_k)))
-                    _calib[(int(h_i), str(mk))]["y"].append(float(em["directional_acc"]))
+                    _calib[(int(h_i), str(mk))]["x"].append(
+                        _conf_from_n(int(em["n_train"]), float(conf_k))
+                    )
+                    _calib[(int(h_i), str(mk))]["y"].append(
+                        float(em["directional_acc"])
+                    )
                 except Exception:
                     pass
 
-            # A3: store only winner blob in embed_models2 (namespaced key)
+            # A3: store only winner blob
             _upsert_model(con, "symbol", _tag_key(sym_u), h_i, now_ms, len(items), int(dim), blob_out)
             out[("symbol", _tag_key(sym_u), h_i)] = int(len(items))
 
             # Fill pending weather-effect row (if any) for this (symbol,h)
             try:
-                pass
-
-        con.execute(
+                con.execute(
                     """
                     UPDATE model_weather_effect
                     SET key_type='symbol', key=?, horizon_s=?
@@ -657,76 +666,34 @@ def train_embed_models(
                     continue
                 dim, _chosen_kind, blob_out, results = res
 
-                # A1: store eval rows for all trained kinds (FIXED INDENTATION)
                 for mk, (_b, em) in (results or {}).items():
-                    pass
 
-        con.execute(
-                        """
-                        INSERT OR REPLACE INTO embed_model_eval(
-                          key_type, key, horizon_s, model_kind, ts_ms,
-                          n_train, n_eval, rmse, spearman, directional_acc
-                        )
-                        VALUES (?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        (
-                            "class",
-                            str(cls),
-                            int(h_i),
-                            str(mk),
-                            int(now_ms),
-                            int(em["n_train"]),
-                            int(em["n_eval"]),
-                            float(em["rmse"]),
-                            float(em["spearman"]),
-                            float(em["directional_acc"]),
-                        ),
-                    )
-
-                    # A2: collect calibration sample
                     try:
                         _calib.setdefault((int(h_i), str(mk)), {"x": [], "y": []})
-                        _calib[(int(h_i), str(mk))]["x"].append(_conf_from_n(int(em["n_train"]), float(conf_k)))
-                        _calib[(int(h_i), str(mk))]["y"].append(float(em["directional_acc"]))
+                        _calib[(int(h_i), str(mk))]["x"].append(
+                            _conf_from_n(int(em["n_train"]), float(conf_k))
+                        )
+                        _calib[(int(h_i), str(mk))]["y"].append(
+                            float(em["directional_acc"])
+                        )
                     except Exception:
                         pass
 
-                # A3: store only winner blob in embed_models2
-               _upsert_model(con, "class", _tag_key(str(cls).upper()), h_i, now_ms, len(items), int(dim), blob_out)
+                _upsert_model(
+                    con,
+                    "class",
+                    _tag_key(str(cls).upper()),
+                    h_i,
+                    now_ms,
+                    len(items),
+                    int(dim),
+                    blob_out,
+                )
                 out[("class", _tag_key(str(cls).upper()), h_i)] = int(len(items))
 
         # -----------------------------------
         # A2: fit + persist confidence calibration curves
         # -----------------------------------
-        try:
-            for (h_i, mk), d in (_calib or {}).items():
-                xs = d.get("x") or []
-                ys = d.get("y") or []
-                curve = _fit_isotonic_curve(xs, ys)
-                if not curve:
-                    continue
-                xj, yj = curve
-                pass
-
-        con.execute(
-                    """
-                    INSERT OR REPLACE INTO embed_conf_calib(
-                      horizon_s, model_kind, ts_ms, conf_k, n_points, x_json, y_json
-                    )
-                    VALUES (?,?,?,?,?,?,?)
-                    """,
-                    (
-                        int(h_i),
-                        str(mk),
-                        int(now_ms),
-                        float(conf_k),
-                        int(len(xj)),
-                        json.dumps([float(x) for x in xj]),
-                        json.dumps([float(y) for y in yj]),
-                    ),
-                )
-        except Exception:
-            pass
 
         con.commit()
         return out

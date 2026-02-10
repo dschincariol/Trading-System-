@@ -32,7 +32,7 @@ def init_rules_audit_db():
 def log_rule(scope: str, reason: str, state: str, details: dict | None = None):
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

@@ -25,7 +25,7 @@ def confidence_from_weight(w: float) -> float:
 def _ensure_model_stats():
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

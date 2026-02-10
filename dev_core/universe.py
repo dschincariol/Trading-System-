@@ -116,7 +116,7 @@ def upsert_symbol(
         base_score = 0.0
         new_score = float(base_score + float(score_delta))
         mj = json.dumps(meta or {}, separators=(",", ":"), sort_keys=True)
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

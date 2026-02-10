@@ -89,7 +89,7 @@ def register_model(
     con = connect()
     try:
         reg = str(regime if regime is not None else (key if key is not None else "global"))
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -338,7 +338,7 @@ def promote_to_champion(
             """,
             (str(model_name), str(reg)),
         )
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -399,7 +399,7 @@ def rollback_champion(model_name: str, *, regime: Optional[str] = None, key: Opt
             """,
             (str(model_name), str(reg)),
         )
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -513,7 +513,7 @@ def _now_ms() -> int:
     try:
         k = str(key) if key is not None else "global"
 
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -758,7 +758,7 @@ def promote_to_champion(
         con.execute("BEGIN IMMEDIATE;")
 
         # retire existing champion(s)
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -787,7 +787,7 @@ def promote_to_champion(
                 f"cannot promote missing model record model={model_name} key={k} kind={to_kind} ts={to_ts_ms}"
             )
 
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -839,7 +839,7 @@ def rollback_champion(model_name: str, *, key: Optional[str] = None) -> Optional
 
         con.execute("BEGIN IMMEDIATE;")
 
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -849,7 +849,7 @@ def rollback_champion(model_name: str, *, key: Optional[str] = None) -> Optional
             """,
             (str(model_name), str(k)),
         )
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

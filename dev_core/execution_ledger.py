@@ -102,7 +102,7 @@ def log_submit(
     init_execution_ledger()
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -152,7 +152,7 @@ def log_fill(
     init_execution_ledger()
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -214,6 +214,8 @@ def compute_metrics_snapshot(limit_orders: int = 500) -> Dict[str, Any]:
     con = connect()
     try:
         ts = now_ms()
+        # Prevent duplicate snapshots within same ms
+        ts = ts - (ts % 1000)
 
         rows = con.execute(
             """
@@ -236,14 +238,11 @@ def compute_metrics_snapshot(limit_orders: int = 500) -> Dict[str, Any]:
             if vwap is None:
                 continue
 
-            # slippage (bps) = (fill - ref) / ref * 10k, sign-aware by qty direction
             sl_bps = None
             if ref_px and ref_px > 0:
-                # buy: fill>ref is worse; sell: fill<ref is worse -> sign by qty
                 sign = 1.0 if qty > 0 else -1.0
                 sl_bps = ((float(vwap) - float(ref_px)) / float(ref_px)) * 10000.0 * sign
 
-            # latest px for m2m
             last_px = None
             try:
                 r = con.execute(
@@ -263,25 +262,30 @@ def compute_metrics_snapshot(limit_orders: int = 500) -> Dict[str, Any]:
 
             m2m = None
             if last_px is not None:
-                # signed pnl of executed shares/qty:
-                # qty>0 buy -> pnl=(last - vwap)*filled_qty
-                # qty<0 sell/short -> pnl=(vwap - last)*abs(filled_qty) = (last - vwap)*filled_qty
                 m2m = (float(last_px) - float(vwap)) * float(filled_qty)
 
-            pass
-
-        con.execute(
+            con.execute(
                 """
                 INSERT OR REPLACE INTO execution_metrics(
                   ts_ms, client_order_id, symbol, ref_px, fill_vwap, slippage_bps, m2m_pnl, last_px
                 )
                 VALUES (?,?,?,?,?,?,?,?)
                 """,
-                (int(ts), cid, sym, ref_px, float(vwap), float(sl_bps) if sl_bps is not None else None, float(m2m) if m2m is not None else None, float(last_px) if last_px is not None else None),
+                (
+                    int(ts),
+                    cid,
+                    sym,
+                    ref_px,
+                    float(vwap),
+                    float(sl_bps) if sl_bps is not None else None,
+                    float(m2m) if m2m is not None else None,
+                    float(last_px) if last_px is not None else None,
+                ),
             )
             n += 1
 
         con.commit()
+
         return {"ok": True, "metrics_written": int(n), "ts_ms": int(ts)}
     finally:
         con.close()
@@ -330,16 +334,31 @@ def compute_pnl_attribution_snapshot(lookback_orders: int = 500) -> Dict[str, An
         n = 0
         for (sid, sym), v in agg.items():
             avg_sl = float(v["slippage_bps"]) / max(1.0, float(v["n"]))
-            pass
 
-        con.execute(
+            con.execute(
                 """
                 INSERT OR REPLACE INTO pnl_attribution(
-                  ts_ms, source_alert_id, symbol, pnl, fees, slippage_bps, extra_json
+                  ts_ms, source_alert_id, symbol,
+                  pnl, fees, slippage_bps, extra_json
                 )
                 VALUES (?,?,?,?,?,?,?)
                 """,
-                (int(ts), int(sid), str(sym), float(v["pnl"]), 0.0, float(avg_sl), json.dumps({"metrics_ts_ms": int(mts), "n_orders": int(v["n"])}, separators=(",", ":"), sort_keys=True)),
+                (
+                    int(ts),
+                    int(sid),
+                    str(sym),
+                    float(v["pnl"]),
+                    0.0,
+                    float(avg_sl),
+                    json.dumps(
+                        {
+                            "metrics_ts_ms": int(mts),
+                            "n_orders": int(v["n"]),
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ),
             )
             n += 1
 

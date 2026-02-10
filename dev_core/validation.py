@@ -63,7 +63,7 @@ def init_validation_db():
 def store_prediction(event_id, symbol, horizon_s, predicted_z, confidence):
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

@@ -150,7 +150,7 @@ def assign_cluster(event_id: int, ts_ms: int, title: str, vec: np.ndarray):
             (int(now_ms), int(now_ms), 1, int(v.shape[1]), v.reshape(-1).tobytes(), str(title or "")[:200]),
         )
         cid = int(con.execute("SELECT last_insert_rowid();").fetchone()[0])
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

@@ -116,6 +116,17 @@ def main():
     last_hb_s = 0.0
     since_ms = int((time.time() - LOOKBACK_DAYS * 86400) * 1000)
 
+    # crash-safe resume: skip already-labeled timestamps
+    try:
+        r = connect().execute(
+            "SELECT MAX(ts_pred_ms) FROM labels_price"
+        ).fetchone()
+        if r and r[0]:
+            since_ms = max(since_ms, int(r[0]))
+    except Exception:
+        pass
+
+
     try:
         con = connect()
         try:
@@ -175,9 +186,7 @@ def main():
                     ret_z = _rolling_z(con, sym, int(h), float(ret))
 
                     try:
-                        pass
-
-        con.execute(
+                        con.execute(
                             """
                             INSERT OR REPLACE INTO labels_price(
                               ts_pred_ms, ts_eval_ms, symbol, horizon_s,
@@ -194,10 +203,16 @@ def main():
                                 float(ret),
                                 float(ret_z),
                                 int(dir_),
-                                json.dumps({"entry_ts_ms": int(entry_ts)}, separators=(",", ":")),
+                                json.dumps(
+                                    {"entry_ts_ms": int(entry_ts)},
+                                    separators=(",", ":"),
+                                ),
                             ),
                         )
                         wrote += 1
+                    except Exception:
+                        pass
+
                     except Exception:
                         pass
 

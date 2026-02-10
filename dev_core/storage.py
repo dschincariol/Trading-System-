@@ -4,6 +4,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from typing import Dict
 
 DB_PATH = Path(os.environ.get("DB_PATH", "dev.db"))
 
@@ -177,10 +178,6 @@ def connect(readonly: bool = False):
         pass
 
     return con
-
-
-def connect_ro():
-    return connect(readonly=True)
 
 def connect_ro() -> sqlite3.Connection:
     return connect(readonly=True)
@@ -1538,8 +1535,10 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> b
             pass
         return False
     finally:
-        # pooled connection; do not close
-        pass
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 def release_job_lock(job_name: str, owner: str, pid: int) -> None:
@@ -1556,7 +1555,10 @@ def release_job_lock(job_name: str, owner: str, pid: int) -> None:
         except Exception:
             pass
         _note_write(con)
-        # pooled connection; do not close
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 def touch_job_lock(job_name: str, owner: str, pid: int) -> None:
@@ -1602,7 +1604,10 @@ def put_job_heartbeat(job_name: str, owner: str, pid: int, extra_json: str = Non
         except Exception:
             pass
         _note_write(con)
-        # pooled connection; do not close
+        try:
+            con.close()
+        except Exception:
+            pass
 
 def get_job_checkpoint(job_name: str) -> Dict[str, int]:
     con = connect_ro()
@@ -1622,7 +1627,6 @@ def get_job_checkpoint(job_name: str) -> Dict[str, int]:
             con.close()
         except Exception:
             pass
-
 
 def put_job_checkpoint(job_name: str, last_event_id: int, last_event_ts_ms: int) -> None:
     now_ms = int(time.time() * 1000)

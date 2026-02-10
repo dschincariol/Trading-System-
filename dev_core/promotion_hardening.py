@@ -241,7 +241,7 @@ def close_watch(watch_id: int, status: str, note: Optional[str] = None) -> None:
     init_db()
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

@@ -63,7 +63,7 @@ def set_guard(key: str, value: str) -> None:
     init_db()
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

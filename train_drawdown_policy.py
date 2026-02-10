@@ -240,7 +240,7 @@ def main():
             "method": "dd_factor_monotone",
         }
 
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

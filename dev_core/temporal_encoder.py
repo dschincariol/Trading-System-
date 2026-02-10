@@ -131,7 +131,7 @@ def build_temporal_embeddings(
                 total += float(loss)
 
         # persist embeddings
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

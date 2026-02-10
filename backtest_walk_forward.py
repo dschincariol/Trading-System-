@@ -253,7 +253,7 @@ def main() -> int:
         else:
             run_metrics = {"total_n": 0, "mae": None, "dir_acc": None, "n_keys": 0}
 
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

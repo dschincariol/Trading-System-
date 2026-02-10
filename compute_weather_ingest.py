@@ -188,7 +188,7 @@ def _ingest_once() -> None:
                 had_error = True
                 err = repr(e)
 
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

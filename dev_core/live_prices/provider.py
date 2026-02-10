@@ -10,7 +10,7 @@ def _provider_health_key(name: str) -> str:
 def _record_provider_failure(name: str):
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -28,7 +28,7 @@ def _record_provider_failure(name: str):
 def _record_provider_success(name: str):
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

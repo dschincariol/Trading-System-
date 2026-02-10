@@ -92,7 +92,7 @@ def main() -> int:
     con = connect()
     try:
         # Ensure schema
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

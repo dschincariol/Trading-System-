@@ -214,7 +214,7 @@ def main():
             "method": "bucket_sharpe_monotone",
         }
 
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

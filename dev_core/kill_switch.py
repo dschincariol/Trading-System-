@@ -62,7 +62,15 @@ def _maybe_auto_expire(con, scope: str, key: str, st):
 
     # expired → clear
     try:
-        clear(scope, key, reason="auto_expire", actor="system", meta={"until_ts_ms": until_ms}, con=con)
+                clear(
+            scope,
+            key,
+            reason="auto_expire",
+            actor="system",
+            meta={"until_ts_ms": int(until_ms)},
+            con=con,
+        )
+
     except Exception:
         pass
 
@@ -174,6 +182,8 @@ def set_kill_switch(
 
     owns = False
     if con is None:
+        from dev_core.storage import init_db
+        init_db()
         con = connect()
         owns = True
 
@@ -200,7 +210,6 @@ def set_kill_switch(
             )
         else:
             created_ms = int(cur[1] or now_ms)
-            pass
 
             con.execute(
                 """
@@ -216,16 +225,24 @@ def set_kill_switch(
                     (now_ms, scope_n, key_n),
                 )
 
-        ok = 0 if had_error else 1
-
             con.execute(
                 """
                 INSERT INTO kill_switch_audit
-              (ts_ms, action, scope, key, enabled, actor, reason, meta_json)
-            VALUES (?,?,?,?,?,?,?,?)
-            """,
-            (now_ms, _s(action).upper() or "SET", scope_n, key_n, en, actor_s, reason_s, meta_json),
-        )
+                  (ts_ms, action, scope, key, enabled, actor, reason, meta_json)
+                VALUES (?,?,?,?,?,?,?,?)
+                """,
+                (
+                    int(now_ms),
+                    _s(action).upper() or "SET",
+                    scope_n,
+                    key_n,
+                    int(en),
+                    actor_s,
+                    reason_s,
+                    meta_json,
+                ),
+            )
+
 
         con.execute("COMMIT;")
     except Exception:

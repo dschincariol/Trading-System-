@@ -91,7 +91,7 @@ def upsert_policy(policy_name: str, weights: np.ndarray, bias: float, n: int, fe
 
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """
@@ -201,7 +201,7 @@ def log_decision(
     init_rl_policy_db()
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

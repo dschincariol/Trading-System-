@@ -122,7 +122,7 @@ def log_decision(
 
     con = connect()
     try:
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

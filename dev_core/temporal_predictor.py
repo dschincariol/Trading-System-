@@ -170,7 +170,7 @@ def log_temporal_shadow_prediction(
 
         payload = json.dumps(e, separators=(",", ":"), sort_keys=True)
 
-        ok = 0 if had_error else 1
+        
 
         con.execute(
             """

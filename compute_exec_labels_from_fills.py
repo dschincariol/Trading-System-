@@ -4,17 +4,249 @@ Phase 5.1: Override execution labels using real broker fills.
 """
 
 import json
+import os
 import time
-from dev_core.storage import connect, init_db
+from typing import Optional
+
+from dev_core.storage import (
+    connect,
+    init_db,
+    acquire_job_lock,
+    release_job_lock,
+    touch_job_lock,
+    put_job_heartbeat,
+)
 from dev_core.broker_fill_utils import get_realized_trade
+
+
+# -----------------------------
+# Step 7: Production job safety
+# -----------------------------
+JOB_NAME = "compute_exec_labels_from_fills"
+OWNER = os.environ.get(
+    "JOB_OWNER",
+    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
+)
+PID = os.getpid()
+
+LOCK_STALE_AFTER_S = int(os.environ.get("JOB_LOCK_STALE_AFTER_S", "180"))
+HEARTBEAT_EVERY_S = float(os.environ.get("HEARTBEAT_EVERY_S", "15.0"))
+
+MAX_BATCH = int(os.environ.get("LABELS_EXEC_MAX_BATCH", "10000"))
+COMMIT_EVERY = int(os.environ.get("LABELS_EXEC_COMMIT_EVERY", "250"))
+
+def _latest_price(con, symbol: str):
+    """
+    Best-effort mark-to-market price.
+    Returns: (ts_ms, price) or None
+    """
+    try:
+        row = con.execute(
+            """
+            SELECT ts_ms, price
+            FROM prices
+            WHERE symbol=?
+            ORDER BY ts_ms DESC
+            LIMIT 1
+            """,
+            (str(symbol),),
+        ).fetchone()
+        if not row:
+            return None
+        return int(row[0]), float(row[1])
+    except Exception:
+        return None
+
+
+import math
+
+
+def _cost_bps_from_trade(trade: dict, px_in: float, px_out: float, side: int) -> dict:
+    """
+    Step 6: Best-effort execution cost decomposition in bps.
+    Returns dict with:
+      fees_bps, slippage_bps, spread_bps, total_cost_bps, spread_in
+    All fields are floats (>=0 where applicable).
+    """
+    try:
+        pin = float(px_in)
+        pout = float(px_out)
+        sgn = float(side) if int(side) != 0 else 1.0
+    except Exception:
+        return {"fees_bps": 0.0, "slippage_bps": 0.0, "spread_bps": 0.0, "total_cost_bps": 0.0, "spread_in": None}
+
+    if pin <= 1e-12:
+        return {"fees_bps": 0.0, "slippage_bps": 0.0, "spread_bps": 0.0, "total_cost_bps": 0.0, "spread_in": None}
+
+    # Fees: accept a few possible keys
+    fees_total = 0.0
+    try:
+        fees_total = float(trade.get("fees_total") or trade.get("fees") or 0.0)
+    except Exception:
+        fees_total = 0.0
+
+    # Convert fees into bps relative to entry notional (qty is unknown here, so treat px as 1-share notional)
+    # If you later add qty, swap this to fees / (abs(qty)*pin).
+    fees_bps = 0.0
+    try:
+        fees_bps = float(fees_total) / float(pin) * 10000.0
+        if fees_bps != fees_bps or fees_bps < 0:
+            fees_bps = 0.0
+    except Exception:
+        fees_bps = 0.0
+
+    # Slippage: if trade provides a ref price, compare fill to ref in sign-aware bps.
+    slippage_bps = 0.0
+    ref_px = None
+    try:
+        ref_px = trade.get("ref_px")
+        if ref_px is None:
+            ref_px = trade.get("mid_in")
+        if ref_px is not None:
+            ref_px = float(ref_px)
+    except Exception:
+        ref_px = None
+
+    if ref_px is not None and ref_px > 1e-12:
+        try:
+            # buy worse if fill > ref; sell worse if fill < ref -> sign by side
+            slippage_bps = ((float(pin) - float(ref_px)) / float(ref_px)) * 10000.0 * float(sgn)
+            # cost should be positive "worse"; flip sign if needed
+            slippage_bps = -float(slippage_bps)
+            if slippage_bps != slippage_bps:
+                slippage_bps = 0.0
+        except Exception:
+            slippage_bps = 0.0
+
+    # Spread: if trade provides spread_in or bid/ask, compute.
+    spread_in = None
+    spread_bps = 0.0
+    try:
+        si = trade.get("spread_in")
+        if si is None:
+            bid = trade.get("bid_in")
+            ask = trade.get("ask_in")
+            if bid is not None and ask is not None:
+                si = float(ask) - float(bid)
+        if si is not None:
+            spread_in = float(si)
+    except Exception:
+        spread_in = None
+
+    if spread_in is not None and pin > 1e-12:
+        try:
+            spread_bps = float(spread_in) / float(pin) * 10000.0
+            if spread_bps != spread_bps or spread_bps < 0:
+                spread_bps = 0.0
+        except Exception:
+            spread_bps = 0.0
+
+    total_cost_bps = float(max(0.0, fees_bps)) + float(max(0.0, slippage_bps)) + float(max(0.0, spread_bps))
+
+    return {
+        "fees_bps": float(max(0.0, fees_bps)),
+        "slippage_bps": float(max(0.0, slippage_bps)),
+        "spread_bps": float(max(0.0, spread_bps)),
+        "total_cost_bps": float(max(0.0, total_cost_bps)),
+        "spread_in": (float(spread_in) if spread_in is not None else None),
+    }
 
 
 def _now_ms():
     return int(time.time() * 1000)
 
 
+def _rolling_exec_z(
+    con,
+    symbol: str,
+    horizon_s: int,
+    new_ret: float,
+    lookback: int = 500,
+    exclude_event_id: Optional[int] = None,
+    col: str = "net_ret",  # 'net_ret' or 'gross_ret'
+) -> float:
+    """
+    Rolling z-score over realized execution returns.
+
+    Step 5B/6C:
+    - Excludes current event_id to avoid rerun double-counting.
+    - Uses realized=1 rows only (prevents M2M rows from polluting z).
+    - Supports z-scoring either net_ret or gross_ret via `col`.
+    """
+    try:
+        symbol_s = str(symbol)
+        h = int(horizon_s)
+        lb = int(lookback)
+    except Exception:
+        return 0.0
+
+    c = str(col or "net_ret").strip()
+    if c not in ("net_ret", "gross_ret"):
+        c = "net_ret"
+
+    try:
+        if exclude_event_id is None:
+            rows = con.execute(
+                f"""
+                SELECT {c}
+                FROM labels_exec
+                WHERE symbol=?
+                  AND horizon_s=?
+                  AND realized=1
+                  AND {c} IS NOT NULL
+                ORDER BY ts_ms DESC
+                LIMIT ?
+                """,
+                (symbol_s, h, lb),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                f"""
+                SELECT {c}
+                FROM labels_exec
+                WHERE symbol=?
+                  AND horizon_s=?
+                  AND realized=1
+                  AND {c} IS NOT NULL
+                  AND event_id != ?
+                ORDER BY ts_ms DESC
+                LIMIT ?
+                """,
+                (symbol_s, h, int(exclude_event_id), lb),
+            ).fetchall()
+    except Exception:
+        rows = []
+
+    rets = []
+    for (r,) in rows or []:
+        try:
+            rets.append(float(r))
+        except Exception:
+            pass
+
+    if len(rets) < 20:
+        return 0.0
+
+    m = sum(rets) / len(rets)
+    v = sum((x - m) ** 2 for x in rets) / max(1, len(rets) - 1)
+    sd = math.sqrt(max(v, 1e-12))
+    z = (float(new_ret) - m) / sd
+
+    if z != z:
+        return 0.0
+
+    return float(max(-8.0, min(8.0, z)))
+
 def main():
     init_db()
+
+    # Step 7: lock so only one instance runs (prevents double work / contention)
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
+        print(f"[labels_exec:fills] lock held by another instance; exiting")
+        raise SystemExit(2)
+
+    last_hb_s = 0.0
+
     con = connect()
     try:
         # Fail-soft if labels table isn't created yet
@@ -30,86 +262,170 @@ def main():
             JOIN broker_orders bo
               ON bo.symbol=p.symbol AND bo.ts_ms >= p.ts_ms
             LEFT JOIN labels_exec le
-              ON le.event_id=p.event_id AND le.symbol=p.symbol AND le.horizon_s=p.horizon_s
-            WHERE le.realized=0 OR le.realized IS NULL
+              ON le.event_id=p.event_id
+             AND le.symbol=p.symbol
+             AND le.horizon_s=p.horizon_s
+            WHERE le.realized IS NULL
             ORDER BY p.ts_ms ASC
-            LIMIT 10000
-            """
+            LIMIT ?
+            """,
+            (int(max(1, MAX_BATCH)),),
         ).fetchall()
 
         n_used = 0
         n_skip = 0
+        n_err = 0
 
         for eid, sym, horizon_s, ts_ms in rows:
-            exit_ts = ts_ms + int(horizon_s) * 1000
+            # heartbeat / lock touch
+            now_s = time.time()
+            if now_s - last_hb_s >= HEARTBEAT_EVERY_S:
+                try:
+                    touch_job_lock(JOB_NAME, OWNER, PID)
+                    put_job_heartbeat(
+                        JOB_NAME,
+                        OWNER,
+                        PID,
+                        extra_json=json.dumps(
+                            {"event_id": int(eid), "symbol": str(sym), "horizon_s": int(horizon_s), "ts_ms": int(ts_ms)},
+                            separators=(",", ":"),
+                        ),
+                    )
+                except Exception:
+                    pass
+                last_hb_s = now_s
 
-            trade = get_realized_trade(
-                symbol=str(sym),
-                entry_ts_ms=int(ts_ms),
-                exit_ts_ms=int(exit_ts),
-            )
+            try:
+                exit_ts = int(ts_ms) + int(horizon_s) * 1000
 
-            if not trade:
-                n_skip += 1
+                trade = get_realized_trade(
+                    symbol=str(sym),
+                    entry_ts_ms=int(ts_ms),
+                    exit_ts_ms=int(exit_ts),
+                )
+
+                if not trade:
+                    n_skip += 1
+                    continue
+
+                side = trade["side"]
+                px_in = trade["px_in"]
+                px_out = trade["px_out"]
+
+                realized = 1
+                px_out_use = px_out
+                m2m_ctx = None
+
+                if px_out is None:
+                    realized = 0
+                    lp = _latest_price(con, str(sym))
+                    if not lp:
+                        n_skip += 1
+                        continue
+                    m2m_ts_ms, m2m_px = lp
+                    if m2m_px <= 0:
+                        n_skip += 1
+                        continue
+                    px_out_use = float(m2m_px)
+                    m2m_ctx = {
+                        "m2m_ts_ms": int(m2m_ts_ms),
+                        "exit_target_ts_ms": int(exit_ts),
+                    }
+
+                gross_ret = (float(px_out_use) / float(px_in) - 1.0) * float(side)
+                net_ret = float(gross_ret) - float(trade.get("fees_total") or 0.0)
+
+                net_z = _rolling_exec_z(
+                    con, str(sym), int(horizon_s), float(net_ret),
+                    exclude_event_id=int(eid),
+                    col="net_ret",
+                )
+                gross_z = _rolling_exec_z(
+                    con, str(sym), int(horizon_s), float(gross_ret),
+                    exclude_event_id=int(eid),
+                    col="gross_ret",
+                )
+
+                cost = _cost_bps_from_trade(
+                    trade if isinstance(trade, dict) else {},
+                    float(px_in),
+                    float(px_out_use),
+                    int(side),
+                )
+
+                con.execute(
+                    """
+                    INSERT OR REPLACE INTO labels_exec(
+                      event_id, symbol, horizon_s, ts_ms,
+                      side, gross_ret, net_ret,
+                      gross_z, net_z,
+                      mid_in, mid_out, spread_in,
+                      fees_bps, slippage_bps, spread_bps, total_cost_bps,
+                      source, realized, extra_json
+                    )
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        int(eid),
+                        str(sym),
+                        int(horizon_s),
+                        int(ts_ms),
+                        int(side),
+                        float(gross_ret),
+                        float(net_ret),
+                        float(gross_z),
+                        float(net_z),
+                        float(px_in),
+                        float(px_out_use),
+                        cost.get("spread_in"),
+                        float(cost.get("fees_bps") or 0.0),
+                        float(cost.get("slippage_bps") or 0.0),
+                        float(cost.get("spread_bps") or 0.0),
+                        float(cost.get("total_cost_bps") or 0.0),
+                        "broker_fills_v2",
+                        int(realized),
+                        json.dumps(
+                            {
+                                "version": "v2",
+                                "source": "broker_fills",
+                                "computed_at_ts_ms": _now_ms(),
+                                "realized": int(realized),
+                                "trade": trade,
+                                "m2m": m2m_ctx,
+                            },
+                            separators=(",", ":"),
+                        ),
+                    ),
+                )
+
+                n_used += 1
+
+                # crash-safe: commit in small chunks so reruns resume naturally
+                if n_used % int(max(1, COMMIT_EVERY)) == 0:
+                    try:
+                        con.commit()
+                    except Exception:
+                        pass
+
+            except Exception:
+                n_err += 1
                 continue
 
-            side = trade["side"]
-            px_in = trade["px_in"]
-            px_out = trade["px_out"]
-
-            # If no exit fills yet, mark-to-market later
-            if px_out is None:
-                continue
-
-            gross_ret = (px_out / px_in - 1.0) * float(side)
-
-            # Fees already realized
-            net_ret = gross_ret - trade["fees_total"]
-
+        try:
+            con.commit()
+        except Exception:
             pass
 
-        con.execute(
-                """
-                INSERT OR REPLACE INTO labels_exec(
-                  event_id, symbol, horizon_s, ts_ms,
-                  side, gross_ret, net_ret,
-                  gross_z, net_z,
-                  mid_in, mid_out, spread_in,
-                  fees_bps, slippage_bps, spread_bps, total_cost_bps,
-                  source, realized, extra_json
-                )
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    int(eid),
-                    str(sym),
-                    int(horizon_s),
-                    int(ts_ms),
-                    int(side),
-                    float(gross_ret),
-                    float(net_ret),
-                    None,
-                    None,
-                    float(px_in),
-                    float(px_out),
-                    None,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    "broker_fills",
-                    1,
-                    json.dumps(trade),
-                ),
-            )
-            n_used += 1
-
-        con.commit()
-        print(f"[labels_exec:fills] used={n_used} skipped={n_skip}")
+        print(f"[labels_exec:fills] used={n_used} skipped={n_skip} err={n_err}")
 
     finally:
-        con.close()
-
+        try:
+            con.close()
+        finally:
+            try:
+                release_job_lock(JOB_NAME, OWNER, PID)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     main()

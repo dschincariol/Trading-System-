@@ -242,7 +242,7 @@ PREFLIGHT_REQUIRED_TABLES = [
     "portfolio_bt_points",
     "broker_account",
     "broker_positions",
-    "broker_fills",
+    "broker_fills_v2",
     "broker_meta",
     # cross-process job coordination
     "job_locks",
