@@ -123,29 +123,64 @@ def _new_connection(*, readonly: bool) -> sqlite3.Connection:
 
     return con
 
-def connect(readonly: bool = False) -> sqlite3.Connection:
+def connect(readonly: bool = False):
     """
-    Pooled connection (per-thread):
-      - readonly=False -> write-capable connection
-      - readonly=True  -> read-only connection (query_only)
-    """
-    key = "ro" if readonly else "rw"
-    slot = getattr(_TLS, key, None)
-    if slot is not None:
-        try:
-            slot.execute("SELECT 1;").fetchone()
-            return slot
-        except Exception:
-            try:
-                slot.close()
-            except Exception:
-                pass
-            setattr(_TLS, key, None)
+    SQLite connection factory.
 
-    con = _new_connection(readonly=readonly)
-    setattr(_TLS, key, con)
+    readonly=True:
+      - opens DB in read-only mode (where supported) to avoid accidental writes
+      - still applies WAL/busy_timeout pragmas (safe)
+    """
+    try:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    if readonly:
+        # SQLite URI read-only open (requires uri=True)
+        # If file doesn't exist, fallback to normal open to allow bootstrap to create it.
+        uri = f"file:{str(DB_PATH)}?mode=ro"
+        try:
+            con = sqlite3.connect(
+                uri,
+                timeout=30.0,
+                isolation_level=None,
+                check_same_thread=False,
+                uri=True,
+            )
+        except Exception:
+            con = sqlite3.connect(
+                str(DB_PATH),
+                timeout=30.0,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+    else:
+        con = sqlite3.connect(
+            str(DB_PATH),
+            timeout=30.0,
+            isolation_level=None,  # autocommit
+            check_same_thread=False,
+        )
+
+    con.row_factory = sqlite3.Row
+
+    for p in _SQLITE_PRAGMAS:
+        try:
+            con.execute(p)
+        except Exception:
+            pass
+
+    try:
+        con.execute("PRAGMA foreign_keys=ON;")
+    except Exception:
+        pass
+
     return con
 
+
+def connect_ro():
+    return connect(readonly=True)
 
 def connect_ro() -> sqlite3.Connection:
     return connect(readonly=True)
@@ -794,6 +829,19 @@ def init_db():
               ts_ms INTEGER NOT NULL,
               extra_json TEXT
             );
+
+                        -- ------------------------------------------------------
+            -- Crash-safe resume checkpoints (idempotent)
+            -- ------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS job_checkpoints (
+              job_name TEXT PRIMARY KEY,
+              last_event_id INTEGER,
+              last_event_ts_ms INTEGER,
+              updated_ts_ms INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_job_checkpoints_updated
+              ON job_checkpoints(updated_ts_ms);
 
             -- -            -- ------------------------------------------------------
             -- Temporal models
@@ -1555,6 +1603,47 @@ def put_job_heartbeat(job_name: str, owner: str, pid: int, extra_json: str = Non
             pass
         _note_write(con)
         # pooled connection; do not close
+
+def get_job_checkpoint(job_name: str) -> Dict[str, int]:
+    con = connect_ro()
+    try:
+        row = con.execute(
+            "SELECT last_event_id, last_event_ts_ms FROM job_checkpoints WHERE job_name=?",
+            (str(job_name),),
+        ).fetchone()
+        if not row:
+            return {"last_event_id": 0, "last_event_ts_ms": 0}
+        return {
+            "last_event_id": int(row[0] or 0),
+            "last_event_ts_ms": int(row[1] or 0),
+        }
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def put_job_checkpoint(job_name: str, last_event_id: int, last_event_ts_ms: int) -> None:
+    now_ms = int(time.time() * 1000)
+    con = connect(readonly=False)
+    try:
+        con.execute(
+            """
+            INSERT INTO job_checkpoints(job_name, last_event_id, last_event_ts_ms, updated_ts_ms)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(job_name) DO UPDATE SET
+              last_event_id=excluded.last_event_id,
+              last_event_ts_ms=excluded.last_event_ts_ms,
+              updated_ts_ms=excluded.updated_ts_ms
+            """,
+            (str(job_name), int(last_event_id), int(last_event_ts_ms), int(now_ms)),
+        )
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 def close_pooled_connections() -> None:
     for key in ("rw", "ro"):

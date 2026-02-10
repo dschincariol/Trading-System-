@@ -28,12 +28,24 @@ import torch
 from pathlib import Path
 
 # -----------------------------
-# CUDA stream separation
+# CUDA stream separation + pinned async H->D
 # -----------------------------
 _LIVE_STREAM = None
 _SHADOW_STREAM = None
 
-# Prevent iGPU/NPU from being used implicitly
+# GPU feedback throttling config
+GPU_THROTTLE_ENABLE = os.environ.get("GPU_THROTTLE_ENABLE", "1") == "1"
+GPU_UTIL_MAX = float(os.environ.get("GPU_UTIL_MAX", "92"))          # %
+GPU_MEM_MAX = float(os.environ.get("GPU_MEM_MAX", "92"))            # %
+GPU_THROTTLE_SLEEP_S = float(os.environ.get("GPU_THROTTLE_SLEEP_S", "0.05"))
+
+# Pinned H->D config
+PINNED_ENABLE = os.environ.get("PINNED_ENABLE", "1") == "1"
+PINNED_PREFETCH = os.environ.get("PINNED_PREFETCH", "1") == "1"
+PINNED_DEVICE = os.environ.get("PINNED_DEVICE", "cuda").strip()     # usually cuda:0
+PINNED_DTYPE = torch.float32
+
+# Prevent iGPU/NPU from being used implicitly (opt-in later)
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 os.environ.setdefault("TORCH_DEVICE", "cuda")
 
@@ -42,6 +54,114 @@ os.environ.setdefault("OMP_NUM_THREADS", "8")
 os.environ.setdefault("MKL_NUM_THREADS", "8")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "8")
+
+try:
+    torch.set_num_threads(int(os.environ.get("TORCH_CPU_THREADS", "8")))
+    torch.set_num_interop_threads(int(os.environ.get("TORCH_INTEROP_THREADS", "4")))
+except Exception:
+    pass
+
+# Initialize CUDA streams (live = default, shadow = low priority)
+if torch.cuda.is_available():
+    try:
+        _LIVE_STREAM = torch.cuda.default_stream()
+        _SHADOW_STREAM = torch.cuda.Stream(priority=1)
+    except Exception:
+        _LIVE_STREAM = None
+        _SHADOW_STREAM = None
+
+
+def _gpu_stats() -> Dict[str, float]:
+    """
+    Returns {util: %, mem: %, mem_used_mb, mem_total_mb}.
+    Best-effort:
+      1) pynvml
+      2) nvidia-smi
+      3) torch memory only (no util)
+    """
+    if not torch.cuda.is_available():
+        return {"util": 0.0, "mem": 0.0, "mem_used_mb": 0.0, "mem_total_mb": 0.0}
+
+    # 1) NVML
+    try:
+        import pynvml  # type: ignore
+        pynvml.nvmlInit()
+        h = pynvml.nvmlDeviceGetHandleByIndex(0)
+        util = float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
+        memi = pynvml.nvmlDeviceGetMemoryInfo(h)
+        used = float(memi.used) / (1024.0 * 1024.0)
+        total = float(memi.total) / (1024.0 * 1024.0)
+        memp = 100.0 * used / total if total > 1e-9 else 0.0
+        return {"util": util, "mem": memp, "mem_used_mb": used, "mem_total_mb": total}
+    except Exception:
+        pass
+
+    # 2) nvidia-smi
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            timeout=1.0,
+        ).decode("utf-8", errors="ignore").strip()
+        # "12, 456, 8192"
+        parts = [p.strip() for p in out.split(",")]
+        util = float(parts[0])
+        used = float(parts[1])
+        total = float(parts[2]) if float(parts[2]) > 1e-9 else 1.0
+        memp = 100.0 * used / total
+        return {"util": util, "mem": memp, "mem_used_mb": used, "mem_total_mb": total}
+    except Exception:
+        pass
+
+    # 3) torch memory only
+    try:
+        total = float(torch.cuda.get_device_properties(0).total_memory) / (1024.0 * 1024.0)
+        used = float(torch.cuda.memory_allocated(0)) / (1024.0 * 1024.0)
+        memp = 100.0 * used / total if total > 1e-9 else 0.0
+        return {"util": 0.0, "mem": memp, "mem_used_mb": used, "mem_total_mb": total}
+    except Exception:
+        return {"util": 0.0, "mem": 0.0, "mem_used_mb": 0.0, "mem_total_mb": 0.0}
+
+
+def _gpu_throttle_if_needed() -> None:
+    if not GPU_THROTTLE_ENABLE or not torch.cuda.is_available():
+        return
+    try:
+        s = _gpu_stats()
+        if s.get("util", 0.0) >= GPU_UTIL_MAX or s.get("mem", 0.0) >= GPU_MEM_MAX:
+            time.sleep(max(0.0, float(GPU_THROTTLE_SLEEP_S)))
+    except Exception:
+        return
+
+
+def _pinned_prefetch_to_device(vec_np: np.ndarray) -> Optional["torch.Tensor"]:
+    """
+    Crash-safe, best-effort pinned H->D prefetch.
+    Returns device tensor (cuda) if successful, else None.
+
+    This is intentionally optional: it improves overlap if your predictor can accept
+    a torch.Tensor directly (recommended patch), otherwise it still warms the copy path.
+    """
+    if not PINNED_ENABLE or not torch.cuda.is_available():
+        return None
+    try:
+        # Ensure contiguous float32 CPU buffer
+        a = np.asarray(vec_np, dtype=np.float32, order="C")
+        t = torch.from_numpy(a)
+        if t.device.type != "cpu":
+            t = t.cpu()
+        t = t.pin_memory()  # pinned
+        # async copy on live stream
+        stream = _LIVE_STREAM if _LIVE_STREAM is not None else torch.cuda.default_stream()
+        with torch.cuda.stream(stream):
+            d = t.to(device=PINNED_DEVICE, dtype=PINNED_DTYPE, non_blocking=True)
+        return d
+    except Exception:
+        return None
 
 # ------            -- ------------------------------------------------------
 # In-memory cache for recent embeddings (novelty acceleration)
@@ -75,6 +195,8 @@ from dev_core.storage import (
     touch_job_lock,
     put_job_heartbeat,
     put_event,
+    get_job_checkpoint,
+    put_job_checkpoint,
 )
 
 from dev_core.predictor import predict_event
@@ -755,6 +877,17 @@ def main() -> None:
     last_hb_s = 0.0
     started_ms = int(time.time() * 1000)
 
+    # Crash-safe resume checkpoint (best-effort, idempotent)
+    ck = {"last_event_id": 0, "last_event_ts_ms": 0}
+    try:
+        ck = get_job_checkpoint(JOB_NAME)
+    except Exception:
+        pass
+
+    # Commit cadence (avoid losing whole batch if crash)
+    COMMIT_EVERY_EVENTS = int(os.environ.get("COMMIT_EVERY_EVENTS", "1"))  # 1 = safest
+    _since_commit = 0
+
     try:
         # Phase 3: Global rules engine (auto kill-switch)
         try:
@@ -825,14 +958,17 @@ def main() -> None:
         try:
             rows = con.execute(
                 """
-                SELECT e.id, e.ts_ms, e.source, e.title, e.body, e.url, e.meta_json
                 FROM events e
                 LEFT JOIN event_embeddings emb ON emb.event_id = e.id
                 WHERE emb.event_id IS NULL
-                ORDER BY e.ts_ms DESC
+                AND (e.id > ? OR e.ts_ms > ?)
+                ORDER BY e.ts_ms ASC, e.id ASC
                 LIMIT 50
-                """
-            ).fetchall()
+
+                """,
+            (int(ck.get("last_event_id", 0)), int(ck.get("last_event_ts_ms", 0))),
+        ).fetchall()
+
         finally:
             pass
 
@@ -872,7 +1008,16 @@ def main() -> None:
             cur = conw.cursor()
 
             for (eid, ts_ms, source, title, body, url, meta_json), vec in zip(rows, embeddings):
+                _gpu_throttle_if_needed()
+
+                # Per-event transactional safety: one bad event does not poison batch
+                try:
+                    conw.execute("SAVEPOINT ev;")
+                except Exception:
+                    pass
+
                 now_s = time.time()
+
                 if (now_s - last_hb_s) >= HEARTBEAT_EVERY_S:
                     try:
                         touch_job_lock(JOB_NAME, OWNER, PID)
@@ -931,18 +1076,30 @@ def main() -> None:
                     "meta": event_meta,
                 }
 
-                # Batched prediction per horizon (reduces GPU launches)
-                preds = {}
-                for h in HORIZONS:
-                    ph = predict_event(
-                        vec,
+                # Batched prediction across all horizons (single forward path inside predictor)
+                _gpu_throttle_if_needed()
+
+                # Optional pinned prefetch (helps if predictor accepts torch.Tensor)
+                vec_dev = _pinned_prefetch_to_device(vec) if PINNED_PREFETCH else None
+
+                try:
+                    # Preferred: one call with all horizons
+                    preds = predict_event(
+                        vec_dev if vec_dev is not None else vec,
                         symbols,
-                        [int(h)],
+                        HORIZONS,
                         top_k=8,
                         event=event_ctx,
                     )
-                    for k, v in ph.items():
-                        preds[k] = v
+                except Exception:
+                    # Fallback: still return shape-consistent dict
+                    preds = predict_event(
+                        vec,
+                        symbols,
+                        HORIZONS,
+                        top_k=8,
+                        event=event_ctx,
+                    )
 
                 # Temporal predictor (shadow-mode only)
                 temporal_shadow = None
@@ -967,6 +1124,26 @@ def main() -> None:
                             )
                     except Exception:
                         temporal_shadow = None
+
+                # Update checkpoint after successful per-event work
+                try:
+                    put_job_checkpoint(JOB_NAME, int(eid), int(ts_ms))
+                except Exception:
+                    pass
+
+                # Release savepoint + commit cadence
+                try:
+                    conw.execute("RELEASE SAVEPOINT ev;")
+                except Exception:
+                    pass
+
+                _since_commit += 1
+                if _since_commit >= COMMIT_EVERY_EVENTS:
+                    try:
+                        conw.commit()
+                    except Exception:
+                        pass
+                    _since_commit = 0
 
                 # Persist embedding
                 cur.execute(
