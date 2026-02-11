@@ -6,6 +6,17 @@ Env:
   ALPACA_BASE_URL=https://paper-api.alpaca.markets
   ALPACA_KEY_ID=...
   ALPACA_SECRET_KEY=...
+
+Optional execution knobs:
+  ALPACA_ORDER_TIF=day
+  ALPACA_ORDER_TYPE=market
+  ALPACA_MAX_ORDERS_PER_PASS=25
+  ALPACA_SLEEP_BETWEEN_ORDERS_S=0.25
+
+Limit microstructure knobs:
+  ALPACA_LIMIT_OFFSET_BPS_PASSIVE=5.0
+  ALPACA_LIMIT_OFFSET_BPS_NEUTRAL=2.0
+  ALPACA_LIMIT_OFFSET_BPS_AGGRESSIVE=0.5
 """
 
 import json
@@ -16,10 +27,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from dev_core.execution_ledger import log_submit, log_fill
-
 from dev_core.storage import connect
 from dev_core.kill_switch import execution_allowed
 from dev_core.risk_state import get_state, set_state
+
+from dev_core.execution_microstructure import record_open_order
+
 
 BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets").strip()
 KEY_ID = os.environ.get("ALPACA_KEY_ID", "").strip()
@@ -29,6 +42,10 @@ ORDER_TIF = os.environ.get("ALPACA_ORDER_TIF", "day").strip()
 ORDER_TYPE = os.environ.get("ALPACA_ORDER_TYPE", "market").strip()
 MAX_ORDERS_PER_PASS = int(os.environ.get("ALPACA_MAX_ORDERS_PER_PASS", "25"))
 SLEEP_BETWEEN_ORDERS_S = float(os.environ.get("ALPACA_SLEEP_BETWEEN_ORDERS_S", "0.25"))
+
+LIM_OFF_BPS_PASSIVE = float(os.environ.get("ALPACA_LIMIT_OFFSET_BPS_PASSIVE", "5.0"))
+LIM_OFF_BPS_NEUTRAL = float(os.environ.get("ALPACA_LIMIT_OFFSET_BPS_NEUTRAL", "2.0"))
+LIM_OFF_BPS_AGGR = float(os.environ.get("ALPACA_LIMIT_OFFSET_BPS_AGGRESSIVE", "0.5"))
 
 
 def _headers() -> Dict[str, str]:
@@ -65,13 +82,17 @@ def get_order(order_id: str) -> Dict[str, Any]:
     return _req("GET", f"/v2/orders/{str(order_id)}")
 
 
+def cancel_order(order_id: str) -> Dict[str, Any]:
+    return _req("DELETE", f"/v2/orders/{str(order_id)}")
+
+
 def list_orders_after(after_ts_ms: int, status: str = "all", limit: int = 500) -> List[Dict[str, Any]]:
-    # Alpaca expects RFC3339 timestamps
     dt = datetime.fromtimestamp(float(after_ts_ms) / 1000.0, tz=timezone.utc)
     after = dt.isoformat().replace("+00:00", "Z")
     path = f"/v2/orders?status={status}&after={after}&direction=asc&limit={int(limit)}"
     res = _req("GET", path)
     return list(res or [])
+
 
 def _latest_order_row(con) -> Optional[Tuple[int, int, list]]:
     row = con.execute(
@@ -89,7 +110,7 @@ def _price_at_or_before(con, symbol: str, ts_ms: int) -> Optional[float]:
     try:
         r = con.execute(
             """
-            SELECT px
+            SELECT price
             FROM prices
             WHERE symbol=? AND ts_ms <= ?
             ORDER BY ts_ms DESC
@@ -118,9 +139,6 @@ def _alpaca_pos_map(positions: List[Dict[str, Any]]) -> Dict[str, float]:
 
 
 def _load_portfolio_state_positions(con) -> Dict[str, float]:
-    """
-    Load target quantities implied by portfolio_state (using latest prices).
-    """
     rows = con.execute(
         """
         SELECT symbol, side, weight
@@ -132,8 +150,9 @@ def _load_portfolio_state_positions(con) -> Dict[str, float]:
     eq = float(acct.get("equity") or 0.0)
     out: Dict[str, float] = {}
 
+    now_ms = int(time.time() * 1000)
     for sym, side, w in rows or []:
-        px = _price_at_or_before(con, sym, int(time.time() * 1000))
+        px = _price_at_or_before(con, sym, now_ms)
         if px is None or px <= 0:
             continue
         qty = (float(w) * eq) / float(px)
@@ -154,51 +173,87 @@ def _submit_market_order(symbol: str, qty: float, client_oid: str) -> Dict[str, 
         "symbol": str(symbol),
         "qty": str(abs(qty)),
         "side": side,
-        "type": str(ORDER_TYPE),
+        "type": "market",
         "time_in_force": str(ORDER_TIF),
         "client_order_id": str(client_oid),
     }
     return _req("POST", "/v2/orders", payload)
 
 
-def apply_latest_portfolio_orders_live(dry_run: bool = False) -> Dict[str, Any]:
+def _submit_limit_order(symbol: str, qty: float, limit_price: float, client_oid: str) -> Dict[str, Any]:
+    side = "buy" if qty > 0 else "sell"
+    payload = {
+        "symbol": str(symbol),
+        "qty": str(abs(qty)),
+        "side": side,
+        "type": "limit",
+        "time_in_force": str(ORDER_TIF),
+        "limit_price": str(float(limit_price)),
+        "client_order_id": str(client_oid),
+    }
+    return _req("POST", "/v2/orders", payload)
+
+
+def submit_limit_order(symbol: str, qty: float, limit_price: float, client_oid: str) -> Dict[str, Any]:
+    return _submit_limit_order(symbol=symbol, qty=qty, limit_price=limit_price, client_oid=client_oid)
+
+
+def _limit_from_px(px: float, qty: float, aggressiveness: str) -> float:
+    a = str(aggressiveness or "").upper().strip()
+    if a == "PASSIVE":
+        off = float(LIM_OFF_BPS_PASSIVE)
+    elif a == "NEUTRAL":
+        off = float(LIM_OFF_BPS_NEUTRAL)
+    else:
+        off = float(LIM_OFF_BPS_AGGR)
+
+    if float(qty) > 0:
+        return float(px) * (1.0 - (off / 10000.0))
+    return float(px) * (1.0 + (off / 10000.0))
+
+
+def apply_latest_portfolio_orders_live(
+    dry_run: bool = False,
+    override_orders: List[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     con = connect()
     try:
-        latest = _latest_order_row(con)
-        if not latest:
-            return {"ok": True, "status": "no_orders"}
+        if override_orders is not None:
+            order_id = None
+            ts_ms = int(time.time() * 1000)
+            orders = list(override_orders or [])
+        else:
+            latest = _latest_order_row(con)
+            if not latest:
+                return {"ok": True, "status": "no_orders"}
+            order_id, ts_ms, orders = latest
 
-        order_id, ts_ms, orders = latest
-
-        # idempotency guard via risk_state
-        last_applied = get_state("alpaca_last_portfolio_orders_id", "0")
-        try:
-            if int(last_applied) >= int(order_id):
-                return {"ok": True, "status": "already_applied", "order_id": int(order_id)}
-        except Exception:
-            pass
+        if order_id is not None:
+            last_applied = get_state("alpaca_last_portfolio_orders_id", "0")
+            try:
+                if int(last_applied) >= int(order_id):
+                    return {"ok": True, "status": "already_applied", "order_id": int(order_id)}
+            except Exception:
+                pass
 
         allow0, _, _ = execution_allowed(con=con, symbol=None, regime=None)
         if not allow0:
-            return {"ok": False, "status": "blocked_kill_switch_global", "order_id": int(order_id)}
+            return {"ok": False, "status": "blocked_kill_switch_global", "order_id": order_id}
 
         acct = get_account()
         eq = float(acct.get("equity") or 0.0)
         if eq <= 0:
-            return {"ok": False, "status": "nonpositive_equity", "equity": eq}
+            return {"ok": False, "status": "nonpositive_equity", "equity": eq, "order_id": order_id}
 
         pos = _alpaca_pos_map(get_positions())
         target_pos = _load_portfolio_state_positions(con)
 
         if dry_run:
-            return {"ok": True, "status": "dry_run_preview", "order_id": int(order_id), "positions": pos, "orders": orders}
+            return {"ok": True, "status": "dry_run_preview", "order_id": order_id, "positions": pos, "orders": orders}
 
         submitted = []
         n = 0
 
-        # -------------------------------------------------
-        # Reconciliation: force broker to match portfolio_state
-        # -------------------------------------------------
         for sym, tgt_qty in target_pos.items():
             cur_qty = float(pos.get(sym, 0.0))
             delta = float(tgt_qty) - float(cur_qty)
@@ -209,8 +264,10 @@ def apply_latest_portfolio_orders_live(dry_run: bool = False) -> Dict[str, Any]:
             if not allow_sym:
                 continue
 
-            client_oid = f"recon_{int(order_id)}_{sym}"
-            _submit_market_order(symbol=sym, qty=delta, client_oid=client_oid)
+            client_oid = f"recon_{order_id}_{sym}"
+            res = _submit_market_order(symbol=sym, qty=delta, client_oid=client_oid)
+            submitted.append({"symbol": sym, "delta_qty": delta, "client_order_id": client_oid, "resp": res})
+            n += 1
             time.sleep(max(0.0, float(SLEEP_BETWEEN_ORDERS_S)))
 
         for o in (orders or [])[: int(MAX_ORDERS_PER_PASS)]:
@@ -242,44 +299,82 @@ def apply_latest_portfolio_orders_live(dry_run: bool = False) -> Dict[str, Any]:
             if abs(delta) < 1e-6:
                 continue
 
-            client_oid = f"pf_{int(order_id)}_{symbol}"
-            res = _submit_market_order(symbol=symbol, qty=delta, client_oid=client_oid)
+            order_type = str(o.get("order_type") or ORDER_TYPE).upper().strip()
+            aggressiveness = str(o.get("aggressiveness") or "").upper().strip()
+            cancel_replace = bool(o.get("cancel_replace", False))
+            max_reprice_attempts = int(o.get("max_reprice_attempts") or 0)
 
-            # ledger submit (for slippage + pnl attribution)
-            try:
+            client_oid = f"pf_{order_id}_{symbol}"
+
+            if order_type == "LIMIT":
+                limit_px = _limit_from_px(float(px), float(delta), aggressiveness)
+                res = _submit_limit_order(symbol=symbol, qty=delta, limit_price=float(limit_px), client_oid=client_oid)
+
                 broker_order_id = None
                 try:
-                    broker_order_id = str((res or {}).get("id") or "")
+                    broker_order_id = str((res or {}).get("id") or "") or None
+                    log_submit(
+                        client_order_id=client_oid,
+                        broker="alpaca",
+                        symbol=symbol,
+                        qty=float(delta),
+                        submit_ts_ms=int(time.time() * 1000),
+                        ref_px=float(limit_px),
+                        broker_order_id=broker_order_id,
+                        portfolio_orders_id=int(order_id) if order_id is not None else None,
+                        source_alert_id=int(o.get("source_alert_id")) if o.get("source_alert_id") is not None else None,
+                        extra={"order_type": "LIMIT", "aggressiveness": aggressiveness, "equity": float(eq)},
+                    )
                 except Exception:
-                    broker_order_id = None
+                    pass
 
-                # ref px at decision time
-                ref_px = float(px) if px is not None else None
+                if cancel_replace and max_reprice_attempts > 0:
+                    try:
+                        record_open_order(
+                            broker="alpaca",
+                            symbol=symbol,
+                            qty=float(delta),
+                            order_type="LIMIT",
+                            aggressiveness=aggressiveness,
+                            limit_px=float(limit_px),
+                            client_order_id=client_oid,
+                            broker_order_id=broker_order_id,
+                            max_attempts=int(max_reprice_attempts),
+                            portfolio_orders_id=int(order_id) if order_id is not None else None,
+                            source_alert_id=int(o.get("source_alert_id")) if o.get("source_alert_id") is not None else None,
+                            meta={"ref_px": float(px), "ts_ms": int(ts_ms)},
+                        )
+                    except Exception:
+                        pass
 
-                # portfolio_orders_id is the same as order_id (row id in portfolio_orders)
-                # source_alert_id is in the portfolio_orders table; we can backfill later,
-                # but if you want it now, parse from orders JSON upstream.
-                log_submit(
-                    client_order_id=client_oid,
-                    broker="alpaca",
-                    symbol=symbol,
-                    qty=float(delta),
-                    submit_ts_ms=int(time.time() * 1000),
-                    ref_px=ref_px,
-                    broker_order_id=broker_order_id or None,
-                    portfolio_orders_id=int(order_id),
-                    source_alert_id=int(o.get("source_alert_id")) if o.get("source_alert_id") is not None else None,
-                    extra={"to_side": to_side, "to_weight": float(to_w), "equity": float(eq)},
-                )
-            except Exception:
-                pass
+            else:
+                res = _submit_market_order(symbol=symbol, qty=delta, client_oid=client_oid)
+
+                try:
+                    broker_order_id = str((res or {}).get("id") or "") or None
+                    log_submit(
+                        client_order_id=client_oid,
+                        broker="alpaca",
+                        symbol=symbol,
+                        qty=float(delta),
+                        submit_ts_ms=int(time.time() * 1000),
+                        ref_px=float(px),
+                        broker_order_id=broker_order_id,
+                        portfolio_orders_id=int(order_id) if order_id is not None else None,
+                        source_alert_id=int(o.get("source_alert_id")) if o.get("source_alert_id") is not None else None,
+                        extra={"order_type": "MARKET", "aggressiveness": aggressiveness, "equity": float(eq)},
+                    )
+                except Exception:
+                    pass
 
             submitted.append({"symbol": symbol, "delta_qty": delta, "client_order_id": client_oid, "resp": res})
             n += 1
             time.sleep(max(0.0, float(SLEEP_BETWEEN_ORDERS_S)))
 
-        set_state("alpaca_last_portfolio_orders_id", str(int(order_id)))
-        return {"ok": True, "status": "applied", "order_id": int(order_id), "submitted_n": int(n), "submitted": submitted}
+        if order_id is not None:
+            set_state("alpaca_last_portfolio_orders_id", str(int(order_id)))
+
+        return {"ok": True, "status": "applied", "order_id": order_id, "submitted_n": int(n), "submitted": submitted}
 
     finally:
         con.close()
@@ -308,7 +403,6 @@ def poll_and_log_fills(after_ts_ms: int) -> Dict[str, Any]:
                 continue
 
             ts = o.get("filled_at") or o.get("updated_at") or o.get("created_at")
-            # parse RFC3339
             fill_ts_ms = int(time.time() * 1000)
             try:
                 if ts:

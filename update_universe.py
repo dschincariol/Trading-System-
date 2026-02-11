@@ -296,19 +296,15 @@ def main():
 
         # set ACTIVE
         if active_set:
-            pass
-
-        con.execute(
-                f"UPDATE symbols SET status='ACTIVE', updated_ts_ms=? WHERE symbol IN ({','.join('?' for _ in active_set)})",
+            con.execute(
+                f"UPDATE symbols SET status='ACTIVE', updated_ts_ms=? WHERE symbol IN ({','.join('?' for _ in sorted(active_set))})",
                 (_now_ms(), *sorted(active_set)),
             )
 
         # set WATCH (but don't override ACTIVE)
         watch_only = sorted([s for s in watch_set if s not in active_set])
         if watch_only:
-            pass
-
-        con.execute(
+            con.execute(
                 f"UPDATE symbols SET status='WATCH', updated_ts_ms=? WHERE symbol IN ({','.join('?' for _ in watch_only)})",
                 (_now_ms(), *watch_only),
             )

@@ -26,33 +26,42 @@ from dev_core.kill_switch import execution_allowed
 from dev_core.rules_engine import evaluate_rules
 from dev_core.execution_mode import get_execution_mode
 from dev_core.broker_router import apply_new_portfolio_orders_router as apply_new_portfolio_orders
+from execution_policy_engine import apply_execution_policy
 
-# ------            -- ------------------------------------------------------
+
+# ============================================================
 # Job / runtime config
-# ------            -- ------------------------------------------------------
+# ============================================================
 
 JOB_NAME = "broker_apply_orders"
+
 OWNER = os.environ.get(
     "JOB_OWNER",
     os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
 )
+
 PID = os.getpid()
 
 LOCK_STALE_AFTER_S = int(os.environ.get("JOB_LOCK_STALE_AFTER_S", "120"))
 BROKER_NAME = os.environ.get("BROKER_NAME", "sim")
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(levelname)s [broker_apply_orders] %(message)s",
 )
 
 
-# ------            -- ------------------------------------------------------
-# Shadow intent logging (local, safe)
-# ------            -- ------------------------------------------------------
+# ============================================================
+# Shadow intent logging
+# ============================================================
 
-def _log_shadow_intents(orders: List[Dict[str, Any]], actor: str, mode_state: dict) -> None:
+def _log_shadow_intents(
+    orders: List[Dict[str, Any]],
+    actor: str,
+    mode_state: dict,
+) -> None:
     try:
         con = connect()
         try:
@@ -82,12 +91,15 @@ def _log_shadow_intents(orders: List[Dict[str, Any]], actor: str, mode_state: di
                     json.dumps(orders or [], separators=(",", ":"), sort_keys=True),
                     json.dumps(mode_state or {}, separators=(",", ":"), sort_keys=True),
                 ),
-                )
+            )
+
             con.commit()
+
         finally:
             con.close()
+
     except Exception:
-        # fail-soft: shadow logging never blocks
+        # fail-soft
         pass
 
 
@@ -95,11 +107,12 @@ def _print(out: Dict[str, Any]) -> None:
     print(json.dumps(out, indent=2, sort_keys=True))
 
 
-# ------            -- ------------------------------------------------------
-# Main (one-shot)
-# ------            -- ------------------------------------------------------
+# ============================================================
+# Main
+# ============================================================
 
 def main() -> int:
+
     init_db()
 
     if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
@@ -109,12 +122,18 @@ def main() -> int:
     started_ms = int(time.time() * 1000)
 
     try:
-        # ------            -- ------------------------------------------------------
-        # Kill switch (hard safety)
-        # ------            -- ------------------------------------------------------
+
+        # ============================================================
+        # Kill switch (global hard safety)
+        # ============================================================
+
         con = connect()
         try:
-            allow, ks_reason, ks_meta = execution_allowed(con=con, symbol=None, regime=None)
+            allow, ks_reason, ks_meta = execution_allowed(
+                con=con,
+                symbol=None,
+                regime=None,
+            )
         finally:
             con.close()
 
@@ -131,32 +150,44 @@ def main() -> int:
                 }
             )
             return 0
-        # ------            -- ------------------------------------------------------
-        # Rules engine (best-effort, never blocks execution by itself)
-        # ------            -- ------------------------------------------------------
+
+        # ============================================================
+        # Rules engine (non-blocking)
+        # ============================================================
+
         try:
             evaluate_rules()
         except Exception:
             pass
 
+        # ============================================================
+        # Execution mode
+        # ============================================================
 
-        # ------            -- ------------------------------------------------------
-        # Execution mode (single source of truth)
-        # ------            -- ------------------------------------------------------
         mode_state = get_execution_mode() or {}
         mode = str(mode_state.get("mode") or "").lower().strip()
 
-        # ------            -- ------------------------------------------------------
-        # SHADOW MODE — compute intents and log only
-        # ------            -- ------------------------------------------------------
+        # ============================================================
+        # SHADOW MODE
+        # ============================================================
+
         if mode == "shadow":
-            res = apply_new_portfolio_orders(dry_run=True)
-            orders = []
-            try:
-                orders = list((res or {}).get("orders") or [])
-            except Exception:
-                orders = []
-            _log_shadow_intents(orders or [], actor=OWNER, mode_state=mode_state)
+
+            preview = apply_new_portfolio_orders(dry_run=True) or {}
+            raw_orders = list((preview or {}).get("orders") or [])
+            shaped_orders = apply_execution_policy(raw_orders)
+
+            res = {
+                "orders": shaped_orders,
+                "preview": preview,
+            }
+
+            _log_shadow_intents(
+                shaped_orders,
+                actor=OWNER,
+                mode_state=mode_state,
+            )
+
             _print(
                 {
                     "status": "ok",
@@ -164,21 +195,25 @@ def main() -> int:
                     "broker": BROKER_NAME,
                     "executed": False,
                     "intents_logged": True,
-                    "order_count": len(orders or []),
+                    "order_count": len(shaped_orders),
                     "preview": res,
                     "ts_ms": int(time.time() * 1000),
                     "dur_ms": int(time.time() * 1000) - started_ms,
                 }
             )
+
             return 0
 
-        # ------            -- ------------------------------------------------------
-        # PAPER MODE — execute into broker_sim only (never real broker)
-        # ------            -- ------------------------------------------------------
+        # ============================================================
+        # PAPER MODE
+        # ============================================================
+
         if mode == "paper":
+
             broker_lc = str(BROKER_NAME).lower().strip()
+
             if broker_lc not in ("sim", "paper", "sandbox"):
-                orders = apply_new_portfolio_orders(dry_run=True)
+                preview = apply_new_portfolio_orders(dry_run=True) or {}
                 _print(
                     {
                         "status": "blocked",
@@ -186,15 +221,22 @@ def main() -> int:
                         "mode": "paper",
                         "broker": BROKER_NAME,
                         "reason": "paper_mode_requires_sim_broker",
-                        "order_count": len(orders or []),
+                        "order_count": len((preview or {}).get("orders") or []),
                         "ts_ms": int(time.time() * 1000),
                         "dur_ms": int(time.time() * 1000) - started_ms,
                     }
                 )
                 return 0
 
-            # execute into broker_sim
-            res = apply_new_portfolio_orders(dry_run=False)
+            preview = apply_new_portfolio_orders(dry_run=True) or {}
+            raw_orders = list((preview or {}).get("orders") or [])
+            shaped_orders = apply_execution_policy(raw_orders)
+
+            res = apply_new_portfolio_orders(
+                dry_run=False,
+                override_orders=shaped_orders,
+            )
+
             _print(
                 {
                     "status": "ok",
@@ -205,11 +247,13 @@ def main() -> int:
                     "dur_ms": int(time.time() * 1000) - started_ms,
                 }
             )
+
             return 0
 
-        # ------            -- ------------------------------------------------------
-        # LIVE MODE — explicit allow only (mode must be live AND armed)
-        # ------            -- ------------------------------------------------------
+        # ============================================================
+        # LIVE MODE
+        # ============================================================
+
         if mode != "live":
             _print(
                 {
@@ -224,7 +268,10 @@ def main() -> int:
             )
             return 0
 
-        armed = bool(mode_state.get("armed", False)) or (os.environ.get("EXECUTION_ARMED", "0") == "1")
+        armed = bool(mode_state.get("armed", False)) or (
+            os.environ.get("EXECUTION_ARMED", "0") == "1"
+        )
+
         if not armed:
             _print(
                 {
@@ -239,14 +286,27 @@ def main() -> int:
             )
             return 0
 
-        # LIVE execution path (router may failover)
-        res = apply_new_portfolio_orders(dry_run=False)
+        # ============================================================
+        # LIVE execution
+        # ============================================================
 
-        # record last execution broker + source (best-effort)
+        preview = apply_new_portfolio_orders(dry_run=True) or {}
+        raw_orders = list((preview or {}).get("orders") or [])
+        shaped_orders = apply_execution_policy(raw_orders)
+
+        res = apply_new_portfolio_orders(
+            dry_run=False,
+            override_orders=shaped_orders,
+        )
+
+        # ============================================================
+        # Persist execution_meta
+        # ============================================================
+
         try:
             con = connect()
             try:
-                        con.execute(
+                con.execute(
                     """
                     CREATE TABLE IF NOT EXISTS execution_meta (
                       key TEXT PRIMARY KEY,
@@ -270,28 +330,17 @@ def main() -> int:
                     VALUES(?,?)
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value
                     """,
-                    ("last_execution_broker", str((res or {}).get("broker") or str(BROKER_NAME))),
+                    (
+                        "last_execution_broker",
+                        str((res or {}).get("broker") or str(BROKER_NAME)),
+                    ),
                 )
-                con.commit()
-            finally:
-                con.close()
-        except Exception:
-            pass
 
-        try:
-            con = connect()
-            try:
-                con.execute(
-                    """
-                    INSERT INTO execution_meta(key, value)
-                    VALUES(?,?)
-                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
-                    """,
-                    ("last_execution_source", "live_broker"),
-                )
                 con.commit()
+
             finally:
                 con.close()
+
         except Exception:
             pass
 
@@ -305,6 +354,7 @@ def main() -> int:
                 "dur_ms": int(time.time() * 1000) - started_ms,
             }
         )
+
         return 0
 
     except Exception as e:

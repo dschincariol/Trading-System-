@@ -489,6 +489,75 @@ def _ensure_promotion_watch_schema(con):
     )
 
 
+def _ensure_strategy_metrics_schema(con):
+    # Additive, idempotent: strategy evaluation metrics used by meta-strategy selection
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_metrics (
+          strategy_name TEXT NOT NULL,
+          window_days INTEGER NOT NULL,
+          ts_ms INTEGER NOT NULL,
+          metrics_json TEXT NOT NULL,
+          PRIMARY KEY (strategy_name, window_days)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_strategy_metrics_ts
+          ON strategy_metrics(ts_ms);
+
+        CREATE TABLE IF NOT EXISTS strategy_allocations (
+          ts_ms INTEGER NOT NULL,
+          window_days INTEGER NOT NULL,
+          allocations_json TEXT NOT NULL,
+          reason_json TEXT,
+          PRIMARY KEY (ts_ms, window_days)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_strategy_allocations_ts
+          ON strategy_allocations(ts_ms);
+
+        CREATE TABLE IF NOT EXISTS strategy_registry (
+          strategy_name TEXT PRIMARY KEY,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          stage TEXT NOT NULL DEFAULT 'paper',   -- paper|shadow|live
+          created_ts_ms INTEGER NOT NULL,
+          updated_ts_ms INTEGER NOT NULL,
+          meta_json TEXT
+        );
+        """
+    )
+
+def _ensure_universe_audit_schema(con):
+    # Additive, idempotent: universe selection / exclusion reasons for auditability
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS universe_audit (
+          ts_ms INTEGER NOT NULL,
+          symbol TEXT NOT NULL,
+          status_before TEXT,
+          status_after TEXT,
+          include INTEGER NOT NULL,
+          score REAL,
+          reasons_json TEXT,
+          features_json TEXT,
+          PRIMARY KEY (ts_ms, symbol)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_universe_audit_ts
+          ON universe_audit(ts_ms);
+
+        CREATE INDEX IF NOT EXISTS idx_universe_audit_symbol_ts
+          ON universe_audit(symbol, ts_ms);
+        """
+    )
+
+def _ensure_execution_mode_armed_column(con):
+    # Additive migration: execution_mode.armed for explicit live arming in DB (single source of truth)
+    try:
+        if not _has_column(con, "execution_mode", "armed"):
+            con.execute("ALTER TABLE execution_mode ADD COLUMN armed INTEGER NOT NULL DEFAULT 0;")
+    except Exception:
+        pass
+
 def _ensure_kill_switch_schema(con):
     # Additive, idempotent migrations for kill-switch tables / indexes
     con.executescript(
@@ -1392,6 +1461,9 @@ def init_db():
         _ensure_domain_perf_schema(con)
         _ensure_promotion_audit_columns(con)
         _ensure_promotion_watch_schema(con)
+        _ensure_strategy_metrics_schema(con)
+        _ensure_universe_audit_schema(con)
+        _ensure_execution_mode_armed_column(con)
 
         # Additive: ensure symbols table exists even for older DBs
         try:

@@ -24,6 +24,8 @@ import json
 import os
 import time
 import math
+import hashlib
+from typing import Any, Dict, List, Optional
 from dev_core.storage import connect
 
 # -----------------------------
@@ -35,12 +37,14 @@ def _is_finite(x) -> bool:
     except Exception:
         return False
 
+
 def _safe_f(x, default: float = 0.0) -> float:
     try:
         v = float(x)
         return v if math.isfinite(v) else float(default)
     except Exception:
         return float(default)
+
 
 def _safe_i(x, default: int = 0) -> int:
     try:
@@ -49,15 +53,38 @@ def _safe_i(x, default: int = 0) -> int:
     except Exception:
         return int(default)
 
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    try:
+        v = float(x)
+    except Exception:
+        v = float(lo)
+    return float(max(float(lo), min(float(hi), v)))
+
+
+def _u01(seed: str) -> float:
+    """
+    Deterministic pseudo-random in [0,1) from a stable seed string.
+    (No global RNG; reproducible in audits.)
+    """
+    try:
+        h = hashlib.sha256(str(seed).encode("utf-8")).hexdigest()
+        # 12 hex chars ~ 48 bits
+        n = int(h[:12], 16)
+        return (n % 10_000_000) / 10_000_000.0
+    except Exception:
+        return 0.0
+
+
 # -----------------------------
 # Broker realism knobs (env)
 # -----------------------------
-BROKER_SPREAD_BPS = float(os.environ.get("BROKER_SPREAD_BPS", "2.0"))          # total spread (bps)
-BROKER_SLIPPAGE_BPS = float(os.environ.get("BROKER_SLIPPAGE_BPS", "1.0"))      # extra slippage (bps)
-BROKER_FEE_BPS = float(os.environ.get("BROKER_FEE_BPS", "0.5"))                # commission/fees (bps of notional)
+BROKER_SPREAD_BPS = float(os.environ.get("BROKER_SPREAD_BPS", "2.0"))  # total spread (bps)
+BROKER_SLIPPAGE_BPS = float(os.environ.get("BROKER_SLIPPAGE_BPS", "1.0"))  # extra slippage (bps)
+BROKER_FEE_BPS = float(os.environ.get("BROKER_FEE_BPS", "0.5"))  # commission/fees (bps of notional)
 BROKER_MAX_TRADE_PCT_EQUITY = float(os.environ.get("BROKER_MAX_TRADE_PCT_EQUITY", "0.35"))  # cap per apply pass
-BROKER_CHUNK_PCT = float(os.environ.get("BROKER_CHUNK_PCT", "0.33"))           # split into chunks
-BROKER_LATENCY_MS = int(os.environ.get("BROKER_LATENCY_MS", "120"))            # per chunk latency
+BROKER_CHUNK_PCT = float(os.environ.get("BROKER_CHUNK_PCT", "0.33"))  # split into chunks
+BROKER_LATENCY_MS = int(os.environ.get("BROKER_LATENCY_MS", "120"))  # per chunk latency
 
 # Starting capital / cash baseline (additive; preserves existing behavior if not set)
 BROKER_START_CASH = float(os.environ.get("BROKER_START_CASH", "0.0"))
@@ -105,6 +132,20 @@ CREATE TABLE IF NOT EXISTS broker_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS broker_order_state (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_order_id INTEGER,
+  symbol TEXT NOT NULL,
+  state TEXT NOT NULL,
+  created_ts_ms INTEGER NOT NULL,
+  updated_ts_ms INTEGER NOT NULL,
+  ttl_ms INTEGER,
+  meta_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_broker_order_state_symbol ON broker_order_state(symbol);
+
 """
 
 
@@ -127,8 +168,6 @@ def _ensure_tables(con):
         if cash0 == 0.0 and eq0 == 0.0:
             cash0 = 0.0
             eq0 = 1.0
-
-        
 
         con.execute(
             "INSERT INTO broker_account(id, cash, equity, updated_ts_ms) VALUES(1, ?, ?, ?)",
@@ -178,7 +217,7 @@ def _set_meta(con, key: str, value: str):
 def _get_price_at_or_before(con, symbol: str, ts_ms: int):
     r = con.execute(
         """
-        SELECT px, ts_ms
+        SELECT price, ts_ms
         FROM prices
         WHERE symbol = ? AND ts_ms <= ?
         ORDER BY ts_ms DESC
@@ -187,6 +226,7 @@ def _get_price_at_or_before(con, symbol: str, ts_ms: int):
         (str(symbol), int(ts_ms)),
     ).fetchone()
     if not r:
+        # legacy fallback (older schema) - keep behavior
         r = con.execute(
             "SELECT px, ts_ms FROM prices WHERE symbol=? ORDER BY ts_ms DESC LIMIT 1",
             (str(symbol),),
@@ -228,20 +268,30 @@ def _write_position(con, symbol: str, qty: float, avg_px: float, ts_ms: int):
         (str(symbol), float(qty), float(avg_px), int(ts_ms)),
     )
 
-
-def _exec_px(mid_px: float, side: str, trade_notional: float = 0.0, equity: float = 0.0) -> float:
+def _exec_px(
+    mid_px: float,
+    side: str,
+    trade_notional: float = 0.0,
+    equity: float = 0.0,
+    slip_bps_override: float = None,
+    spread_bps_override: float = None,
+) -> float:
     """
     Execution price with:
       - spread (half spread added/subtracted)
       - slippage (bps), optionally size-aware using an impact proxy
+
+    Optional per-call overrides:
+      - slip_bps_override
+      - spread_bps_override
     """
     mid_px = _safe_f(mid_px, 0.0)
     if mid_px <= 0.0:
         return 0.0
 
     # clamp knobs to sane ranges
-    spread_bps = max(0.0, _safe_f(BROKER_SPREAD_BPS, 0.0))
-    slip_bps = max(0.0, _safe_f(BROKER_SLIPPAGE_BPS, 0.0))
+    spread_bps = max(0.0, _safe_f(spread_bps_override if spread_bps_override is not None else BROKER_SPREAD_BPS, 0.0))
+    slip_bps = max(0.0, _safe_f(slip_bps_override if slip_bps_override is not None else BROKER_SLIPPAGE_BPS, 0.0))
     fee_bps = max(0.0, _safe_f(BROKER_FEE_BPS, 0.0))  # not used here, but kept consistent
     _ = fee_bps
 
@@ -265,11 +315,22 @@ def _exec_px(mid_px: float, side: str, trade_notional: float = 0.0, equity: floa
     # SELL
     return max(0.0, mid_px - half_spread - slip)
 
+
 def _fee(notional: float) -> float:
     return abs(float(notional or 0.0)) * (BROKER_FEE_BPS / 10000.0)
 
 
-def _write_fill(con, ts_ms: int, source_order_id, symbol: str, qty: float, px: float, note: str = "", explain_json: str = None):
+def _write_fill(
+    con,
+    ts_ms: int,
+    source_order_id,
+    symbol: str,
+    qty: float,
+    px: float,
+    note: str = "",
+    explain_json: str = None,
+):
+    
     con.execute(
         """
         INSERT INTO broker_fills(ts_ms, symbol, qty, px, source_order_id, note, explain_json)
@@ -281,8 +342,9 @@ def _write_fill(con, ts_ms: int, source_order_id, symbol: str, qty: float, px: f
     # --- execution ledger mirror (for slippage + pnl attribution parity) ---
     try:
         from dev_core.execution_ledger import log_fill
+
         log_fill(
-            client_order_id=f"sim_{int(source_order_id)}_{symbol}",
+            client_order_id=f"sim_{int(source_order_id) if source_order_id is not None else 'override'}_{symbol}",
             fill_ts_ms=int(ts_ms),
             fill_qty=float(qty),
             fill_px=float(px),
@@ -293,8 +355,7 @@ def _write_fill(con, ts_ms: int, source_order_id, symbol: str, qty: float, px: f
     except Exception:
         pass
 
-        (int(ts_ms), str(symbol), float(qty), float(px), source_order_id, str(note or ""), explain_json),
-    
+
 def _mark_to_market(con, ts_ms: int):
     acct = _read_account(con)
     cash = float(acct.get("cash") or 0.0)
@@ -325,9 +386,15 @@ def _equity(con, ts_ms: int) -> float:
         eq = float(acct.get("equity") or 0.0)
     return float(eq)
 
-
-def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> dict:
+def apply_new_portfolio_orders(
+    max_rows: int = 500,
+    dry_run: bool = False,
+    override_orders: List[dict] = None,
+    override_order_id: int = None,
+    override_ts_ms: int = None,
+) -> dict:
     """
+
     Apply latest portfolio_orders (targets) into broker_positions with realism:
       - spread + slippage via _exec_px
       - fees via _fee
@@ -341,16 +408,22 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
 
         now_ms = _now_ms()
 
-        row = con.execute(
-            "SELECT id, ts_ms, orders_json FROM portfolio_orders ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        if not row:
-            acct = _mark_to_market(con, now_ms)
-            return {"ok": True, "status": "no_orders", "account": acct}
+        if override_orders is not None:
+            order_id = int(override_order_id or 0)
+            ts_ms = int(override_ts_ms or now_ms)
+            orders = list(override_orders or [])
+        else:
 
-        order_id = int(row[0])
-        ts_ms = int(row[1] or now_ms)
-        orders = json.loads(row[2] or "[]") if row[2] else []
+            row = con.execute(
+                "SELECT id, ts_ms, orders_json FROM portfolio_orders ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                acct = _mark_to_market(con, now_ms)
+                return {"ok": True, "status": "no_orders", "account": acct}
+
+            order_id = int(row[0])
+            ts_ms = int(row[1] or now_ms)
+            orders = json.loads(row[2] or "[]") if row[2] else []
 
         # -----------------------------
         # DRY RUN: preview only, no state mutation
@@ -359,33 +432,36 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
             return {
                 "ok": True,
                 "status": "dry_run_preview",
-                "order_id": int(order_id),
+                "order_id": (int(order_id) if order_id is not None else None),
                 "orders": orders,
                 "account": _read_account(con),
             }
 
         # idempotency guard: only apply each portfolio_orders row once
-        last_applied = _get_meta(con, "last_portfolio_orders_id")
-        if last_applied is not None:
-            try:
-                if int(last_applied) >= int(order_id):
-                    acct = _mark_to_market(con, now_ms)
-                    return {"ok": True, "status": "already_applied", "order_id": order_id, "account": acct}
-            except Exception:
-                pass
+        if order_id is not None:
+            last_applied = _get_meta(con, "last_portfolio_orders_id")
+            if last_applied is not None:
+                try:
+                    if int(last_applied) >= int(order_id):
+                        acct = _mark_to_market(con, now_ms)
+                        return {"ok": True, "status": "already_applied", "order_id": order_id, "account": acct}
+                except Exception:
+                    pass
 
         acct = _read_account(con)
         cash = float(acct.get("cash") or 0.0)
         equity = float(_equity(con, ts_ms) or 0.0)
+
         # guard: sizing needs a positive reference; if equity <= 0, do not trade
         if not _is_finite(equity) or equity <= 0.0:
             acct = _mark_to_market(con, now_ms)
-            _set_meta(con, "last_portfolio_orders_id", str(order_id))
-            con.commit()
+            if order_id is not None:
+                _set_meta(con, "last_portfolio_orders_id", str(order_id))
+                con.commit()
             return {
                 "ok": True,
                 "status": "skipped_nonpositive_equity",
-                "order_id": int(order_id),
+                "order_id": (int(order_id) if order_id is not None else None),
                 "fills_written": 0,
                 "account": acct,
             }
@@ -398,18 +474,115 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
 
         for o in (orders or [])[: int(max_rows)]:
             symbol = str(o.get("symbol") or "").strip()
+            order_ttl_ms = int(o.get("alpha_ttl_ms") or 0)
+
+            con.execute(
+                """
+                INSERT INTO broker_order_state(
+                    source_order_id, symbol, state, created_ts_ms, updated_ts_ms, ttl_ms, meta_json
+                )
+                VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    order_id,
+                    symbol,
+                    "PENDING",
+                    int(ts_ms),
+                    int(ts_ms),
+                    order_ttl_ms,
+                    json.dumps(o),
+                ),
+            )
             if not symbol:
                 continue
 
             # Kill switch (global/symbol) is enforced here as a last line of defense
             try:
                 from dev_core.kill_switch import execution_allowed
+
                 allow, _, _ = execution_allowed(con=con, symbol=symbol, regime=None)
                 if not allow:
                     continue
             except Exception:
                 # Fail-closed on enforcement errors
                 continue
+
+            # ------------------------------------------------------------
+            # PHASE 4: EPE policy extraction + regime-adaptive microstructure
+            # ------------------------------------------------------------
+            _epe_ov = o.get("epe_broker_sim_overrides") or {}
+
+            # base knobs (may be overridden per order)
+            try:
+                _lat_ms = int(_epe_ov.get("latency_ms")) if _epe_ov.get("latency_ms") is not None else None
+            except Exception:
+                _lat_ms = None
+            try:
+                _chunk_pct = float(_epe_ov.get("chunk_pct")) if _epe_ov.get("chunk_pct") is not None else None
+            except Exception:
+                _chunk_pct = None
+            try:
+                _extra_slip = float(_epe_ov.get("extra_slippage_bps")) if _epe_ov.get("extra_slippage_bps") is not None else 0.0
+            except Exception:
+                _extra_slip = 0.0
+
+            # EPE policy fields (optional)
+            order_type = str(
+                o.get("order_type")
+                or o.get("epe_order_type")
+                or "MARKET"
+            ).upper().strip()
+
+            aggressiveness = str(
+                o.get("aggressiveness")
+                or o.get("epe_aggressiveness")
+                or "NEUTRAL"
+            ).upper().strip()
+
+            try:
+                max_reprice_attempts = int(o.get("max_reprice_attempts") or o.get("epe_max_reprice_attempts") or 0)
+            except Exception:
+                max_reprice_attempts = 0
+
+            # regime/volatility hints (optional)
+            regime = str(o.get("regime") or o.get("epe_regime") or "").upper().strip()
+            try:
+                volatility = float(o.get("volatility") or o.get("epe_volatility") or 0.0)
+            except Exception:
+                volatility = 0.0
+
+            # base locals
+            local_latency_ms = int(_lat_ms) if (_lat_ms is not None and int(_lat_ms) > 0) else int(BROKER_LATENCY_MS)
+            local_chunk_pct = float(_chunk_pct) if (_chunk_pct is not None and 0.01 <= float(_chunk_pct) <= 1.0) else float(BROKER_CHUNK_PCT)
+
+            # regime-adaptive tweaks (deterministic; auditable)
+            # - higher vol => smaller chunks + more latency (slower fill) + more slippage
+            # - "ILLQ"/"LOW_LIQ"/"WIDE" => more slippage + smaller chunks
+            vol = max(0.0, float(volatility))
+            if vol >= 0.03:
+                local_chunk_pct = float(_clamp(local_chunk_pct * 0.60, 0.05, 1.0))
+                local_latency_ms = int(max(local_latency_ms, int(BROKER_LATENCY_MS * 2)))
+                _extra_slip = float(_extra_slip) + 0.50
+            elif vol >= 0.015:
+                local_chunk_pct = float(_clamp(local_chunk_pct * 0.80, 0.05, 1.0))
+                _extra_slip = float(_extra_slip) + 0.25
+
+            if regime in ("ILLQ", "LOW_LIQ", "WIDE", "WIDE_SPREAD", "THIN"):
+                local_chunk_pct = float(_clamp(local_chunk_pct * 0.70, 0.05, 1.0))
+                _extra_slip = float(_extra_slip) + 0.75
+
+            # aggressiveness affects effective slippage (more aggressive => more slippage)
+            aggr_slip_bps = 0.0
+            if aggressiveness == "PASSIVE":
+                aggr_slip_bps = -0.25
+            elif aggressiveness == "AGGRESSIVE":
+                aggr_slip_bps = 0.50
+
+            local_slip_bps = float(BROKER_SLIPPAGE_BPS) + float(_extra_slip) + float(aggr_slip_bps)
+
+            # track limit reprice attempts across chunks
+            attempts_left = int(max(0, max_reprice_attempts))
+            order_type_eff = str(order_type)
 
             to_side = str(o.get("to_side") or "FLAT").upper()
             to_w = _safe_f(o.get("to_weight"), 0.0)
@@ -437,41 +610,133 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
             remaining = float(delta)
             chunk_idx = 0
 
+            # per-order chunk cap (regime/vol adjusted)
+            chunk_cap_notional = max(1e-9, float(max_notional_budget) * float(local_chunk_pct or 0.33))
+
             while abs(remaining) > 1e-9:
+
+                # TTL enforcement
+                if order_ttl_ms and (_now_ms() - ts_ms) > order_ttl_ms:
+                    con.execute(
+                        """
+                        UPDATE broker_order_state
+                        SET state=?, updated_ts_ms=?
+                        WHERE source_order_id=? AND symbol=? AND state='PENDING'
+                        """,
+                        ("EXPIRED", _now_ms(), order_id, symbol),
+                    )
+                    break
                 if max_notional_budget <= 0.0:
                     break
 
                 chunk_side = "BUY" if remaining > 0 else "SELL"
 
                 # Use price at this chunk's simulated fill time (latency-aware), not the parent ts_ms
-                fill_ts = int(int(ts_ms) + (int(chunk_idx) * int(BROKER_LATENCY_MS)))
+                fill_ts = int(int(ts_ms) + (int(chunk_idx) * int(local_latency_ms)))
                 px_mid_chunk, _ = _get_price_at_or_before(con, symbol, int(fill_ts))
                 px_mid_use = px_mid_chunk if (px_mid_chunk is not None and float(px_mid_chunk) > 0.0) else px_mid
 
-                # We don't yet know exact chunk qty here; compute a provisional exec px using max possible notional later.
-                # We'll recompute after qty_cap is known.
-                px_exec = _exec_px(px_mid_use, chunk_side, trade_notional=0.0, equity=equity)
-                if px_exec <= 0.0:
+                # ------------------------------------------------------------
+                # PHASE 4: Order type + aggressiveness shaping (MARKET vs LIMIT)
+                # - MARKET: uses _exec_px with (possibly adjusted) slippage
+                # - LIMIT: improved price but partial fills; cancel/replace escalates to MARKET
+                # ------------------------------------------------------------
+                px_exec = 0.0
+
+                # provisional px for sizing (MARKET-like baseline)
+                px_mkt = _exec_px(
+                    px_mid_use,
+                    chunk_side,
+                    trade_notional=0.0,
+                    equity=equity,
+                    slip_bps_override=float(local_slip_bps),
+                )
+                if px_mkt <= 0.0:
                     break
 
-
-                # cap by remaining and notional budget
-                remaining_notional = abs(remaining) * px_exec
+                # cap by remaining and notional budget using provisional px
+                remaining_notional = abs(remaining) * px_mkt
                 if remaining_notional > max_notional_budget:
-                    qty_cap = (max_notional_budget / px_exec) * (1.0 if remaining > 0 else -1.0)
+                    qty_cap = (max_notional_budget / px_mkt) * (1.0 if remaining > 0 else -1.0)
                 else:
                     qty_cap = remaining
 
-                # chunk cap
-                if abs(qty_cap) * px_exec > chunk_cap_notional:
-                    qty_cap = (chunk_cap_notional / px_exec) * (1.0 if remaining > 0 else -1.0)
+                # chunk cap using provisional px
+                if abs(qty_cap) * px_mkt > chunk_cap_notional:
+                    qty_cap = (chunk_cap_notional / px_mkt) * (1.0 if remaining > 0 else -1.0)
 
                 if abs(qty_cap) < 1e-9:
                     break
 
-                # Recompute exec px now that qty_cap is known (size-aware slippage)
-                notional_est = float(qty_cap) * float(px_mid_use)
-                px_exec = _exec_px(px_mid_use, chunk_side, trade_notional=notional_est, equity=equity)
+                # Choose effective order type for this chunk
+                if order_type_eff == "LIMIT":
+                    # LIMIT improves price relative to market baseline.
+                    # PASSIVE => better price, lower fill; AGGRESSIVE => closer to market, higher fill.
+                    improve = 0.5
+                    if aggressiveness == "PASSIVE":
+                        improve = 1.0
+                    elif aggressiveness == "AGGRESSIVE":
+                        improve = 0.15
+
+                    # allow cancel/replace: each attempt reduces improvement (more aggressive repricing)
+                    if attempts_left > 0:
+                        step = min(max_reprice_attempts, max(0, max_reprice_attempts - attempts_left))
+                        improve = float(_clamp(improve - 0.25 * float(step), 0.0, 1.0))
+
+                    half_spread = (float(BROKER_SPREAD_BPS) / 10000.0) * float(px_mid_use) / 2.0
+                    if chunk_side == "BUY":
+                        px_exec = max(0.0, float(px_mid_use) - (half_spread * float(improve)))
+                    else:
+                        px_exec = max(0.0, float(px_mid_use) + (half_spread * float(improve)))
+
+                    # deterministic partial fill model
+                    base_fill = 0.70
+                    if aggressiveness == "PASSIVE":
+                        base_fill = 0.45
+                    elif aggressiveness == "AGGRESSIVE":
+                        base_fill = 0.95
+
+                    # higher vol / illiq => lower fill
+                    fill_penalty = float(_clamp(vol * 6.0, 0.0, 0.50))
+                    fill_frac = float(_clamp(base_fill - fill_penalty, 0.20, 1.0))
+
+                    # deterministic per-chunk variation (auditable, reproducible)
+                    u = _u01(f"{order_id}|{symbol}|{chunk_idx}|{fill_ts}|{order_type_eff}|{aggressiveness}")
+                    jitter = float(_clamp((u - 0.5) * 0.10, -0.05, 0.05))
+                    fill_frac = float(_clamp(fill_frac + jitter, 0.20, 1.0))
+
+                    # apply partial fill
+                    qty_cap = float(qty_cap) * float(fill_frac)
+
+                    if abs(qty_cap) < 1e-9:
+                        # no fill at this price => cancel/replace attempt
+                        if attempts_left > 0:
+                            attempts_left -= 1
+                            chunk_idx += 1
+                            # simulate time passing, but keep remaining unchanged
+                            continue
+                        # escalate remainder to MARKET
+                        order_type_eff = "MARKET"
+                        continue
+
+                    # if we didn't fill the whole remainder, burn an attempt (cancel/replace)
+                    if abs(qty_cap) < abs(remaining) and attempts_left > 0:
+                        attempts_left -= 1
+                        if attempts_left <= 0:
+                            # no more reprices => escalate to MARKET for remaining
+                            order_type_eff = "MARKET"
+
+                else:
+                    # MARKET path: recompute with size-aware slippage
+                    notional_est = float(qty_cap) * float(px_mid_use)
+                    px_exec = _exec_px(
+                        px_mid_use,
+                        chunk_side,
+                        trade_notional=notional_est,
+                        equity=equity,
+                        slip_bps_override=float(local_slip_bps),
+                    )
+
                 if px_exec <= 0.0:
                     break
 
@@ -481,7 +746,6 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
 
                 # Optional no-margin mode: prevent cash from going negative on buys
                 if (not BROKER_ALLOW_MARGIN) and (notional > 0.0):
-                    # max affordable qty given current cash after fees
                     max_afford = max(0.0, float(cash) - float(fee))
                     if max_afford <= 0.0:
                         break
@@ -499,16 +763,16 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
                 new_qty = float(cur_qty) + float(qty_cap)
 
                 # avg_px update:
-                # - if increasing same direction, blend
-                # - if reducing or flipping, keep avg if still same sign; reset if cross 0
-                if float(cur_qty) == 0.0 or (float(cur_qty) > 0 and float(qty_cap) > 0) or (float(cur_qty) < 0 and float(qty_cap) < 0):
-                    # blend on add
+                if (
+                    float(cur_qty) == 0.0
+                    or (float(cur_qty) > 0 and float(qty_cap) > 0)
+                    or (float(cur_qty) < 0 and float(qty_cap) < 0)
+                ):
                     old_notional_abs = abs(float(cur_qty)) * float(cur_avg)
                     add_notional_abs = abs(float(qty_cap)) * float(px_exec)
                     denom = abs(float(cur_qty)) + abs(float(qty_cap))
                     new_avg = (old_notional_abs + add_notional_abs) / denom if denom > 1e-12 else float(px_exec)
                 else:
-                    # reducing or flipping
                     if (float(cur_qty) > 0 and new_qty > 0) or (float(cur_qty) < 0 and new_qty < 0):
                         new_avg = float(cur_avg)
                     elif abs(new_qty) < 1e-12:
@@ -516,23 +780,36 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
                     else:
                         new_avg = float(px_exec)
 
-                # fill_ts already computed for this chunk (do not recompute)
                 fill_ts = int(fill_ts)
 
                 _write_position(con, symbol, qty=float(new_qty), avg_px=float(new_avg), ts_ms=fill_ts)
+
                 explain = {
                     "mid_px": float(px_mid_use),
                     "exec_px": float(px_exec),
                     "side": str(chunk_side),
+
+                    "order_type": str(order_type_eff),
+                    "aggressiveness": str(aggressiveness),
+                    "regime": str(regime),
+                    "volatility": float(vol),
+
                     "spread_bps": float(BROKER_SPREAD_BPS),
-                    "slippage_bps": float(BROKER_SLIPPAGE_BPS),
+                    "slippage_bps": float(local_slip_bps),
                     "impact_alpha": float(BROKER_IMPACT_ALPHA),
                     "fee_bps": float(BROKER_FEE_BPS),
+
                     "qty": float(qty_cap),
                     "notional": float(notional),
                     "fee": float(fee),
                     "equity_ref": float(equity),
-                    "latency_ms": int(BROKER_LATENCY_MS),
+
+                    "latency_ms": int(local_latency_ms),
+                    "chunk_pct": float(local_chunk_pct),
+
+                    "max_reprice_attempts": int(max_reprice_attempts),
+                    "attempts_left": int(attempts_left),
+
                     "chunk_idx": int(chunk_idx),
                 }
 
@@ -543,7 +820,7 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
                     symbol=symbol,
                     qty=float(qty_cap),
                     px=float(px_exec),
-                    note=f"spread_bps={BROKER_SPREAD_BPS} slippage_bps={BROKER_SLIPPAGE_BPS} fee_bps={BROKER_FEE_BPS}",
+                    note=f"spread_bps={BROKER_SPREAD_BPS} slippage_bps={float(local_slip_bps)} fee_bps={BROKER_FEE_BPS}",
                     explain_json=json.dumps(explain),
                 )
 
@@ -570,7 +847,7 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
                           total_cost_bps,
                           extra_json
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             int(o.get("event_id") or 0),
@@ -595,16 +872,23 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
                 except Exception:
                     pass
 
+                con.execute(
+                    """
+                    UPDATE broker_order_state
+                    SET state=?, updated_ts_ms=?
+                    WHERE source_order_id=? AND symbol=? AND state='PENDING'
+                    """,
+                    ("FILLED", _now_ms(), order_id, symbol),
+                )
 
                 wrote_fills = True
                 fills_written += 1
-
                 chunk_idx += 1
 
                 # Optional wall-clock latency simulation (default off)
-                if BROKER_LATENCY_SLEEP and int(BROKER_LATENCY_MS) > 0:
+                if BROKER_LATENCY_SLEEP and int(local_latency_ms) > 0:
                     try:
-                        time.sleep(max(0.0, int(BROKER_LATENCY_MS) / 1000.0))
+                        time.sleep(max(0.0, int(local_latency_ms) / 1000.0))
                     except Exception:
                         pass
 
@@ -616,9 +900,7 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
                 max_notional_budget = max(0.0, float(max_notional_budget) - abs(float(notional)))
 
         # persist cash and MTM equity
-        # (write cash first, then mark-to-market equity)
         cash = _safe_f(cash, 0.0)
-        
 
         con.execute(
             "UPDATE broker_account SET cash=?, updated_ts_ms=? WHERE id=1",
@@ -629,13 +911,14 @@ def apply_new_portfolio_orders(max_rows: int = 500, dry_run: bool = False) -> di
         acct2 = _mark_to_market(con, int(now_ms))
 
         # mark orders applied (idempotency)
-        _set_meta(con, "last_portfolio_orders_id", str(order_id))
-        con.commit()
+        if order_id is not None:
+            _set_meta(con, "last_portfolio_orders_id", str(order_id))
+            con.commit()
 
         return {
             "ok": True,
             "status": "applied" if wrote_fills else "no_changes",
-            "order_id": int(order_id),
+            "order_id": (int(order_id) if order_id is not None else None),
             "fills_written": int(fills_written),
             "account": acct2,
         }

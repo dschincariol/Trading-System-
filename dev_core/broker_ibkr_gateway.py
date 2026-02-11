@@ -98,6 +98,11 @@ def _connect_ib():
             self._err = []
             self._err_lock = threading.Lock()
 
+            # positions snapshot support
+            self._pos = {}
+            self._pos_lock = threading.Lock()
+            self._pos_evt = threading.Event()
+
         def nextValidId(self, orderId: int):
             self._next_order_id = int(orderId)
             self._next_order_evt.set()

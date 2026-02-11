@@ -46,6 +46,13 @@ def main() -> int:
     except Exception:
         pass
 
+    # Phase 2: manage open orders (cancel/replace) best-effort
+    try:
+        from dev_core.execution_microstructure import manage_open_orders
+        manage_open_orders()
+    except Exception:
+        pass
+
     # Compute slippage + m2m metrics snapshot
     m = compute_metrics_snapshot(limit_orders=5000)
 
