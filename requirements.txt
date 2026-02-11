@@ -6,3 +6,4 @@ sentence-transformers==3.0.1
 torch==2.4.1
 yfinance==0.2.43
 ccxt==4.4.16
+test
