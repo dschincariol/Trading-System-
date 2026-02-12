@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dev_core.storage import connect, init_db, acquire_job_lock, release_job_lock
 from dev_core.kill_switch import execution_allowed
+from dev_core.position_reconcile import pre_live_position_reconcile
+from dev_core.portfolio_risk_gate import apply_execution_risk_governor
 from dev_core.rules_engine import evaluate_rules
 from dev_core.execution_mode import get_execution_mode
 from dev_core.broker_router import apply_new_portfolio_orders_router as apply_new_portfolio_orders
@@ -438,6 +440,7 @@ def main() -> int:
             )
             return 0
 
+# FIND (in broker_apply_orders.py):
         dual_enable = os.environ.get("EXECUTION_DUAL_ENABLE", "0") == "1"
 
         if dual_enable and str(BROKER_NAME).lower() == "ibkr" and callable(apply_latest_portfolio_orders_dual_ibkr):
@@ -452,6 +455,132 @@ def main() -> int:
 
         broker_used = str((res or {}).get("broker") or BROKER_NAME)
         _write_execution_meta_last(broker_used, "live_broker")
+
+        _print(
+            {
+                "status": "ok",
+                "mode": "live",
+                "broker": BROKER_NAME,
+                "broker_used": broker_used,
+                "payload_source": payload_source,
+                "batch_id": batch_or_oid,
+                "result": res,
+                "ts_ms": _now_ms(),
+                "dur_ms": _now_ms() - started_ms,
+            }
+        )
+        return 0
+
+# REPLACE WITH:
+        # ------------------------------------------------------------
+        # Institutional completion layer (pre-trade):
+        # 1) Position reconciliation (live brokers)
+        # 2) Execution risk governor (defense in depth)
+        # ------------------------------------------------------------
+        try:
+            con2 = connect()
+            try:
+                rec = pre_live_position_reconcile(
+                    con2,
+                    broker=str(BROKER_NAME or ""),
+                    fatal_net_liq_mismatch_pct=float(os.environ.get("EXEC_FATAL_NET_LIQ_MISMATCH_PCT", "0.02")),
+                    fatal_abs_pos_usd=float(os.environ.get("EXEC_FATAL_ABS_POS_USD", "250.0")),
+                )
+                if isinstance(rec, dict) and rec.get("fatal_reconcile"):
+                    _print(
+                        {
+                            "status": "blocked",
+                            "layer": "position_reconcile",
+                            "mode": "live",
+                            "broker": BROKER_NAME,
+                            "reconcile": rec,
+                            "ts_ms": _now_ms(),
+                            "dur_ms": _now_ms() - started_ms,
+                        }
+                    )
+                    return 0
+            finally:
+                con2.close()
+        except Exception as e:
+            _print(
+                {
+                    "status": "blocked",
+                    "layer": "position_reconcile_exception",
+                    "mode": "live",
+                    "broker": BROKER_NAME,
+                    "error": str(e),
+                    "ts_ms": _now_ms(),
+                    "dur_ms": _now_ms() - started_ms,
+                }
+            )
+            return 0
+
+        try:
+            con3 = connect()
+            try:
+                governed, gov_info = apply_execution_risk_governor(
+                    con3,
+                    list(shaped_payload or []),
+                    broker=str(BROKER_NAME or ""),
+                    mode="live",
+                    equity_usd=None,
+                )
+            finally:
+                con3.close()
+        except Exception as e:
+            _print(
+                {
+                    "status": "blocked",
+                    "layer": "risk_governor_exception",
+                    "mode": "live",
+                    "broker": BROKER_NAME,
+                    "error": str(e),
+                    "ts_ms": _now_ms(),
+                    "dur_ms": _now_ms() - started_ms,
+                }
+            )
+            return 0
+
+        if isinstance(gov_info, dict) and (not gov_info.get("ok")):
+            _print(
+                {
+                    "status": "blocked",
+                    "layer": "risk_governor",
+                    "mode": "live",
+                    "broker": BROKER_NAME,
+                    "governor": gov_info,
+                    "ts_ms": _now_ms(),
+                    "dur_ms": _now_ms() - started_ms,
+                }
+            )
+            return 0
+
+        shaped_payload = list(governed or [])
+
+        dual_enable = os.environ.get("EXECUTION_DUAL_ENABLE", "0") == "1"
+
+        if dual_enable and str(BROKER_NAME).lower() == "ibkr" and callable(apply_latest_portfolio_orders_dual_ibkr):
+            res = apply_latest_portfolio_orders_dual_ibkr(dry_run_live=False)
+        else:
+            res = apply_new_portfolio_orders(
+                dry_run=False,
+                override_orders=shaped_payload,
+                override_order_id=(int(batch_or_oid) if batch_or_oid is not None else None),
+                override_ts_ms=(int(payload_ts_ms) if payload_ts_ms is not None else None),
+            )
+
+        broker_used = str((res or {}).get("broker") or BROKER_NAME)
+        _write_execution_meta_last(broker_used, "live_broker")
+
+        # ------------------------------------------------------------
+        # Institutional completion layer (post-trade):
+        # - rebuild execution analytics (slippage attribution)
+        # ------------------------------------------------------------
+        try:
+            from dev_core.execution_analytics_engine import build_execution_analytics  # type: ignore
+            build_execution_analytics(limit=2000)
+        except Exception:
+            pass
 
         _print(
             {

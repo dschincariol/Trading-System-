@@ -28,7 +28,7 @@ Notes:
 """
 
 import os
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, List, Optional
 
 from dev_core.drawdown_state import get_current_drawdown
 from dev_core.weather_features import get_weather_feature_snapshot
@@ -112,12 +112,13 @@ def _turnover(desired: Dict[str, Dict[str, Any]], state: Dict[str, Dict[str, Any
 
     tot = 0.0
     for sym in syms:
-        cur = state.get(sym)
-        tgt = desired.get(sym)
+        cur = (state or {}).get(sym)
+        tgt = (desired or {}).get(sym)
         cur_w = abs(_cur_signed_weight(cur))
         tgt_w = abs(_tgt_signed_weight(tgt))
         tot += abs(float(tgt_w) - float(cur_w))
     return float(tot)
+
 
 def _portfolio_weather_risk(desired: Dict[str, Dict[str, Any]], now_ms: int) -> Dict[str, float]:
     """
@@ -176,6 +177,7 @@ def _portfolio_weather_risk(desired: Dict[str, Dict[str, Any]], now_ms: int) -> 
         "n_eval": float(n_eval),
     }
 
+
 def _annotate(desired: Dict[str, Dict[str, Any]], info: Dict[str, Any]) -> None:
     for sym in list((desired or {}).keys()):
         try:
@@ -208,7 +210,7 @@ def apply_portfolio_risk_gate(
         dd = float(get_current_drawdown(con))
     except Exception:
         dd = 0.0
-        
+
     info["drawdown"] = float(dd)
 
     # drawdown-based gross cap
@@ -242,7 +244,7 @@ def apply_portfolio_risk_gate(
     # Enforce drawdown add-block: do not allow increasing gross exposure vs current state
     cur_gross = 0.0
     try:
-        for sym, cur in (state or {}).items():
+        for _sym, cur in (state or {}).items():
             cur_gross += abs(_cur_signed_weight(cur))
     except Exception:
         cur_gross = 0.0
@@ -251,7 +253,9 @@ def apply_portfolio_risk_gate(
     tgt_gross = _gross(out)
     info["tgt_gross_pre"] = float(tgt_gross)
 
-    wx_block = (float(info.get("wx_storm_risk_max", 0.0)) >= float(WX_STORM_ADD_BLOCK)) if USE_WX_RISK else False
+    wx_block = (
+        (float(info.get("wx_storm_risk_max", 0.0)) >= float(WX_STORM_ADD_BLOCK)) if USE_WX_RISK else False
+    )
 
     if (dd >= float(DD_ADD_BLOCK) or wx_block) and tgt_gross > cur_gross + 1e-12:
         # scale DOWN targets so gross <= current gross
@@ -299,13 +303,13 @@ def apply_portfolio_risk_gate(
         if net > 0:
             side_to_scale = "LONG"
             denom = 0.0
-            for sym, tgt in out.items():
+            for _sym, tgt in out.items():
                 if str(tgt.get("side", "FLAT")).upper() == "LONG":
                     denom += float(tgt.get("weight", 0.0) or 0.0)
             if denom > 1e-12:
                 target_long_sum = denom - (abs(net) - float(MAX_NET))
                 scale = max(0.0, float(target_long_sum) / float(denom))
-                for sym, tgt in out.items():
+                for _sym, tgt in out.items():
                     if str(tgt.get("side", "FLAT")).upper() == "LONG":
                         tgt["weight"] = float(tgt.get("weight", 0.0) or 0.0) * float(scale)
                 info["net_scale_side"] = side_to_scale
@@ -313,13 +317,13 @@ def apply_portfolio_risk_gate(
         else:
             side_to_scale = "SHORT"
             denom = 0.0
-            for sym, tgt in out.items():
+            for _sym, tgt in out.items():
                 if str(tgt.get("side", "FLAT")).upper() == "SHORT":
                     denom += float(tgt.get("weight", 0.0) or 0.0)
             if denom > 1e-12:
                 target_short_sum = denom - (abs(net) - float(MAX_NET))
                 scale = max(0.0, float(target_short_sum) / float(denom))
-                for sym, tgt in out.items():
+                for _sym, tgt in out.items():
                     if str(tgt.get("side", "FLAT")).upper() == "SHORT":
                         tgt["weight"] = float(tgt.get("weight", 0.0) or 0.0) * float(scale)
                 info["net_scale_side"] = side_to_scale
@@ -342,8 +346,8 @@ def apply_portfolio_risk_gate(
             syms.add(str(s))
 
         for sym in syms:
-            cur = state.get(sym)
-            tgt = out.get(sym)
+            cur = (state or {}).get(sym)
+            tgt = (out or {}).get(sym)
             if not tgt:
                 continue
 
@@ -361,4 +365,88 @@ def apply_portfolio_risk_gate(
     info["turnover_post"] = float(_turnover(out, state or {}))
 
     _annotate(out, info)
+    return out, info
+
+
+def apply_execution_risk_governor(
+    con,
+    orders: List[Dict[str, Any]],
+    *,
+    broker: str,
+    mode: str,
+    equity_usd: Optional[float] = None,
+) -> Tuple[List[Dict[str, Any]], dict]:
+    """
+    Execution-time risk governor (institutional layer):
+    - global pause via risk_state key: execution_pause=1
+    - caps per-symbol max abs weight (EXEC_MAX_ABS_WEIGHT)
+    - caps per-symbol max abs delta weight (EXEC_MAX_ABS_DELTA_WEIGHT)
+    - caps max orders per pass (EXEC_MAX_ORDERS_PER_PASS)
+    """
+    broker = str(broker or "").strip().lower()
+    mode = str(mode or "").strip().lower()
+
+    # global pause switch (fail closed)
+    try:
+        from dev_core.risk_state import get_state
+
+        if str(get_state("execution_pause", "0") or "0").strip() == "1":
+            return [], {"ok": False, "status": "blocked_execution_pause", "broker": broker, "mode": mode}
+    except Exception:
+        return [], {"ok": False, "status": "blocked_risk_state_error", "broker": broker, "mode": mode}
+
+    # caps (env)
+    try:
+        max_abs_w = float(os.environ.get("EXEC_MAX_ABS_WEIGHT", "0.35"))
+        max_abs_dw = float(os.environ.get("EXEC_MAX_ABS_DELTA_WEIGHT", "0.15"))
+        max_n = int(os.environ.get("EXEC_MAX_ORDERS_PER_PASS", "50"))
+    except Exception:
+        max_abs_w, max_abs_dw, max_n = 0.35, 0.15, 50
+
+    out: List[Dict[str, Any]] = []
+    dropped = 0
+
+    for o in list(orders or [])[: int(max_n)]:
+        if not isinstance(o, dict):
+            continue
+        sym = str(o.get("symbol") or "").strip()
+        if not sym:
+            continue
+
+        # weight caps (defense in depth; upstream should already manage this)
+        to_w = o.get("to_weight")
+        try:
+            to_wf = float(to_w) if to_w is not None else 0.0
+        except Exception:
+            to_wf = 0.0
+        if abs(to_wf) > float(max_abs_w):
+            dropped += 1
+            continue
+
+        # delta-weight cap (if present)
+        dw = o.get("delta_weight")
+        if dw is not None:
+            try:
+                dwf = float(dw)
+                if abs(dwf) > float(max_abs_dw):
+                    dropped += 1
+                    continue
+            except Exception:
+                pass
+
+        out.append(o)
+
+    info = {
+        "ok": True,
+        "status": "governed",
+        "broker": broker,
+        "mode": mode,
+        "in_n": int(len(list(orders or []))),
+        "out_n": int(len(out)),
+        "dropped_n": int(dropped),
+        "equity_usd": (float(equity_usd) if equity_usd is not None else None),
+        "max_abs_weight": float(max_abs_w),
+        "max_abs_delta_weight": float(max_abs_dw),
+        "max_orders_per_pass": int(max_n),
+    }
     return out, info

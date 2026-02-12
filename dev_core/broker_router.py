@@ -246,3 +246,4 @@ def apply_new_portfolio_orders_router(
             continue
 
     return {"ok": False, "status": "all_brokers_failed", "failover_attempts": attempts}
+

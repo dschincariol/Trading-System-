@@ -13,7 +13,7 @@ Responsibilities:
 import json
 import math
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _now_ms() -> int:
@@ -180,3 +180,115 @@ def alpha_state(con, alert_id: int, now_ms: int = None) -> Dict[str, Any]:
         "alpha_remaining": float(rem),
         "meta": (meta if isinstance(meta, dict) else None),
     }
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def apply_alpha_lifecycle(
+    con,
+    portfolio_orders_id: Optional[int],
+    portfolio_ts_ms: int,
+    orders: List[Dict[str, Any]],
+    now_ts_ms: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Alpha Lifecycle Engine (ALE) — batch application.
+
+    Inputs:
+      - portfolio_ts_ms: timestamp of the portfolio intent batch (ms)
+      - orders: list of intents
+
+    Behavior:
+      - Computes age_ms from signal_ts_ms (if present) or from portfolio_ts_ms.
+      - Computes alpha_remaining using half-life and TTL (if present).
+      - Drops expired orders (alpha_remaining <= 0) and annotates survivors with:
+          alpha_age_ms, alpha_remaining, alpha_ttl_ms, alpha_half_life_ms, signal_ts_ms
+    """
+    now_ms = int(now_ts_ms) if now_ts_ms is not None else _now_ms()
+
+    kept: List[Dict[str, Any]] = []
+    dropped = 0
+    annotated = 0
+
+    for o in list(orders or []):
+        if not isinstance(o, dict):
+            continue
+
+        # prefer explicit signal_ts_ms; else use portfolio_ts_ms
+        try:
+            sig_ts = o.get("signal_ts_ms")
+            sig_ts = int(sig_ts) if sig_ts is not None else int(portfolio_ts_ms)
+        except Exception:
+            sig_ts = int(portfolio_ts_ms)
+
+        age_ms = max(0, int(now_ms) - int(sig_ts))
+
+        # pull knobs (optional)
+        try:
+            ttl_ms = int(o.get("alpha_ttl_ms") or 0)
+        except Exception:
+            ttl_ms = 0
+
+        try:
+            half_life_ms = int(o.get("alpha_half_life_ms") or 0)
+        except Exception:
+            half_life_ms = 0
+
+        # alpha_remaining
+        rem = 1.0
+        try:
+            if half_life_ms and half_life_ms > 0:
+                # exponential half-life decay
+                rem = float(0.5 ** (float(age_ms) / float(half_life_ms)))
+            else:
+                rem = 1.0
+        except Exception:
+            rem = 1.0
+
+        # TTL cap (hard expiry)
+        try:
+            if ttl_ms and ttl_ms > 0:
+                if age_ms >= ttl_ms:
+                    rem = 0.0
+                else:
+                    # optional linear cap inside ttl to make expiry visible
+                    rem = float(min(rem, max(0.0, 1.0 - (float(age_ms) / float(ttl_ms)))))
+        except Exception:
+            pass
+
+        if not (rem > 0.0):
+            dropped += 1
+            continue
+
+        # annotate (do not overwrite existing keys if upstream already set them)
+        if "alpha_age_ms" not in o:
+            o["alpha_age_ms"] = int(age_ms)
+        if "alpha_remaining" not in o:
+            o["alpha_remaining"] = float(rem)
+        if "alpha_ttl_ms" not in o and ttl_ms:
+            o["alpha_ttl_ms"] = int(ttl_ms)
+        if "alpha_half_life_ms" not in o and half_life_ms:
+            o["alpha_half_life_ms"] = int(half_life_ms)
+        if "signal_ts_ms" not in o:
+            o["signal_ts_ms"] = int(sig_ts)
+
+        # include batch context for downstream diagnostics
+        if portfolio_orders_id is not None and "portfolio_orders_id" not in o:
+            o["portfolio_orders_id"] = int(portfolio_orders_id)
+
+        kept.append(o)
+        annotated += 1
+
+    meta = {
+        "ok": True,
+        "portfolio_orders_id": (int(portfolio_orders_id) if portfolio_orders_id is not None else None),
+        "portfolio_ts_ms": int(portfolio_ts_ms),
+        "now_ms": int(now_ms),
+        "in_n": int(len(list(orders or []))),
+        "out_n": int(len(kept)),
+        "dropped_expired_n": int(dropped),
+        "annotated_n": int(annotated),
+    }
+    return kept, meta
