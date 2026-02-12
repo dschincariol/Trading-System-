@@ -69,7 +69,8 @@ PORTFOLIO_SOCIAL_MANIP_BLOCK_TH = float(os.environ.get("PORTFOLIO_SOCIAL_MANIP_B
 PORTFOLIO_SOCIAL_ATTEN_SHOCK_TH = float(os.environ.get("PORTFOLIO_SOCIAL_ATTEN_SHOCK_TH", "0.80"))
 PORTFOLIO_SOCIAL_SHOCK_FACTOR = float(os.environ.get("PORTFOLIO_SOCIAL_SHOCK_FACTOR", "0.60"))
 
-# Optional per-symbol "vol-of-vol" compression (uses price-only proxy)PORTFOLIO_USE_VOV_GATE = os.environ.get("PORTFOLIO_USE_VOV_GATE", "0") == "1"
+# Optional per-symbol "vol-of-vol" compression (uses price-only proxy)
+PORTFOLIO_USE_VOV_GATE = os.environ.get("PORTFOLIO_USE_VOV_GATE", "0") == "1"
 PORTFOLIO_VOV_ALPHA = float(os.environ.get("PORTFOLIO_VOV_ALPHA", "6.0"))  # strength of penalty
 PORTFOLIO_VOV_FLOOR = float(os.environ.get("PORTFOLIO_VOV_FLOOR", "0.0"))
 PORTFOLIO_VOV_CEIL = float(os.environ.get("PORTFOLIO_VOV_CEIL", "0.020"))
@@ -373,21 +374,6 @@ def _exec_realism_factor(con, symbol: str, now_ms: int) -> Tuple[float, Dict[str
         f = 1.0
     f = float(max(0.0, min(1.0, f)))
     return f, meta
-
-def _last_price_age_s(con, symbol: str, now_ms: int) -> Optional[float]:
-    try:
-        r = con.execute(
-            "SELECT ts_ms FROM prices WHERE symbol=? ORDER BY ts_ms DESC LIMIT 1",
-            (str(symbol),),
-        ).fetchone()
-        if not r or r[0] is None:
-            return None
-        age_s = (int(now_ms) - int(r[0])) / 1000.0
-        if not math.isfinite(age_s):
-            return None
-        return float(max(0.0, age_s))
-    except Exception:
-        return None
 
 def _execution_realism_factor(con, symbol: str, now_ms: int) -> Tuple[float, Dict[str, float]]:
     """
@@ -763,25 +749,25 @@ def _apply_impact_aware_sizing(con, desired: Dict[str, Dict]) -> Dict[str, Dict]
         except Exception:
             pass
 
-        # ---            -- ------------------------------------------------------
-        # Execution realism overlay (opt-in): staleness + stress score
-        # ---            -- ------------------------------------------------------
+        # Execution realism overlay (opt-in)
         if PORTFOLIO_USE_EXEC_REALISM:
-            for sym in list(desired.keys()):
+            now_ms = _now_ms()
+            for sym2 in list(desired.keys()):
                 try:
-                    ef, meta = _exec_realism_factor(con, sym, int(now_ms))
+                    ef, meta = _exec_realism_factor(con, sym2, int(now_ms))
                 except Exception:
                     ef, meta = 1.0, {"staleness_sec": 0.0, "stress_score": 0.0}
 
-                desired[sym]["weight"] = float(desired[sym].get("weight", 0.0)) * float(ef)
-                desired[sym].setdefault("reason", {})
-                desired[sym]["reason"]["exec_realism_factor"] = float(ef)
-                desired[sym]["reason"]["exec_staleness_sec"] = float(meta.get("staleness_sec", 0.0))
-                desired[sym]["reason"]["exec_stress_score"] = float(meta.get("stress_score", 0.0))
+                desired[sym2]["weight"] = float(desired[sym2].get("weight", 0.0)) * float(ef)
+                desired[sym2].setdefault("reason", {})
+                desired[sym2]["reason"]["exec_realism_factor"] = float(ef)
+                desired[sym2]["reason"]["exec_staleness_sec"] = float(meta.get("staleness_sec", 0.0))
+                desired[sym2]["reason"]["exec_stress_score"] = float(meta.get("stress_score", 0.0))
 
-        # renormalize gross after size policy scaling
+        # renormalize gross after sizing
         gross3 = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
 
+    gross = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
     if gross > float(PORTFOLIO_GROSS_CAP) and gross > 1e-9:
         sc = float(PORTFOLIO_GROSS_CAP) / float(gross)
         for sym in list(desired.keys()):
@@ -1254,7 +1240,7 @@ def compute_rebalance() -> Dict:
                     scale_s = float(PORTFOLIO_GROSS_CAP) / float(gross_s)
                     for sym in list(desired.keys()):
                         desired[sym]["weight"] = float(desired[sym]["weight"]) * float(scale_s)
-       except Exception:
+        except Exception:
             pass
 
         # ---            -- ------------------------------------------------------
@@ -1306,7 +1292,7 @@ def compute_rebalance() -> Dict:
         # ---            -- ------------------------------------------------------
         # C) VOL-OF-VOL GATE (opt-in): per-symbol compression in unstable regimes
         # Uses price-only proxy from dev_core.tech_indicators (if present).
-        # ---------------------------------------------------------        try:
+        try:
             if PORTFOLIO_USE_VOV_GATE and desired:
                 try:
                     from dev_core.tech_indicators import compute_tech_features
@@ -1406,19 +1392,39 @@ def compute_rebalance() -> Dict:
                 desired[sym]["weight"] = float(desired[sym]["weight"]) * float(scale3)
 
         # ---            -- ------------------------------------------------------
-        # Phase 6: REGIME-AWARE SIZE THROTTLE (LOW/MID/HIGH)
+        # Phase 6: REGIME-ADAPTIVE CAPITAL SCALING (base * confidence * VIX * drawdown)
         # ---            -- ------------------------------------------------------
         try:
-            from dev_core.regime_size import regime_multiplier
-            reg, mult = regime_multiplier()
+            from dev_core.regime_size import regime_capital_scale
+
+            _rs = regime_capital_scale(con=con, anchor=str(PORTFOLIO_REGIME_ANCHOR))
+            mult = float((_rs or {}).get("final_mult", 1.0))
+
+            # persist last scaling decision (auditability)
+            try:
+                _put_meta(
+                    con,
+                    "last_regime_scaling",
+                    json.dumps(_rs or {}, separators=(",", ":"), sort_keys=True),
+                )
+            except Exception:
+                pass
+
             if mult != 1.0:
                 for sym in list(desired.keys()):
                     try:
                         desired[sym]["weight"] = float(desired[sym].get("weight", 0.0) or 0.0) * float(mult)
                         desired[sym].setdefault("reason", {})
-                        desired[sym]["reason"]["regime_anchor"] = str(PORTFOLIO_REGIME_ANCHOR)
-                        desired[sym]["reason"]["regime"] = str(reg)
-                        desired[sym]["reason"]["regime_mult"] = float(mult)
+                        desired[sym]["reason"]["regime_anchor"] = str((_rs or {}).get("anchor") or str(PORTFOLIO_REGIME_ANCHOR))
+                        desired[sym]["reason"]["regime"] = str((_rs or {}).get("regime") or "")
+                        desired[sym]["reason"]["regime_base_mult"] = float((_rs or {}).get("base_mult", 1.0))
+                        desired[sym]["reason"]["regime_conf"] = float((_rs or {}).get("conf", 1.0))
+                        desired[sym]["reason"]["regime_conf_mult"] = float((_rs or {}).get("conf_mult", 1.0))
+                        desired[sym]["reason"]["regime_vix_z"] = (_rs or {}).get("vix_z", None)
+                        desired[sym]["reason"]["regime_vix_mult"] = float((_rs or {}).get("vix_mult", 1.0))
+                        desired[sym]["reason"]["regime_dd"] = (_rs or {}).get("dd", None)
+                        desired[sym]["reason"]["regime_dd_mult"] = float((_rs or {}).get("dd_mult", 1.0))
+                        desired[sym]["reason"]["regime_final_mult"] = float((_rs or {}).get("final_mult", 1.0))
                     except Exception:
                         pass
 
@@ -1472,7 +1478,10 @@ def compute_rebalance() -> Dict:
             pass
 
         # perform rebalance under one transaction
-        con.execute("BEGIN IMMEDIATE;")
+        try:
+            con.execute("BEGIN IMMEDIATE;")
+        except Exception:
+            pass
 
         orders_n = 0
         changed = []

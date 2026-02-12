@@ -30,7 +30,6 @@ from dev_core.execution_ledger import log_submit, log_fill
 from dev_core.storage import connect
 from dev_core.kill_switch import execution_allowed
 from dev_core.risk_state import get_state, set_state
-
 from dev_core.execution_microstructure import record_open_order
 
 
@@ -95,15 +94,26 @@ def list_orders_after(after_ts_ms: int, status: str = "all", limit: int = 500) -
 
 
 def _latest_order_row(con) -> Optional[Tuple[int, int, list]]:
-    row = con.execute(
-        "SELECT id, ts_ms, orders_json FROM portfolio_orders ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    if not row:
+    """
+    Back-compat shim (orders_json table no longer required).
+    """
+    from dev_core.portfolio_execution_intents import load_latest_execution_intents
+
+    b = load_latest_execution_intents(con)
+    orders = list(b.get("intents") or [])
+    if not orders:
         return None
-    oid = int(row[0])
-    ts_ms = int(row[1] or 0)
-    orders = json.loads(row[2] or "[]") if row[2] else []
-    return oid, ts_ms, orders
+    bid = b.get("batch_id")
+    bts = b.get("batch_ts_ms")
+    try:
+        bid_i = int(bid) if bid is not None else None
+    except Exception:
+        bid_i = None
+    try:
+        bts_i = int(bts) if bts is not None else int(time.time() * 1000)
+    except Exception:
+        bts_i = int(time.time() * 1000)
+    return bid_i if bid_i is not None else 0, bts_i, orders
 
 
 def _price_at_or_before(con, symbol: str, ts_ms: int) -> Optional[float]:
@@ -216,8 +226,12 @@ def apply_latest_portfolio_orders_live(
     dry_run: bool = False,
     override_orders: List[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if not KEY_ID or not SECRET:
+        return {"ok": False, "status": "missing_credentials"}
+
     con = connect()
     try:
+
         if override_orders is not None:
             order_id = None
             ts_ms = int(time.time() * 1000)
@@ -225,9 +239,17 @@ def apply_latest_portfolio_orders_live(
         else:
             latest = _latest_order_row(con)
             if not latest:
-                return {"ok": True, "status": "no_orders"}
+                return {"ok": True, "status": "no_orders", "broker": "ibkr"}
             order_id, ts_ms, orders = latest
 
+        # -----------------------------
+        # ALE/EPE integration note:
+        # - EPE should already have TTL-filtered these intents before routing.
+        # - broker_sim still enforces per-order TTL locally (defense in depth).
+        # -----------------------------
+        ale_meta = {"ok": True, "note": "ale_applied_upstream_or_ttl_guard_local"}
+
+        # idempotency guard via risk_state (only for real portfolio_orders rows)
         if order_id is not None:
             last_applied = get_state("alpaca_last_portfolio_orders_id", "0")
             try:
@@ -246,31 +268,24 @@ def apply_latest_portfolio_orders_live(
             return {"ok": False, "status": "nonpositive_equity", "equity": eq, "order_id": order_id}
 
         pos = _alpaca_pos_map(get_positions())
-        target_pos = _load_portfolio_state_positions(con)
 
         if dry_run:
-            return {"ok": True, "status": "dry_run_preview", "order_id": order_id, "positions": pos, "orders": orders}
+            return {
+                "ok": True,
+                "status": "dry_run_preview",
+                "order_id": int(order_id),
+                "positions": pos,
+                "orders": orders,
+                "ale": ale_meta,
+                "ale": ale_meta,
+            }
 
         submitted = []
         n = 0
 
-        for sym, tgt_qty in target_pos.items():
-            cur_qty = float(pos.get(sym, 0.0))
-            delta = float(tgt_qty) - float(cur_qty)
-            if abs(delta) < 1e-6:
-                continue
-
-            allow_sym, _, _ = execution_allowed(con=con, symbol=sym, regime=None)
-            if not allow_sym:
-                continue
-
-            client_oid = f"recon_{order_id}_{sym}"
-            res = _submit_market_order(symbol=sym, qty=delta, client_oid=client_oid)
-            submitted.append({"symbol": sym, "delta_qty": delta, "client_order_id": client_oid, "resp": res})
-            n += 1
-            time.sleep(max(0.0, float(SLEEP_BETWEEN_ORDERS_S)))
 
         for o in (orders or [])[: int(MAX_ORDERS_PER_PASS)]:
+
             symbol = str(o.get("symbol") or "").strip().upper()
             if not symbol:
                 continue
@@ -348,6 +363,7 @@ def apply_latest_portfolio_orders_live(
                         pass
 
             else:
+                # MARKET fallback
                 res = _submit_market_order(symbol=symbol, qty=delta, client_oid=client_oid)
 
                 try:
@@ -362,7 +378,7 @@ def apply_latest_portfolio_orders_live(
                         broker_order_id=broker_order_id,
                         portfolio_orders_id=int(order_id) if order_id is not None else None,
                         source_alert_id=int(o.get("source_alert_id")) if o.get("source_alert_id") is not None else None,
-                        extra={"order_type": "MARKET", "aggressiveness": aggressiveness, "equity": float(eq)},
+                        extra={"order_type": "MARKET", "equity": float(eq)},
                     )
                 except Exception:
                     pass
@@ -372,9 +388,19 @@ def apply_latest_portfolio_orders_live(
             time.sleep(max(0.0, float(SLEEP_BETWEEN_ORDERS_S)))
 
         if order_id is not None:
-            set_state("alpaca_last_portfolio_orders_id", str(int(order_id)))
+            try:
+                set_state("alpaca_last_portfolio_orders_id", str(int(order_id)))
+            except Exception:
+                pass
 
-        return {"ok": True, "status": "applied", "order_id": order_id, "submitted_n": int(n), "submitted": submitted}
+        return {
+            "ok": True,
+            "broker": "alpaca",
+            "status": "applied",
+            "order_id": order_id,
+            "submitted_n": int(n),
+            "submitted": submitted,
+        }
 
     finally:
         con.close()

@@ -1,26 +1,48 @@
-# execution_policy_engine.py
 """
-Execution Policy Engine (EPE)
+Execution Policy Engine (Unified)
 
-Sits between signal generation (portfolio_orders) and broker routing.
-
-Responsibilities:
-- Enforce alpha TTL (hard stop) and alpha half-life decay (aggressiveness changes with age)
-- Decide order type / aggressiveness
-- Slice orders
-- Emit full audit trail per trade decision
-- Integrate with existing kill-switch / degradation logic (fail-soft: returns [] when blocked)
+Combines:
+- Legacy slicing + kill switch enforcement
+- TTL hard stop
+- Half-life decay aggressiveness
+- New alpha_remaining model
+- Full structured audit trail
+- Broker-sim overrides
 """
 
-import time
 import json
-from typing import List, Dict, Any
+import os
+import time
+import math
+from typing import Any, Dict, List, Optional, Tuple
 
 from dev_core.storage import connect
 from dev_core.kill_switch import execution_allowed
 
 
-DEFAULT_TTL_MS = 5 * 60 * 1000  # 5 minutes
+# ============================================================
+# Defaults / knobs
+# ============================================================
+
+DEFAULT_TTL_MS = int(os.environ.get("EPE_DEFAULT_TTL_MS", str(5 * 60 * 1000)))
+DEFAULT_HALF_LIFE_MS = int(os.environ.get("EPE_DEFAULT_HALF_LIFE_MS", str(90 * 1000)))
+
+STRICT_SIGNAL_TS = os.environ.get("EPE_STRICT_SIGNAL_TS", "1") == "1"
+
+PASSIVE_MIN_ALPHA = float(os.environ.get("EPE_PASSIVE_MIN_ALPHA", "0.70"))
+NEUTRAL_MIN_ALPHA = float(os.environ.get("EPE_NEUTRAL_MIN_ALPHA", "0.40"))
+
+SIM_LAT_MS_PASSIVE = int(os.environ.get("EPE_SIM_LAT_MS_PASSIVE", "220"))
+SIM_LAT_MS_NEUTRAL = int(os.environ.get("EPE_SIM_LAT_MS_NEUTRAL", "140"))
+SIM_LAT_MS_AGGRESSIVE = int(os.environ.get("EPE_SIM_LAT_MS_AGGRESSIVE", "80"))
+
+SIM_CHUNK_PCT_PASSIVE = float(os.environ.get("EPE_SIM_CHUNK_PCT_PASSIVE", "0.22"))
+SIM_CHUNK_PCT_NEUTRAL = float(os.environ.get("EPE_SIM_CHUNK_PCT_NEUTRAL", "0.33"))
+SIM_CHUNK_PCT_AGGRESSIVE = float(os.environ.get("EPE_SIM_CHUNK_PCT_AGGRESSIVE", "0.45"))
+
+SIM_EXTRA_SLIP_BPS_PASSIVE = float(os.environ.get("EPE_SIM_EXTRA_SLIP_BPS_PASSIVE", "0.0"))
+SIM_EXTRA_SLIP_BPS_NEUTRAL = float(os.environ.get("EPE_SIM_EXTRA_SLIP_BPS_NEUTRAL", "0.5"))
+SIM_EXTRA_SLIP_BPS_AGGRESSIVE = float(os.environ.get("EPE_SIM_EXTRA_SLIP_BPS_AGGRESSIVE", "1.5"))
 
 
 def _now_ms() -> int:
@@ -28,7 +50,7 @@ def _now_ms() -> int:
 
 
 def _ensure_tables(con) -> None:
-    con.execute(
+    con.executescript(
         """
         CREATE TABLE IF NOT EXISTS execution_policy_audit (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,35 +64,42 @@ def _ensure_tables(con) -> None:
           volatility REAL,
           source_order_id INTEGER,
           policy_json TEXT NOT NULL
-        )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_epe_audit_ts ON execution_policy_audit(ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_epe_audit_sym ON execution_policy_audit(symbol);
         """
     )
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_epe_audit_ts ON execution_policy_audit(ts_ms)"
-    )
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_epe_audit_sym ON execution_policy_audit(symbol)"
-    )
+
+
+def _alpha_remaining(age_ms: int, half_life_ms: int, ttl_ms: int) -> float:
+    if ttl_ms <= 0:
+        return 0.0
+    if age_ms >= ttl_ms:
+        return 0.0
+    hl = max(1, half_life_ms)
+    rem = math.pow(0.5, float(age_ms) / float(hl))
+    ttl_frac = max(0.0, 1.0 - (float(age_ms) / float(ttl_ms)))
+    return max(0.0, min(1.0, rem * (0.5 + 0.5 * ttl_frac)))
+
+
+def _decision_from_alpha(alpha_rem: float):
+    if alpha_rem >= PASSIVE_MIN_ALPHA:
+        return "LIMIT", "PASSIVE", SIM_LAT_MS_PASSIVE, SIM_CHUNK_PCT_PASSIVE, SIM_EXTRA_SLIP_BPS_PASSIVE
+    if alpha_rem >= NEUTRAL_MIN_ALPHA:
+        return "LIMIT", "NEUTRAL", SIM_LAT_MS_NEUTRAL, SIM_CHUNK_PCT_NEUTRAL, SIM_EXTRA_SLIP_BPS_NEUTRAL
+    return "MARKET", "AGGRESSIVE", SIM_LAT_MS_AGGRESSIVE, SIM_CHUNK_PCT_AGGRESSIVE, SIM_EXTRA_SLIP_BPS_AGGRESSIVE
 
 
 def apply_execution_policy(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Input: raw portfolio orders (dicts)
-    Output: execution-shaped orders (dicts)
 
-    Contract:
-    - MUST NOT execute after TTL expiry (hard drop)
-    - MUST be auditable (execution_policy_audit row per input order)
-    - MUST NOT embed prediction logic (uses only order metadata)
-    """
     shaped: List[Dict[str, Any]] = []
-
     con = connect()
+
     try:
         _ensure_tables(con)
 
-        # WHERE TO PUT THIS (you asked):
-        # right after DB connect / ensure tables, before shaping loop
+        # Kill switch enforcement (fail-soft)
         allow, ks_reason, ks_meta = execution_allowed(con=con, symbol=None, regime=None)
         if not allow:
             return []
@@ -85,25 +114,18 @@ def apply_execution_policy(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             ttl_ms = int(o.get("alpha_ttl_ms") or DEFAULT_TTL_MS)
 
             if signal_ts <= 0:
-                continue
+                if STRICT_SIGNAL_TS:
+                    continue
 
-            age_ms = int(now_ms - signal_ts)
+            age_ms = now_ms - signal_ts if signal_ts > 0 else 0
             if age_ms > ttl_ms:
-                # hard stop: never execute expired alpha
                 continue
 
-            # Half-life style decay mapped onto aggressiveness by age_ratio
-            age_ratio = float(age_ms) / float(ttl_ms) if ttl_ms > 0 else 1.0
+            half_life_ms = int(o.get("alpha_half_life_ms") or DEFAULT_HALF_LIFE_MS)
+            alpha_rem = _alpha_remaining(age_ms, half_life_ms, ttl_ms)
 
-            if age_ratio < 0.33:
-                order_type = "LIMIT"
-                aggressiveness = "PASSIVE"
-            elif age_ratio < 0.66:
-                order_type = "LIMIT"
-                aggressiveness = "NEUTRAL"
-            else:
-                order_type = "MARKET"
-                aggressiveness = "AGGRESSIVE"
+            order_type, aggressiveness, sim_lat_ms, sim_chunk_pct, sim_extra_slip = \
+                _decision_from_alpha(alpha_rem)
 
             qty = float(o.get("qty") or 0.0)
             if qty == 0.0:
@@ -114,19 +136,16 @@ def apply_execution_policy(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                 continue
 
             side = str(o.get("side") or "").upper().strip()
-
             volatility = float(o.get("volatility") or 0.0)
-            if volatility > 0.03:
-                slice_pct = 0.15
-            else:
-                slice_pct = 0.25
 
-            slice_qty = abs(qty) * float(slice_pct)
+            # Volatility-based slicing
+            slice_pct = 0.15 if volatility > 0.03 else 0.25
+            slice_qty = abs(qty) * slice_pct
             if slice_qty <= 0.0:
                 slice_qty = abs(qty)
 
             slices = max(1, int(abs(qty) // slice_qty))
-            slices = max(1, min(25, slices))  # hard cap to prevent runaway
+            slices = max(1, min(25, slices))
 
             source_order_id = o.get("source_order_id")
             try:
@@ -134,6 +153,7 @@ def apply_execution_policy(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             except Exception:
                 source_order_id_i = None
 
+            # Per-slice expansion
             for _ in range(slices):
                 shaped.append(
                     {
@@ -143,10 +163,16 @@ def apply_execution_policy(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                         "slice_qty": slice_qty,
                         "cancel_replace": True,
                         "max_reprice_attempts": 3,
+                        "epe_alpha_remaining": alpha_rem,
+                        "epe_broker_sim_overrides": {
+                            "latency_ms": sim_lat_ms,
+                            "chunk_pct": sim_chunk_pct,
+                            "extra_slippage_bps": sim_extra_slip,
+                        },
                     }
                 )
 
-            # audit per input order (not per slice)
+            # Audit per original order
             con.execute(
                 """
                 INSERT INTO execution_policy_audit(
@@ -166,14 +192,12 @@ def apply_execution_policy(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                     source_order_id_i,
                     json.dumps(
                         {
-                            "age_ratio": age_ratio,
+                            "alpha_remaining": alpha_rem,
+                            "order_type": order_type,
+                            "aggressiveness": aggressiveness,
                             "slice_pct": slice_pct,
                             "slice_qty": slice_qty,
                             "slices": slices,
-                            "order_type": order_type,
-                            "aggressiveness": aggressiveness,
-                            "cancel_replace": True,
-                            "max_reprice_attempts": 3,
                             "kill_switch_reason": ks_reason,
                             "kill_switch_meta": ks_meta,
                         },

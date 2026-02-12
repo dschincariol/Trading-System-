@@ -409,21 +409,28 @@ def apply_new_portfolio_orders(
         now_ms = _now_ms()
 
         if override_orders is not None:
-            order_id = int(override_order_id or 0)
-            ts_ms = int(override_ts_ms or now_ms)
+            order_id = int(override_order_id) if override_order_id is not None else None
+            ts_ms = int(override_ts_ms) if override_ts_ms is not None else int(now_ms)
             orders = list(override_orders or [])
         else:
+            # Read the latest *row-per-order* portfolio_orders batch (no orders_json dependency)
+            from dev_core.portfolio_execution_intents import load_latest_execution_intents
 
-            row = con.execute(
-                "SELECT id, ts_ms, orders_json FROM portfolio_orders ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if not row:
+            batch = load_latest_execution_intents(con)
+            orders = list(batch.get("intents") or [])
+            order_id = batch.get("batch_id")
+            ts_ms = int(batch.get("batch_ts_ms") or now_ms)
+
+            if not orders:
                 acct = _mark_to_market(con, now_ms)
                 return {"ok": True, "status": "no_orders", "account": acct}
 
-            order_id = int(row[0])
-            ts_ms = int(row[1] or now_ms)
-            orders = json.loads(row[2] or "[]") if row[2] else []
+        # -----------------------------
+        # ALE/EPE integration note:
+        # - EPE should already have TTL-filtered these intents before routing.
+        # - broker_sim still enforces per-order TTL locally (defense in depth).
+        # -----------------------------
+        ale_meta = {"ok": True, "note": "ale_applied_upstream_or_ttl_guard_local"}
 
         # -----------------------------
         # DRY RUN: preview only, no state mutation
@@ -434,17 +441,22 @@ def apply_new_portfolio_orders(
                 "status": "dry_run_preview",
                 "order_id": (int(order_id) if order_id is not None else None),
                 "orders": orders,
+                "ale": ale_meta,
                 "account": _read_account(con),
             }
 
-        # idempotency guard: only apply each portfolio_orders row once
+        # execute orders (already shaped upstream by EPE; still TTL-guarded per-order below)
+        orders = list(orders or [])
+
+
+        # idempotency guard: only apply each batch once (skip when order_id is None)
         if order_id is not None:
             last_applied = _get_meta(con, "last_portfolio_orders_id")
             if last_applied is not None:
                 try:
                     if int(last_applied) >= int(order_id):
                         acct = _mark_to_market(con, now_ms)
-                        return {"ok": True, "status": "already_applied", "order_id": order_id, "account": acct}
+                        return {"ok": True, "status": "already_applied", "order_id": int(order_id), "account": acct}
                 except Exception:
                     pass
 
@@ -467,6 +479,7 @@ def apply_new_portfolio_orders(
             }
 
         max_notional_budget = max(0.0, float(equity) * float(BROKER_MAX_TRADE_PCT_EQUITY))
+        # default chunk cap (may be overridden per-order by EPE)
         chunk_cap_notional = max(1e-9, float(max_notional_budget) * float(BROKER_CHUNK_PCT or 0.33))
 
         wrote_fills = False
@@ -484,7 +497,7 @@ def apply_new_portfolio_orders(
                 VALUES(?,?,?,?,?,?,?)
                 """,
                 (
-                    order_id,
+                    int(o.get("source_order_id") or 0),
                     symbol,
                     "PENDING",
                     int(ts_ms),
@@ -584,7 +597,9 @@ def apply_new_portfolio_orders(
             attempts_left = int(max(0, max_reprice_attempts))
             order_type_eff = str(order_type)
 
+
             to_side = str(o.get("to_side") or "FLAT").upper()
+
             to_w = _safe_f(o.get("to_weight"), 0.0)
             if not _is_finite(to_w):
                 continue
@@ -623,7 +638,7 @@ def apply_new_portfolio_orders(
                         SET state=?, updated_ts_ms=?
                         WHERE source_order_id=? AND symbol=? AND state='PENDING'
                         """,
-                        ("EXPIRED", _now_ms(), order_id, symbol),
+                        ("EXPIRED", _now_ms(), int(o.get("source_order_id") or 0), symbol),
                     )
                     break
                 if max_notional_budget <= 0.0:
@@ -633,6 +648,7 @@ def apply_new_portfolio_orders(
 
                 # Use price at this chunk's simulated fill time (latency-aware), not the parent ts_ms
                 fill_ts = int(int(ts_ms) + (int(chunk_idx) * int(local_latency_ms)))
+
                 px_mid_chunk, _ = _get_price_at_or_before(con, symbol, int(fill_ts))
                 px_mid_use = px_mid_chunk if (px_mid_chunk is not None and float(px_mid_chunk) > 0.0) else px_mid
 
@@ -863,9 +879,9 @@ def apply_new_portfolio_orders(
                             float(px_exec),
                             float(BROKER_SPREAD_BPS),
                             float(BROKER_FEE_BPS),
-                            float(BROKER_SLIPPAGE_BPS),
+                            float(local_slip_bps),
                             float(BROKER_SPREAD_BPS),
-                            float(BROKER_FEE_BPS + BROKER_SLIPPAGE_BPS + BROKER_SPREAD_BPS),
+                            float(BROKER_FEE_BPS + float(local_slip_bps) + BROKER_SPREAD_BPS),
                             json.dumps(explain),
                         ),
                     )
@@ -878,7 +894,7 @@ def apply_new_portfolio_orders(
                     SET state=?, updated_ts_ms=?
                     WHERE source_order_id=? AND symbol=? AND state='PENDING'
                     """,
-                    ("FILLED", _now_ms(), order_id, symbol),
+                    ("FILLED", _now_ms(), int(o.get("source_order_id") or 0), symbol),
                 )
 
                 wrote_fills = True
@@ -917,6 +933,7 @@ def apply_new_portfolio_orders(
 
         return {
             "ok": True,
+            "broker": "sim",
             "status": "applied" if wrote_fills else "no_changes",
             "order_id": (int(order_id) if order_id is not None else None),
             "fills_written": int(fills_written),

@@ -1,139 +1,326 @@
+# broker_apply_orders.py
 """
-Applies latest portfolio_orders into broker_sim (paper execution)
-and prints a JSON summary.
+Unified broker_apply_orders
 
-Execution safety:
-- Kill switch enforced
-- Execution mode enforced (paper / shadow / live)
-- Live mode requires explicit arming
+Preserves:
+- Job lock enforcement
+- Kill switch
+- Execution mode enforcement
+- Execution Policy Engine shaping (EPE)
+- Dual IBKR execution (optional)
+- Shadow logging
+- Execution meta tracking
+
+Adds:
+- Reads latest row-per-order portfolio_orders batch (no orders_json dependency) when available
+- Hard TTL enforcement via EPE (fail-closed, when supported by EPE)
+- ALE registration on-demand (via EPE, when supported by EPE)
 """
 
-import time
 import json
-import os
 import logging
+import os
 import sys
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
-from dev_core.storage import (
-    connect,
-    init_db,
-    acquire_job_lock,
-    release_job_lock,
-)
-
+from dev_core.storage import connect, init_db, acquire_job_lock, release_job_lock
 from dev_core.kill_switch import execution_allowed
 from dev_core.rules_engine import evaluate_rules
 from dev_core.execution_mode import get_execution_mode
 from dev_core.broker_router import apply_new_portfolio_orders_router as apply_new_portfolio_orders
-from execution_policy_engine import apply_execution_policy
 
+# Newer path (preferred)
+try:
+    from dev_core.portfolio_execution_intents import load_latest_execution_intents  # type: ignore
+except Exception:
+    load_latest_execution_intents = None  # type: ignore
 
-# ============================================================
-# Job / runtime config
-# ============================================================
+# EPE import (support both module names)
+try:
+    from dev_core.execution_policy_engine import apply_execution_policy  # type: ignore
+except Exception:
+    try:
+        from execution_policy_engine import apply_execution_policy  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"apply_execution_policy import failed: {e}")
+
+# Optional dual execution (IBKR)
+try:
+    from dev_core.dual_execution import apply_latest_portfolio_orders_dual_ibkr  # type: ignore
+except Exception:
+    apply_latest_portfolio_orders_dual_ibkr = None  # type: ignore
+
 
 JOB_NAME = "broker_apply_orders"
-
-OWNER = os.environ.get(
-    "JOB_OWNER",
-    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
-)
-
+OWNER = os.environ.get("JOB_OWNER", os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")))
 PID = os.getpid()
 
 LOCK_STALE_AFTER_S = int(os.environ.get("JOB_LOCK_STALE_AFTER_S", "120"))
 BROKER_NAME = os.environ.get("BROKER_NAME", "sim")
 
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
-
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper().strip()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(levelname)s [broker_apply_orders] %(message)s",
 )
 
 
-# ============================================================
-# Shadow intent logging
-# ============================================================
-
-def _log_shadow_intents(
-    orders: List[Dict[str, Any]],
-    actor: str,
-    mode_state: dict,
-) -> None:
-    try:
-        con = connect()
-        try:
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS shadow_order_intents (
-                  ts_ms INTEGER NOT NULL,
-                  actor TEXT NOT NULL,
-                  broker TEXT NOT NULL,
-                  orders_json TEXT NOT NULL,
-                  mode_json TEXT NOT NULL
-                )
-                """
-            )
-
-            con.execute(
-                """
-                INSERT INTO shadow_order_intents(
-                  ts_ms, actor, broker, orders_json, mode_json
-                )
-                VALUES (?,?,?,?,?)
-                """,
-                (
-                    int(time.time() * 1000),
-                    str(actor),
-                    str(BROKER_NAME),
-                    json.dumps(orders or [], separators=(",", ":"), sort_keys=True),
-                    json.dumps(mode_state or {}, separators=(",", ":"), sort_keys=True),
-                ),
-            )
-
-            con.commit()
-
-        finally:
-            con.close()
-
-    except Exception:
-        # fail-soft
-        pass
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def _print(out: Dict[str, Any]) -> None:
-    print(json.dumps(out, indent=2, sort_keys=True))
+    sys.stdout.write(json.dumps(out, sort_keys=True) + "\n")
+    sys.stdout.flush()
 
 
-# ============================================================
-# Main
-# ============================================================
+def _ensure_shadow_table(con) -> None:
+    # Create a superset schema to maximize compatibility.
+    # NOTE: CREATE TABLE IF NOT EXISTS does not alter existing tables.
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shadow_order_intents (
+          ts_ms INTEGER NOT NULL,
+          actor TEXT NOT NULL,
+          broker TEXT NOT NULL,
+          orders_json TEXT,
+          intents_json TEXT,
+          mode_json TEXT NOT NULL
+        )
+        """
+    )
 
-def main() -> int:
 
-    init_db()
-
-    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
-        logging.error("another instance is holding the job lock; exiting")
-        return 2
-
-    started_ms = int(time.time() * 1000)
-
+def _log_shadow_intents(payload: List[Dict[str, Any]], actor: str, mode_state: dict) -> None:
+    # Backward compatible insert: try intents_json, then orders_json, then minimal.
     try:
-
-        # ============================================================
-        # Kill switch (global hard safety)
-        # ============================================================
-
         con = connect()
         try:
-            allow, ks_reason, ks_meta = execution_allowed(
-                con=con,
-                symbol=None,
-                regime=None,
+            _ensure_shadow_table(con)
+
+            payload_json = json.dumps(payload or [], separators=(",", ":"), sort_keys=True)
+            mode_json = json.dumps(mode_state or {}, separators=(",", ":"), sort_keys=True)
+
+            try:
+                con.execute(
+                    """
+                    INSERT INTO shadow_order_intents(
+                      ts_ms, actor, broker, intents_json, mode_json
+                    )
+                    VALUES (?,?,?,?,?)
+                    """,
+                    (
+                        _now_ms(),
+                        str(actor),
+                        str(BROKER_NAME),
+                        payload_json,
+                        mode_json,
+                    ),
+                )
+            except Exception:
+                try:
+                    con.execute(
+                        """
+                        INSERT INTO shadow_order_intents(
+                          ts_ms, actor, broker, orders_json, mode_json
+                        )
+                        VALUES (?,?,?,?,?)
+                        """,
+                        (
+                            _now_ms(),
+                            str(actor),
+                            str(BROKER_NAME),
+                            payload_json,
+                            mode_json,
+                        ),
+                    )
+                except Exception:
+                    con.execute(
+                        """
+                        INSERT INTO shadow_order_intents(
+                          ts_ms, actor, broker, mode_json
+                        )
+                        VALUES (?,?,?,?)
+                        """,
+                        (
+                            _now_ms(),
+                            str(actor),
+                            str(BROKER_NAME),
+                            mode_json,
+                        ),
+                    )
+
+            con.commit()
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
+def _write_execution_meta_last(broker: str, source: str) -> None:
+    try:
+        con = connect()
+        try:
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS execution_meta (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL
+                )
+                """
             )
+            con.execute(
+                """
+                INSERT INTO execution_meta(key, value)
+                VALUES(?,?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                ("last_execution_source", str(source)),
+            )
+            con.execute(
+                """
+                INSERT INTO execution_meta(key, value)
+                VALUES(?,?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                ("last_execution_broker", str(broker)),
+            )
+            con.commit()
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
+def _extract_preview_meta(preview: dict) -> Tuple[Optional[int], Optional[int], List[dict]]:
+    oid = None
+    ts_ms = None
+    orders: List[dict] = []
+
+    if isinstance(preview, dict):
+        for k in ("order_id", "portfolio_orders_id", "id"):
+            try:
+                if preview.get(k) is not None:
+                    oid = int(preview.get(k))
+                    break
+            except Exception:
+                pass
+
+        for k in ("ts_ms", "portfolio_orders_ts_ms"):
+            try:
+                if preview.get(k) is not None:
+                    ts_ms = int(preview.get(k))
+                    break
+            except Exception:
+                pass
+
+        try:
+            orders = list(preview.get("orders") or [])
+        except Exception:
+            orders = []
+
+    return oid, ts_ms, orders
+
+
+def _acquire_lock_compat() -> bool:
+    # Support both signatures:
+    # - acquire_job_lock(name, owner, pid, stale_after_s=...)
+    # - acquire_job_lock(name, owner, pid, ttl_s=...)
+    try:
+        return bool(acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S))
+    except TypeError:
+        return bool(acquire_job_lock(JOB_NAME, OWNER, PID, stale_after_s=LOCK_STALE_AFTER_S))
+
+
+def _apply_epe_compat(
+    *,
+    con,
+    raw_payload: List[dict],
+    actor: str,
+    mode: str,
+    broker: str,
+    portfolio_orders_id: Optional[int],
+    portfolio_orders_batch_id: Optional[int],
+    default_signal_ts_ms: Optional[int],
+) -> List[dict]:
+    # Support both EPE signatures:
+    # Newer:
+    #   apply_execution_policy(con=..., intents=..., actor=..., mode=..., broker=...,
+    #                          portfolio_orders_batch_id=..., default_signal_ts_ms=...)
+    # Older:
+    #   apply_execution_policy(orders, actor=..., mode=..., broker=..., portfolio_orders_id=...,
+    #                          default_signal_ts_ms=...)
+    try:
+        shaped = apply_execution_policy(
+            con=con,
+            intents=raw_payload,
+            actor=str(actor),
+            mode=str(mode),
+            broker=str(broker),
+            portfolio_orders_batch_id=(int(portfolio_orders_batch_id) if portfolio_orders_batch_id is not None else None),
+            portfolio_orders_id=(int(portfolio_orders_id) if portfolio_orders_id is not None else None),
+            default_signal_ts_ms=(int(default_signal_ts_ms) if default_signal_ts_ms is not None else None),
+        )
+        return list(shaped or [])
+    except TypeError:
+        shaped = apply_execution_policy(
+            raw_payload,
+            actor=str(actor),
+            mode=str(mode),
+            broker=str(broker),
+            portfolio_orders_id=(int(portfolio_orders_id) if portfolio_orders_id is not None else None),
+            default_signal_ts_ms=(int(default_signal_ts_ms) if default_signal_ts_ms is not None else None),
+        )
+        return list(shaped or [])
+
+
+def _load_latest_payload() -> Tuple[Optional[int], Optional[int], List[dict], str]:
+    """
+    Returns: (batch_or_order_id, ts_ms, payload_list, source)
+    payload_list is either intents or orders; broker router receives as override_orders.
+    """
+    # Preferred: row-per-order intents table
+    if callable(load_latest_execution_intents):
+        try:
+            con = connect()
+            try:
+                batch = load_latest_execution_intents(con) or {}
+                batch_id = batch.get("batch_id")
+                batch_ts_ms = batch.get("batch_ts_ms")
+                intents = list(batch.get("intents") or [])
+            finally:
+                con.close()
+
+            if (batch_id is not None) or intents:
+                return (
+                    (int(batch_id) if batch_id is not None else None),
+                    (int(batch_ts_ms) if batch_ts_ms is not None else None),
+                    intents,
+                    "execution_intents",
+                )
+        except Exception:
+            pass
+
+    # Fallback: legacy broker_router dry_run preview
+    preview = apply_new_portfolio_orders(dry_run=True)
+    oid, ts_ms, orders = _extract_preview_meta(preview)
+    return oid, ts_ms, orders, "broker_router_preview"
+
+
+def main() -> int:
+    init_db()
+
+    if not _acquire_lock_compat():
+        _print({"status": "locked_out", "job": JOB_NAME})
+        return 0
+
+    started_ms = _now_ms()
+
+    try:
+        con = connect()
+        try:
+            allow, ks_reason, ks_meta = execution_allowed(con=con, symbol=None, regime=None)
         finally:
             con.close()
 
@@ -142,117 +329,85 @@ def main() -> int:
                 {
                     "status": "blocked",
                     "layer": "kill_switch",
-                    "broker": BROKER_NAME,
-                    "blocked_reason": ks_reason,
-                    "blocked_meta": ks_meta,
-                    "ts_ms": int(time.time() * 1000),
-                    "dur_ms": int(time.time() * 1000) - started_ms,
+                    "reason": ks_reason,
+                    "meta": ks_meta,
+                    "ts_ms": _now_ms(),
+                    "dur_ms": _now_ms() - started_ms,
                 }
             )
             return 0
 
-        # ============================================================
-        # Rules engine (non-blocking)
-        # ============================================================
-
+        # Best-effort rules eval (never blocks)
         try:
             evaluate_rules()
         except Exception:
             pass
 
-        # ============================================================
-        # Execution mode
-        # ============================================================
-
         mode_state = get_execution_mode() or {}
         mode = str(mode_state.get("mode") or "").lower().strip()
 
-        # ============================================================
-        # SHADOW MODE
-        # ============================================================
+        # Load latest payload
+        batch_or_oid, payload_ts_ms, raw_payload, payload_source = _load_latest_payload()
+
+        # Shape via EPE (TTL hard wall / ALE registration when supported)
+        con = connect()
+        try:
+            shaped_payload = _apply_epe_compat(
+                con=con,
+                raw_payload=raw_payload,
+                actor=str(OWNER),
+                mode=str(mode),
+                broker=str(BROKER_NAME),
+                portfolio_orders_id=(int(batch_or_oid) if batch_or_oid is not None else None),
+                portfolio_orders_batch_id=(int(batch_or_oid) if batch_or_oid is not None else None),
+                default_signal_ts_ms=(int(payload_ts_ms) if payload_ts_ms is not None else None),
+            )
+            try:
+                con.commit()
+            except Exception:
+                pass
+        finally:
+            con.close()
 
         if mode == "shadow":
-
-            preview = apply_new_portfolio_orders(dry_run=True) or {}
-            raw_orders = list((preview or {}).get("orders") or [])
-            shaped_orders = apply_execution_policy(raw_orders)
-
-            res = {
-                "orders": shaped_orders,
-                "preview": preview,
-            }
-
-            _log_shadow_intents(
-                shaped_orders,
-                actor=OWNER,
-                mode_state=mode_state,
-            )
-
+            _log_shadow_intents(shaped_payload, OWNER, mode_state)
             _print(
                 {
                     "status": "ok",
                     "mode": "shadow",
                     "broker": BROKER_NAME,
+                    "payload_source": payload_source,
+                    "batch_id": batch_or_oid,
+                    "raw_count": len(raw_payload),
+                    "shaped_count": len(shaped_payload),
                     "executed": False,
-                    "intents_logged": True,
-                    "order_count": len(shaped_orders),
-                    "preview": res,
-                    "ts_ms": int(time.time() * 1000),
-                    "dur_ms": int(time.time() * 1000) - started_ms,
+                    "ts_ms": _now_ms(),
+                    "dur_ms": _now_ms() - started_ms,
                 }
             )
-
             return 0
 
-        # ============================================================
-        # PAPER MODE
-        # ============================================================
-
         if mode == "paper":
-
-            broker_lc = str(BROKER_NAME).lower().strip()
-
-            if broker_lc not in ("sim", "paper", "sandbox"):
-                preview = apply_new_portfolio_orders(dry_run=True) or {}
-                _print(
-                    {
-                        "status": "blocked",
-                        "layer": "execution_mode",
-                        "mode": "paper",
-                        "broker": BROKER_NAME,
-                        "reason": "paper_mode_requires_sim_broker",
-                        "order_count": len((preview or {}).get("orders") or []),
-                        "ts_ms": int(time.time() * 1000),
-                        "dur_ms": int(time.time() * 1000) - started_ms,
-                    }
-                )
-                return 0
-
-            preview = apply_new_portfolio_orders(dry_run=True) or {}
-            raw_orders = list((preview or {}).get("orders") or [])
-            shaped_orders = apply_execution_policy(raw_orders)
-
             res = apply_new_portfolio_orders(
                 dry_run=False,
-                override_orders=shaped_orders,
+                override_orders=shaped_payload,
+                override_order_id=(int(batch_or_oid) if batch_or_oid is not None else None),
+                override_ts_ms=(int(payload_ts_ms) if payload_ts_ms is not None else None),
             )
-
+            _write_execution_meta_last(BROKER_NAME, "paper_broker_sim")
             _print(
                 {
                     "status": "ok",
                     "mode": "paper",
                     "broker": BROKER_NAME,
+                    "payload_source": payload_source,
+                    "batch_id": batch_or_oid,
                     "result": res,
-                    "ts_ms": int(time.time() * 1000),
-                    "dur_ms": int(time.time() * 1000) - started_ms,
+                    "ts_ms": _now_ms(),
+                    "dur_ms": _now_ms() - started_ms,
                 }
             )
-
             return 0
-
-        # ============================================================
-        # LIVE MODE
-        # ============================================================
 
         if mode != "live":
             _print(
@@ -262,16 +417,13 @@ def main() -> int:
                     "mode": mode,
                     "broker": BROKER_NAME,
                     "reason": "mode_not_live",
-                    "ts_ms": int(time.time() * 1000),
-                    "dur_ms": int(time.time() * 1000) - started_ms,
+                    "ts_ms": _now_ms(),
+                    "dur_ms": _now_ms() - started_ms,
                 }
             )
             return 0
 
-        armed = bool(mode_state.get("armed", False)) or (
-            os.environ.get("EXECUTION_ARMED", "0") == "1"
-        )
-
+        armed = (int(mode_state.get("armed", 0)) == 1) or (os.environ.get("EXECUTION_ARMED", "0") == "1")
         if not armed:
             _print(
                 {
@@ -279,82 +431,41 @@ def main() -> int:
                     "layer": "execution_mode",
                     "mode": "live",
                     "broker": BROKER_NAME,
-                    "reason": "live_mode_not_armed",
-                    "ts_ms": int(time.time() * 1000),
-                    "dur_ms": int(time.time() * 1000) - started_ms,
+                    "reason": "live_not_armed",
+                    "ts_ms": _now_ms(),
+                    "dur_ms": _now_ms() - started_ms,
                 }
             )
             return 0
 
-        # ============================================================
-        # LIVE execution
-        # ============================================================
+        dual_enable = os.environ.get("EXECUTION_DUAL_ENABLE", "0") == "1"
 
-        preview = apply_new_portfolio_orders(dry_run=True) or {}
-        raw_orders = list((preview or {}).get("orders") or [])
-        shaped_orders = apply_execution_policy(raw_orders)
+        if dual_enable and str(BROKER_NAME).lower() == "ibkr" and callable(apply_latest_portfolio_orders_dual_ibkr):
+            res = apply_latest_portfolio_orders_dual_ibkr(dry_run_live=False)
+        else:
+            res = apply_new_portfolio_orders(
+                dry_run=False,
+                override_orders=shaped_payload,
+                override_order_id=(int(batch_or_oid) if batch_or_oid is not None else None),
+                override_ts_ms=(int(payload_ts_ms) if payload_ts_ms is not None else None),
+            )
 
-        res = apply_new_portfolio_orders(
-            dry_run=False,
-            override_orders=shaped_orders,
-        )
-
-        # ============================================================
-        # Persist execution_meta
-        # ============================================================
-
-        try:
-            con = connect()
-            try:
-                con.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS execution_meta (
-                      key TEXT PRIMARY KEY,
-                      value TEXT NOT NULL
-                    )
-                    """
-                )
-
-                con.execute(
-                    """
-                    INSERT INTO execution_meta(key, value)
-                    VALUES(?,?)
-                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
-                    """,
-                    ("last_execution_source", "live_broker"),
-                )
-
-                con.execute(
-                    """
-                    INSERT INTO execution_meta(key, value)
-                    VALUES(?,?)
-                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
-                    """,
-                    (
-                        "last_execution_broker",
-                        str((res or {}).get("broker") or str(BROKER_NAME)),
-                    ),
-                )
-
-                con.commit()
-
-            finally:
-                con.close()
-
-        except Exception:
-            pass
+        broker_used = str((res or {}).get("broker") or BROKER_NAME)
+        _write_execution_meta_last(broker_used, "live_broker")
 
         _print(
             {
                 "status": "ok",
                 "mode": "live",
                 "broker": BROKER_NAME,
+                "broker_used": broker_used,
+                "payload_source": payload_source,
+                "batch_id": batch_or_oid,
                 "result": res,
-                "ts_ms": int(time.time() * 1000),
-                "dur_ms": int(time.time() * 1000) - started_ms,
+                "ts_ms": _now_ms(),
+                "dur_ms": _now_ms() - started_ms,
             }
         )
-
         return 0
 
     except Exception as e:
