@@ -33,6 +33,7 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from dev_core.kill_switch import execution_allowed
 from dev_core.risk_state import get_state, set_state
 from dev_core.execution_ledger import log_submit, log_fill
@@ -299,6 +300,7 @@ def apply_latest_portfolio_orders_live(
                 ref_px=float(px),
                 broker_order_id=str(oid),
                 portfolio_orders_id=order_id,
+                source_alert_id=(int(o.get("source_alert_id")) if isinstance(o, dict) and o.get("source_alert_id") is not None else None),
                 extra=o,
             )
 

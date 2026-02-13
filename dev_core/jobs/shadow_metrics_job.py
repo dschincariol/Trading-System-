@@ -3,6 +3,7 @@ import json
 import time
 import math
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 WINDOW_MS = 6 * 60 * 60 * 1000  # 6h
 
@@ -123,7 +124,9 @@ def run():
         by_key = {}
         for sym, reg, h, m, pz, npz, rz in rows:
             k = (reg, h, m)
-            by_key.setdefault(k, []).append((float(pz), float(npz) if npz is not None else None, float(rz)))
+            by_key.setdefault(k, []).append(
+                (float(pz), float(npz) if npz is not None else None, float(rz))
+            )
 
         for (reg, h, m), vals in by_key.items():
             n = len(vals)
@@ -136,24 +139,52 @@ def run():
             da = 0
             cntn = 0
 
+            drawdown_contrib = 0.0
+            gross_alpha = 0.0
+            slippage_cost = 0.0
+
             for pz, npz, rz in vals:
                 e = pz - rz
                 se += e * e
                 ae += abs(e)
+
                 if (pz >= 0) == (rz >= 0):
                     da += 1
+
                 if npz is not None:
                     ne += (npz - rz) ** 2
                     cntn += 1
+
+                # negative realized outcomes contribute to drawdown
+                if rz < 0:
+                    drawdown_contrib += abs(rz)
+
+                gross_alpha += rz
+
+                # net_pred_z already includes execution costs if present
+                if npz is not None:
+                    slippage_cost += (pz - npz)
 
             rmse = math.sqrt(se / n)
             mae = ae / n
             dir_acc = da / n
             net_rmse = math.sqrt(ne / cntn) if cntn else None
 
-            pass
+            avg_slippage = slippage_cost / n if n else 0.0
 
-        con.execute(
+            capital_efficiency = (
+                gross_alpha / drawdown_contrib
+                if drawdown_contrib > 1e-9
+                else gross_alpha
+            )
+
+            extra = {
+                "drawdown_contribution": float(drawdown_contrib),
+                "avg_slippage_impact": float(avg_slippage),
+                "capital_efficiency": float(capital_efficiency),
+            }
+
+            con.execute(
                 """
                 INSERT INTO shadow_metrics
                   (window_start_ms, window_end_ms, regime, model_name,
@@ -169,10 +200,10 @@ def run():
                     rmse,
                     mae,
                     dir_acc,
-                    None,
+                    float(avg_slippage),
                     net_rmse,
                     n,
-                    json.dumps({}, separators=(",", ":"), sort_keys=True),
+                    json.dumps(extra, separators=(",", ":"), sort_keys=True),
                 ),
             )
 

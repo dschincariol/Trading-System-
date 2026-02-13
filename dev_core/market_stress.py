@@ -6,6 +6,7 @@ from typing import Dict, Optional, Tuple, List
 import numpy as np
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 
 _LOOKBACK = 240   # samples

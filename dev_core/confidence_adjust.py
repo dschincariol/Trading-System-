@@ -7,6 +7,7 @@ import math
 from typing import Dict, Tuple, Any, Optional
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 STALE_AFTER_S = int(os.environ.get("CONF_STALE_AFTER_S", "120"))
 STALE_HALF_LIFE_S = float(os.environ.get("CONF_STALE_HALF_LIFE_S", "120"))

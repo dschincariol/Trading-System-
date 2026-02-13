@@ -2,6 +2,7 @@
 import json
 import time
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS predictions (

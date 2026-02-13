@@ -19,6 +19,7 @@ import os
 from typing import Any, Dict, Optional
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from dev_core.risk import realized_vol_from_prices
 from dev_core.execution_costs import estimate_cost_bps
 

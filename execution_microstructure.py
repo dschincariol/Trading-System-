@@ -14,6 +14,7 @@ import time
 from typing import Any, Dict, Optional
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from dev_core.execution_ledger import log_submit
 
 REPRICE_INTERVAL_S = float(os.environ.get("EPE_REPRICE_INTERVAL_S", "60"))

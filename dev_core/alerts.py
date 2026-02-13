@@ -7,6 +7,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from dev_core.model_v2 import get_current_regime, get_regime_prior
 from dev_core.learning import get_global_prior
 from dev_core.position_sizing import position_from_signal

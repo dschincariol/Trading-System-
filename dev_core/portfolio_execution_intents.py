@@ -12,10 +12,27 @@ Does NOT change signal generation. Purely a reader/adapter.
 
 import json
 import time
+import os
+import math
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 
 DEFAULT_BATCH_WINDOW_MS = 2500  # group "latest run" orders by recent ts_ms window
+DEFAULT_SIGNAL_TTL_MS = int(os.environ.get("DEFAULT_SIGNAL_TTL_MS", "1800000"))  # 30m
+
+# -----------------------------
+# Execution stress regime (model-aware sizing)
+# - options.skew_25d_z
+# - flows.index_constituent_imbalance_z
+# - earnings proximity via earnings_calendar
+# -----------------------------
+_EXEC_SKEW_Z_THRESH = float(os.environ.get("EXEC_SKEW_Z_THRESH", "1.5"))
+_EXEC_FLOW_Z_THRESH = float(os.environ.get("EXEC_FLOW_Z_THRESH", "2.0"))
+_EXEC_STRESS_SIZE_MAX_REDUCTION = float(os.environ.get("EXEC_STRESS_SIZE_MAX_REDUCTION", "0.35"))
+
+_EARNINGS_HALF_LIFE_DAYS = float(os.environ.get("EARNINGS_HALF_LIFE_DAYS", "5.0"))
+_EXEC_EARNINGS_SIZE_MAX_REDUCTION = float(os.environ.get("EXEC_EARNINGS_SIZE_MAX_REDUCTION", "0.55"))
 
 
 def _now_ms() -> int:
@@ -29,6 +46,85 @@ def _safe_json_loads(s: Optional[str]) -> Any:
         return json.loads(s)
     except Exception:
         return None
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    try:
+        v = float(x)
+    except Exception:
+        v = float(lo)
+    return float(max(float(lo), min(float(hi), v)))
+
+
+def _get_factor_feature_asof(con, feature_id: str, ts_ms: int) -> float:
+    try:
+        row = con.execute(
+            """
+            SELECT value
+            FROM factor_features
+            WHERE feature_id=?
+              AND asof_ts <= ?
+              AND effective_ts <= ?
+            ORDER BY asof_ts DESC, effective_ts DESC
+            LIMIT 1
+            """,
+            (str(feature_id), int(ts_ms), int(ts_ms)),
+        ).fetchone()
+        if not row:
+            return 0.0
+        return float(row[0]) if row[0] is not None else 0.0
+    except Exception:
+        return 0.0
+
+
+def _ymd_from_ts_ms(ts_ms: int) -> str:
+    try:
+        dt = datetime.fromtimestamp(int(ts_ms) / 1000.0, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return time.strftime("%Y-%m-%d", time.gmtime(int(ts_ms) / 1000.0))
+
+
+def _earnings_proximity_decay(con, symbol: str, ts_ms: int) -> float:
+    """
+    Returns [0,1]. 1.0 = very near earnings date, 0.0 = far.
+    Uses nearest earnings_calendar row by date distance.
+    """
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return 0.0
+
+    try:
+        today = _ymd_from_ts_ms(int(ts_ms))
+        row = con.execute(
+            """
+            SELECT earnings_date
+            FROM earnings_calendar
+            WHERE symbol=?
+            ORDER BY ABS(julianday(earnings_date) - julianday(?)) ASC
+            LIMIT 1
+            """,
+            (sym, str(today)),
+        ).fetchone()
+        if not row:
+            return 0.0
+
+        ed = str(row[0] or "").strip()
+        if not ed:
+            return 0.0
+
+        jd = con.execute(
+            "SELECT (julianday(?) - julianday(?))",
+            (str(ed), str(today)),
+        ).fetchone()
+        if not jd or jd[0] is None:
+            return 0.0
+
+        days = float(jd[0])
+        hl = max(0.5, float(_EARNINGS_HALF_LIFE_DAYS))
+        return float(_clamp(math.exp(-abs(days) / hl), 0.0, 1.0))
+    except Exception:
+        return 0.0
 
 
 def _portfolio_orders_latest_anchor(con) -> Optional[Tuple[int, int]]:
@@ -249,6 +345,109 @@ def load_latest_execution_intents(
         else:
             intent["signal_ts_ms"] = int(intent.get("ts_ms") or 0)
 
+        # ------------------------------------------------------------
+        # Model-aware sizing: apply execution stress regime upstream
+        # (broker_sim remains microstructure realism; sizing shifts here)
+        # ------------------------------------------------------------
+        ts_ref = int(intent.get("ts_ms") or batch_ts_ms or 0)
+        if ts_ref <= 0:
+            ts_ref = _now_ms()
+
+        # base weight (signed as stored in portfolio_orders; preserve sign)
+        try:
+            base_to_w = float(intent.get("to_weight") or 0.0)
+        except Exception:
+            base_to_w = 0.0
+
+        skew_z = _get_factor_feature_asof(con, "options.skew_25d_z", int(ts_ref))
+        flow_z = _get_factor_feature_asof(con, "flows.index_constituent_imbalance_z", int(ts_ref))
+
+        stress_mag = max(
+            0.0,
+            max(
+                abs(float(skew_z)) - float(_EXEC_SKEW_Z_THRESH),
+                abs(float(flow_z)) - float(_EXEC_FLOW_Z_THRESH),
+            ),
+        )
+
+        stress_mult = 1.0
+        if stress_mag > 0.0:
+            stress_mult = float(
+                _clamp(
+                    1.0 - (float(stress_mag) * float(_EXEC_STRESS_SIZE_MAX_REDUCTION)),
+                    0.20,
+                    1.0,
+                )
+            )
+
+        earnings_decay = _earnings_proximity_decay(con, sym, int(ts_ref))
+        earnings_mult = 1.0
+        if float(earnings_decay) > 0.0:
+            earnings_mult = float(
+                _clamp(
+                    1.0 - (float(earnings_decay) * float(_EXEC_EARNINGS_SIZE_MAX_REDUCTION)),
+                    0.20,
+                    1.0,
+                )
+            )
+
+        final_mult = float(stress_mult) * float(earnings_mult)
+        final_to_w = float(base_to_w) * float(final_mult)
+
+        # ------------------------------------------------------------
+        # Regime-aware alpha boost
+        # Calm regime => longer alpha persistence
+        # Stress regime => shorter alpha persistence
+        # ------------------------------------------------------------
+        alpha_boost_mult = 1.0
+
+        if stress_mag <= 0.0:
+            # reward calm regime (extend TTL modestly)
+            alpha_boost_mult = 1.15
+        else:
+            # penalize stressed regime
+            alpha_boost_mult = float(
+                _clamp(
+                    1.0 - (float(stress_mag) * 0.25),
+                    0.60,
+                    1.0,
+                )
+            )
+
+        # Adjust alpha TTL and half-life if present
+        try:
+            ttl0 = int(intent.get("alpha_ttl_ms") or 0)
+            hl0 = int(intent.get("alpha_half_life_ms") or 0)
+
+            if ttl0 > 0:
+                intent["alpha_ttl_ms"] = int(float(ttl0) * float(alpha_boost_mult))
+
+            if hl0 > 0:
+                intent["alpha_half_life_ms"] = int(float(hl0) * float(alpha_boost_mult))
+        except Exception:
+            pass
+
+        # update intent weights (and keep delta consistent)
+        intent["to_weight"] = float(final_to_w)
+        try:
+            from_w0 = float(intent.get("from_weight") or 0.0)
+        except Exception:
+            from_w0 = 0.0
+        intent["delta_weight"] = float(final_to_w) - float(from_w0)
+
+        # attach regime context for auditing + downstream attribution
+        intent["exec_regime"] = {
+            "ts_ref": int(ts_ref),
+            "skew_z": float(skew_z),
+            "flow_z": float(flow_z),
+            "stress_mag": float(stress_mag),
+            "stress_mult": float(stress_mult),
+            "earnings_decay": float(earnings_decay),
+            "earnings_mult": float(earnings_mult),
+            "final_mult": float(final_mult),
+        }
+
         intents.append(intent)
+
 
     return {"ok": True, "batch_id": batch_id, "batch_ts_ms": batch_ts_ms, "intents": intents}

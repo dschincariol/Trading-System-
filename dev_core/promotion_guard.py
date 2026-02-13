@@ -257,5 +257,35 @@ def promotion_allowed() -> Tuple[bool, Dict[str, Any]]:
     finally:
         con.close()
 
+    # ------------------------------------------------------------
+    # Trade Attribution Guard (capital-based pruning)
+    # ------------------------------------------------------------
+    try:
+        rows = con.execute(
+            """
+            SELECT
+              json_extract(model_json, '$.model_name') AS model_name,
+              SUM(COALESCE(pnl,0)) AS total_pnl
+            FROM trade_attribution_ledger
+            WHERE suppression_reason IS NULL
+              AND ts_ms >= ?
+            GROUP BY model_name
+            """,
+            (now - (PROMOTION_DRIFT_LOOKBACK_S * 1000),),
+        ).fetchall()
+
+        model_pnl = {str(r[0]): float(r[1] or 0.0) for r in rows if r[0]}
+
+        reason["model_pnl_snapshot"] = model_pnl
+
+        # block promotion if any live model is negative capital impact
+        negative_models = [m for m, p in model_pnl.items() if float(p) < 0.0]
+        if negative_models:
+            reason["blockers"].append("negative_real_pnl_models")
+            reason["negative_models"] = negative_models
+
+    except Exception:
+        pass
+
     allowed = len(reason["blockers"]) == 0
     return (allowed, reason)

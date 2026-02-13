@@ -99,6 +99,13 @@ export async function handlePromotionToggle({
   }
 
   const st = await _fetchJSON("/api/promotion/status");
+  if (st && st.current_champion && st.current_champion.safety_score !== undefined) {
+  if (Number(st.current_champion.safety_score) <= 0) {
+    _toast("Cannot enable promotions: champion safety score is negative", "error", 4000);
+    return;
+  }
+}
+
   const enabledDb =
     (st && st.promotion_enabled_db) ? st.promotion_enabled_db : "1";
   const next = (enabledDb === "1") ? "0" : "1";
@@ -148,4 +155,110 @@ export async function handleAutoFix({
   await _refresh();
   await _loadPromotionStatus();
   await _loadSizePolicy();
+}
+
+// -----------------------------
+// Safety Metric Extraction
+// -----------------------------
+export function extractPromotionSafetyMetrics(row) {
+  if (!row) return null;
+
+  return {
+    capital_efficiency:
+      row.capital_efficiency !== undefined
+        ? Number(row.capital_efficiency)
+        : undefined,
+
+    drawdown_contribution:
+      row.drawdown_contribution !== undefined
+        ? Number(row.drawdown_contribution)
+        : undefined,
+
+    avg_slippage_impact:
+      row.avg_slippage_impact !== undefined
+        ? Number(row.avg_slippage_impact)
+        : undefined,
+
+    safety_score:
+      row.safety_score !== undefined
+        ? Number(row.safety_score)
+        : undefined
+  };
+}
+
+// -----------------------------
+// Render Safety Metrics
+// -----------------------------
+export function renderPromotionSafetyMetrics(row) {
+  const m = extractPromotionSafetyMetrics(row);
+  if (!m) return "";
+
+  let html = `<div class="promo-safety-metrics">`;
+
+  if (m.capital_efficiency !== undefined) {
+    const cls =
+      m.capital_efficiency > 1
+        ? "metric-good"
+        : m.capital_efficiency > 0
+        ? "metric-warn"
+        : "metric-bad";
+
+    html += `
+      <div class="metric ${cls}">
+        <label>Capital Efficiency</label>
+        <span>${m.capital_efficiency.toFixed(3)}</span>
+      </div>
+    `;
+  }
+
+  if (m.drawdown_contribution !== undefined) {
+    const cls =
+      m.drawdown_contribution < 1
+        ? "metric-good"
+        : m.drawdown_contribution < 3
+        ? "metric-warn"
+        : "metric-bad";
+
+    html += `
+      <div class="metric ${cls}">
+        <label>Drawdown Contribution</label>
+        <span>${m.drawdown_contribution.toFixed(3)}</span>
+      </div>
+    `;
+  }
+
+  if (m.avg_slippage_impact !== undefined) {
+    const cls =
+      m.avg_slippage_impact < 0.5
+        ? "metric-good"
+        : m.avg_slippage_impact < 1.5
+        ? "metric-warn"
+        : "metric-bad";
+
+    html += `
+      <div class="metric ${cls}">
+        <label>Slippage Impact</label>
+        <span>${m.avg_slippage_impact.toFixed(3)}</span>
+      </div>
+    `;
+  }
+
+  if (m.safety_score !== undefined) {
+    const cls =
+      m.safety_score > 1
+        ? "metric-good"
+        : m.safety_score > 0
+        ? "metric-warn"
+        : "metric-bad";
+
+    html += `
+      <div class="metric ${cls}">
+        <label>Safety Score</label>
+        <span>${m.safety_score.toFixed(3)}</span>
+      </div>
+    `;
+  }
+
+  html += `</div>`;
+  return html;
 }

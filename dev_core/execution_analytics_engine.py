@@ -184,8 +184,9 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
               s.ref_px,
               f.fill_ts_ms,
               f.fill_px,
+              f.fill_qty,
               s.extra_json
-            FROM execution_submits s
+            FROM execution_orders s
             JOIN execution_fills f
               ON s.client_order_id = f.client_order_id
             ORDER BY f.fill_ts_ms DESC
@@ -201,16 +202,18 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
                 cid,
                 broker,
                 symbol,
-                qty,
+                order_qty,
                 submit_ts_ms,
                 ref_px,
                 fill_ts_ms,
                 fill_px,
+                fill_qty,
                 extra_json,
             ) = r
 
             try:
-                qty = float(qty or 0.0)
+                order_qty = float(order_qty or 0.0)
+                fill_qty = float(fill_qty or 0.0)
                 ref_px = float(ref_px or 0.0)
                 fill_px = float(fill_px or 0.0)
                 submit_ts_ms = int(submit_ts_ms or 0)
@@ -218,10 +221,11 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
             except Exception:
                 continue
 
-            if qty == 0.0 or ref_px <= 0.0 or fill_px <= 0.0 or fill_ts_ms <= 0:
+            if order_qty == 0.0 or fill_qty <= 0.0 or ref_px <= 0.0 or fill_px <= 0.0 or fill_ts_ms <= 0:
                 continue
 
-            side_sign = 1.0 if qty > 0 else -1.0
+            side_sign = 1.0 if order_qty > 0 else -1.0
+            signed_qty = float(fill_qty) * float(side_sign)
             slippage_bps = ((fill_px - ref_px) / ref_px) * 10000.0 * side_sign
 
             age_ms = max(0, int(fill_ts_ms) - int(submit_ts_ms))
@@ -284,7 +288,7 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
                     int(fill_ts_ms),
                     float(ref_px),
                     float(fill_px),
-                    float(qty),
+                    float(signed_qty),
                     float(slippage_bps),
                     float(fee_bps),
                     float(total_cost_bps),
@@ -311,10 +315,61 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
         except Exception:
             pass
 
+        # ------------------------------------------------------------
+        # Tail metrics: baseline vs adaptive (reads meta_json flag)
+        # ------------------------------------------------------------
+        adaptive_slips: List[float] = []
+        baseline_slips: List[float] = []
+
+        try:
+            tail_rows = con.execute(
+                """
+                SELECT slippage_bps, meta_json
+                FROM execution_analytics
+                WHERE slippage_bps IS NOT NULL
+                ORDER BY ts_ms DESC
+                LIMIT ?
+                """,
+                (int(max(500, min(20000, int(limit) * 4))),),
+            ).fetchall()
+
+            for sl, mj in tail_rows or []:
+                try:
+                    slv = float(sl)
+                except Exception:
+                    continue
+                try:
+                    meta = json.loads(mj or "{}")
+                    if isinstance(meta, dict) and bool(meta.get("adaptive_slice", False)):
+                        adaptive_slips.append(slv)
+                    else:
+                        baseline_slips.append(slv)
+                except Exception:
+                    baseline_slips.append(slv)
+
+        except Exception:
+            pass
+
+        def _p(x: List[float], p: float) -> Optional[float]:
+            if not x:
+                return None
+            x2 = sorted([float(v) for v in x])
+            if not x2:
+                return None
+            if len(x2) == 1:
+                return float(x2[0])
+            idx = int(round((len(x2) - 1) * float(p)))
+            idx = max(0, min(len(x2) - 1, idx))
+            return float(x2[idx])
+
         return {
             "ok": True,
             "status": "built",
             "rows_written": int(wrote),
+            "baseline_p95_slippage_bps": _p(baseline_slips, 0.95),
+            "baseline_p99_slippage_bps": _p(baseline_slips, 0.99),
+            "adaptive_p95_slippage_bps": _p(adaptive_slips, 0.95),
+            "adaptive_p99_slippage_bps": _p(adaptive_slips, 0.99),
         }
 
     finally:
@@ -733,8 +788,9 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
               s.ref_px,
               f.fill_ts_ms,
               f.fill_px,
+              f.fill_qty,
               s.extra_json
-            FROM execution_submits s
+            FROM execution_orders s
             JOIN execution_fills f
               ON s.client_order_id = f.client_order_id
             ORDER BY f.fill_ts_ms DESC
@@ -750,16 +806,18 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
                 cid,
                 broker,
                 symbol,
-                qty,
+                order_qty,
                 submit_ts_ms,
                 ref_px,
                 fill_ts_ms,
                 fill_px,
+                fill_qty,
                 extra_json,
             ) = r
 
             try:
-                qty = float(qty or 0.0)
+                order_qty = float(order_qty or 0.0)
+                fill_qty = float(fill_qty or 0.0)
                 ref_px = float(ref_px or 0.0)
                 fill_px = float(fill_px or 0.0)
                 submit_ts_ms = int(submit_ts_ms or 0)
@@ -767,10 +825,11 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
             except Exception:
                 continue
 
-            if qty == 0.0 or ref_px <= 0.0 or fill_px <= 0.0 or fill_ts_ms <= 0:
+            if order_qty == 0.0 or fill_qty <= 0.0 or ref_px <= 0.0 or fill_px <= 0.0 or fill_ts_ms <= 0:
                 continue
 
-            side_sign = 1.0 if qty > 0 else -1.0
+            side_sign = 1.0 if order_qty > 0 else -1.0
+            signed_qty = float(fill_qty) * float(side_sign)
             slippage_bps = ((fill_px - ref_px) / ref_px) * 10000.0 * side_sign
 
             age_ms = max(0, int(fill_ts_ms) - int(submit_ts_ms))
@@ -833,7 +892,7 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
                     int(fill_ts_ms),
                     float(ref_px),
                     float(fill_px),
-                    float(qty),
+                    float(signed_qty),
                     float(slippage_bps),
                     float(fee_bps),
                     float(total_cost_bps),
@@ -860,10 +919,61 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
         except Exception:
             pass
 
+        # ------------------------------------------------------------
+        # Tail metrics: baseline vs adaptive (reads meta_json flag)
+        # ------------------------------------------------------------
+        adaptive_slips: List[float] = []
+        baseline_slips: List[float] = []
+
+        try:
+            tail_rows = con.execute(
+                """
+                SELECT slippage_bps, meta_json
+                FROM execution_analytics
+                WHERE slippage_bps IS NOT NULL
+                ORDER BY ts_ms DESC
+                LIMIT ?
+                """,
+                (int(max(500, min(20000, int(limit) * 4))),),
+            ).fetchall()
+
+            for sl, mj in tail_rows or []:
+                try:
+                    slv = float(sl)
+                except Exception:
+                    continue
+                try:
+                    meta = json.loads(mj or "{}")
+                    if isinstance(meta, dict) and bool(meta.get("adaptive_slice", False)):
+                        adaptive_slips.append(slv)
+                    else:
+                        baseline_slips.append(slv)
+                except Exception:
+                    baseline_slips.append(slv)
+
+        except Exception:
+            pass
+
+        def _p(x: List[float], p: float) -> Optional[float]:
+            if not x:
+                return None
+            x2 = sorted([float(v) for v in x])
+            if not x2:
+                return None
+            if len(x2) == 1:
+                return float(x2[0])
+            idx = int(round((len(x2) - 1) * float(p)))
+            idx = max(0, min(len(x2) - 1, idx))
+            return float(x2[idx])
+
         return {
             "ok": True,
             "status": "built",
             "rows_written": int(wrote),
+            "baseline_p95_slippage_bps": _p(baseline_slips, 0.95),
+            "baseline_p99_slippage_bps": _p(baseline_slips, 0.99),
+            "adaptive_p95_slippage_bps": _p(adaptive_slips, 0.95),
+            "adaptive_p99_slippage_bps": _p(adaptive_slips, 0.99),
         }
 
     finally:
@@ -1092,3 +1202,58 @@ def _build_alpha_preservation_kpis(con, lookback_n: int = 2000) -> None:
         )
 
     con.commit()
+
+# ============================================================
+# TSE SUPPORT FUNCTIONS
+# ============================================================
+
+def get_slippage_zscore(con):
+    try:
+        row = con.execute(
+            """
+            SELECT AVG(slippage_bps), 
+                   COALESCE(NULLIF(STDDEV(slippage_bps),0), 0)
+            FROM execution_analytics
+            WHERE ts_ms >= (SELECT MAX(ts_ms) - 86400000 FROM execution_analytics)
+            """
+        ).fetchone()
+        if not row:
+            return 0.0
+        mu = float(row[0] or 0.0)
+        sigma = float(row[1] or 0.0)
+        if sigma <= 1e-12:
+            return 0.0
+        latest = con.execute(
+            "SELECT slippage_bps FROM execution_analytics ORDER BY ts_ms DESC LIMIT 1"
+        ).fetchone()
+        if not latest:
+            return 0.0
+        return (float(latest[0]) - mu) / sigma
+    except Exception:
+        return 0.0
+
+
+def get_latency_variance_zscore(con):
+    try:
+        row = con.execute(
+            """
+            SELECT AVG(latency_ms), 
+                   COALESCE(NULLIF(STDDEV(latency_ms),0), 0)
+            FROM execution_analytics
+            WHERE ts_ms >= (SELECT MAX(ts_ms) - 86400000 FROM execution_analytics)
+            """
+        ).fetchone()
+        if not row:
+            return 0.0
+        mu = float(row[0] or 0.0)
+        sigma = float(row[1] or 0.0)
+        if sigma <= 1e-12:
+            return 0.0
+        latest = con.execute(
+            "SELECT latency_ms FROM execution_analytics ORDER BY ts_ms DESC LIMIT 1"
+        ).fetchone()
+        if not latest:
+            return 0.0
+        return (float(latest[0]) - mu) / sigma
+    except Exception:
+        return 0.0

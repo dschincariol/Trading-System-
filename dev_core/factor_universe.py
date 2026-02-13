@@ -33,6 +33,13 @@ FACTOR_FEATURE_ORDER: List[str] = [
     # Flows / positioning (proxied)
     "flows.spy_agg_ratio_z",
     "flows.spy_agg_ratio_d5",
+
+    # NEW: Direct execution alpha factors
+    "options.skew_25d_z",
+    "options.skew_25d_d5",
+    "flows.index_constituent_imbalance_z",
+    "flows.index_constituent_imbalance_d5",
+    "earnings.proximity_decay",
 ]
 
 FACTOR_FEATURE_DIM = len(FACTOR_FEATURE_ORDER)

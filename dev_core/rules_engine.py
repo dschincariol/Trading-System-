@@ -16,6 +16,7 @@ from dev_core.drawdown_state import get_current_drawdown
 from dev_core.exec_stats import get_exec_winrate_global, get_exec_stats_by_symbol
 from dev_core.drift_utils import get_max_drift_ratio, get_symbol_max_drift_ratio
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 USE = os.environ.get("RULES_ENGINE_ENABLED", "1") == "1"
 

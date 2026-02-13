@@ -35,6 +35,8 @@ except Exception as e:
 from dev_core.kill_switch import execution_allowed, activate
 from dev_core.model_v2 import get_current_regime
 from dev_core.rules_engine import evaluate_rules
+from dev_core.regime_size import regime_capital_scale
+from dev_core.opportunity_allocation import opportunity_weight
 
 # ------            -- ------------------------------------------------------
 # Optional health gate (fail-closed if present)
@@ -64,6 +66,12 @@ HEARTBEAT_EVERY_S = float(os.environ.get("HEARTBEAT_EVERY_S", "15.0"))
 MAX_DRAWDOWN_PCT = float(os.environ.get("MAX_DRAWDOWN_PCT", "0.15"))      # 15%
 MAX_DAILY_LOSS_PCT = float(os.environ.get("MAX_DAILY_LOSS_PCT", "0.05"))  # 5%
 MIN_CONFIDENCE = float(os.environ.get("MIN_EXEC_CONFIDENCE", "0.25"))
+
+# Opportunity-weighted allocation knobs (bounded, convex)
+OPP_CONVEX_POWER = float(os.environ.get("OPP_CONVEX_POWER", "2.0"))
+OPP_MIN_CAP = float(os.environ.get("OPP_MIN_CAP", "0.0"))
+OPP_MAX_CAP = float(os.environ.get("OPP_MAX_CAP", "1.0"))
+MAX_SINGLE_POSITION_WEIGHT = float(os.environ.get("MAX_SINGLE_POSITION_WEIGHT", "0.15"))
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -192,9 +200,18 @@ def main() -> int:
                 # Compute rebalance (pure compute)
                 rebalance_res = compute_rebalance()
 
+                # Regime capital scaling (best-effort, deterministic)
+                try:
+                    regime_info = regime_capital_scale(con)
+                except Exception:
+                    regime_info = {"ok": False}
+                try:
+                    regime_mult = float(regime_info.get("final_mult", 1.0))
+                except Exception:
+                    regime_mult = 1.0
+
                 # Build intents
                 intents: List[Dict[str, Any]] = build_portfolio_intents(con)
-
                 executed: List[Dict[str, Any]] = []
                 skipped: List[Dict[str, Any]] = []
 
@@ -212,8 +229,66 @@ def main() -> int:
                         skipped.append(it)
                         continue
 
-                    sym = str(it.get("symbol") or "").strip()
+                    # Execution confidence (best-effort; default 1.0)
+                    try:
+                        exec_conf = float(it.get("execution_confidence", 1.0))
+                    except Exception:
+                        exec_conf = 1.0
 
+                    # Opportunity-weighted multiplier (bounded, convex)
+                    try:
+                        opp_mult = opportunity_weight(
+                            signal_conf=conf,
+                            regime_mult=regime_mult,
+                            exec_conf=exec_conf,
+                            max_cap=float(OPP_MAX_CAP),
+                            min_cap=float(OPP_MIN_CAP),
+                            convex_power=float(OPP_CONVEX_POWER),
+                        )
+                    except Exception:
+                        opp_mult = 0.0
+
+                    if float(opp_mult) <= 0.0:
+                        logging.info(
+                            "SKIP_NO_OPPORTUNITY symbol=%s conf=%.2f exec_conf=%.2f regime_mult=%.2f",
+                            it.get("symbol"),
+                            conf,
+                            exec_conf,
+                            regime_mult,
+                        )
+                        it2 = dict(it)
+                        it2["blocked_reason"] = "opportunity_weight_zero"
+                        it2["blocked_meta"] = {
+                            "confidence": conf,
+                            "execution_confidence": exec_conf,
+                            "regime_mult": regime_mult,
+                            "opp_mult": float(opp_mult),
+                        }
+                        skipped.append(it2)
+                        continue
+
+                    # Apply multiplier to target_weight (if present)
+                    try:
+                        tw = float(it.get("target_weight", 0.0))
+                        tw2 = float(tw) * float(opp_mult)
+
+                        # Hard single-position cap (abs)
+                        cap = float(MAX_SINGLE_POSITION_WEIGHT)
+                        if cap > 0:
+                            if tw2 > cap:
+                                tw2 = cap
+                            elif tw2 < -cap:
+                                tw2 = -cap
+
+                        it["target_weight"] = float(tw2)
+                        it["opp_mult"] = float(opp_mult)
+                        it["regime_mult"] = float(regime_mult)
+                    except Exception:
+                        # if target_weight isn't a thing in this intent schema, still allow through
+                        it["opp_mult"] = float(opp_mult)
+                        it["regime_mult"] = float(regime_mult)
+
+                    sym = str(it.get("symbol") or "").strip()
                     # Kill switch per-symbol/per-regime (fail-closed)
                     allow2, ks_reason2, ks_meta2 = execution_allowed(con=con, symbol=sym, regime=regime)
                     if not allow2:
@@ -240,12 +315,12 @@ def main() -> int:
                 out = {
                     "status": "ok",
                     "rebalance": rebalance_res,
+                    "regime": regime_info,
                     "executed": executed,
                     "skipped": skipped,
                     "portfolio": snapshot,
                     "ts_ms": int(time.time() * 1000),
                 }
-
                 print(json.dumps(out, indent=2))
 
             finally:

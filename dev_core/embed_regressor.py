@@ -43,6 +43,7 @@ import torch
 import torch.nn as nn
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from dev_core.feature_expansion import build_feature_vector, feature_set_tag
 from asset_map import asset_class_for_symbol
 _SCHEMA = """

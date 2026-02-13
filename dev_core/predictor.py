@@ -10,13 +10,14 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from dev_core.learning import (
     confidence_from_weight,
     confidence_from_n,
     get_global_prior,
     learn_relevance_stats,
 )
-from dev_core.model_v2 import get_regime_prior, get_spillover_betas
+from dev_core.model_v2 import get_regime_prior, get_spillover_betas, get_current_regime
 
 # ------            -- ------------------------------------------------------
 # Option A: supervised embedding regressor (OPT-IN)
@@ -25,6 +26,7 @@ from dev_core.embed_regressor import predict_with_embed_model
 from dev_core.feature_expansion import build_feature_vector
 
 _USE_EMBED_REGRESSOR = os.environ.get("USE_EMBED_REGRESSOR", "0") == "1"
+MODEL_NAME = os.environ.get("MODEL_NAME", "embed_regressor").strip() or "embed_regressor"
 _EMBED_REGRESSOR_CONF_K = float(os.environ.get("EMBED_REGRESSOR_CONF_K", "75.0"))
 _EMBED_CONF_CALIB = os.environ.get("EMBED_CONF_CALIB", "1") == "1"
 
@@ -459,11 +461,23 @@ def predict_event(
       (symbol, horizon_s) -> (expected_z, confidence, explain_dict)
     """
     learned = None
+
+    # Capture regime at prediction time (stored in explain for DB writer to persist as regime_at_trade)
+    try:
+        regime_at_trade = str(get_current_regime("SPY") or "MID").upper()
+    except Exception:
+        regime_at_trade = "MID"
     if _USE_LEARNED_REL:
         try:
             learned = learn_relevance_stats(abs_z_threshold=float(_LEARNED_REL_ABS_Z))
         except Exception:
             learned = None
+
+    # Capture regime at prediction time (stored in explain for DB writer to persist as regime_at_trade)
+    try:
+        regime_at_trade = str(get_current_regime("SPY") or "MID").upper()
+    except Exception:
+        regime_at_trade = "MID"
 
     base: Dict[Tuple[str, int], Tuple[float, float, Dict]] = {}
 
@@ -524,6 +538,8 @@ def predict_event(
 
                 explain = {
                     "model": "embed_regressor",
+                    "model_name": str(MODEL_NAME),
+                    "regime_at_trade": str(regime_at_trade),
                     "model_kind": str(model_kind),
                     "conf_raw": float(conf_raw),
                     "conf_calibrated": float(conf),
@@ -548,6 +564,8 @@ def predict_event(
             z, conf, prior_ex = _blend_with_priors(sym, int(h), knn_z, wsum)
 
             explain = {
+                "model_name": str(MODEL_NAME),
+                "regime_at_trade": str(regime_at_trade),
                 "knn": knn_ex,
                 "prior": prior_ex,
             }

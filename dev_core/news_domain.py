@@ -3,6 +3,7 @@ import json
 from urllib.parse import urlparse
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 
 def extract_domain(url: str, meta_json: str = None) -> str:

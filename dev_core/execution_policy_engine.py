@@ -24,8 +24,14 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from dev_core.kill_switch import execution_allowed
-from dev_core.alpha_lifecycle_engine import ensure_alpha_from_intent, alpha_state
+from dev_core.alpha_lifecycle_engine import (
+    ensure_alpha_from_intent,
+    alpha_state,
+    get_adaptive_half_life_ms,
+)
 
+from dev_core.trade_attribution_ledger import log_suppression
+from dev_core.risk_state import get_state
 
 # ============================================================
 # Defaults / knobs
@@ -52,6 +58,23 @@ SIM_EXTRA_SLIP_BPS_NEUTRAL = float(os.environ.get("EPE_SIM_EXTRA_SLIP_BPS_NEUTRA
 SIM_EXTRA_SLIP_BPS_AGGRESSIVE = float(os.environ.get("EPE_SIM_EXTRA_SLIP_BPS_AGGRESSIVE", "1.5"))
 
 EPE_POLICY_VERSION = os.environ.get("EPE_POLICY_VERSION", "v1").strip() or "v1"
+
+# ------            -- ------------------------------------------------------
+# Capital Preservation Mode (CPM): execution aggressiveness compression
+# ------            -- ------------------------------------------------------
+EPE_PRESERVE_FORCE_LIMIT = os.environ.get("EPE_PRESERVE_FORCE_LIMIT", "1") == "1"
+EPE_PRESERVE_CAP_TIER = os.environ.get("EPE_PRESERVE_CAP_TIER", "PASSIVE").strip().upper() or "PASSIVE"
+EPE_PRESERVE_LAT_MS_MULT = float(os.environ.get("EPE_PRESERVE_LAT_MS_MULT", "1.35"))
+EPE_PRESERVE_CHUNK_MULT = float(os.environ.get("EPE_PRESERVE_CHUNK_MULT", "0.70"))
+EPE_PRESERVE_EXTRA_SLIP_ADD_BPS = float(os.environ.get("EPE_PRESERVE_EXTRA_SLIP_ADD_BPS", "0.5"))
+EPE_PRESERVE_LIMIT_OFFSET_ADD_BPS = float(os.environ.get("EPE_PRESERVE_LIMIT_OFFSET_ADD_BPS", "3.0"))
+
+
+# urgency boost (feedback into execution urgency)
+EPE_URGENCY_ENABLED = os.environ.get("EPE_URGENCY_ENABLED", "1") == "1"
+EPE_URGENCY_START_FRAC = float(os.environ.get("EPE_URGENCY_START_FRAC", "0.60"))  # start boosting after 60% of TTL
+EPE_URGENCY_MAX_STEP = int(os.environ.get("EPE_URGENCY_MAX_STEP", "1"))  # max tier upgrades (0..2)
+EPE_URGENCY_MIN_ALPHA = float(os.environ.get("EPE_URGENCY_MIN_ALPHA", "0.35"))  # only boost if alpha still decent
 
 # ------            -- ------------------------------------------------------
 # Drawdown-based aggressiveness scaling (portfolio-level)
@@ -89,6 +112,22 @@ EPE_REGIME_EXTRA_SLIP_BPS_MANIA = float(os.environ.get("EPE_REGIME_EXTRA_SLIP_BP
 EPE_REGIME_LAT_MS_ADD_MANIA = int(os.environ.get("EPE_REGIME_LAT_MS_ADD_MANIA", "-20"))
 EPE_REGIME_CHUNK_MULT_MANIA = float(os.environ.get("EPE_REGIME_CHUNK_MULT_MANIA", "1.05"))
 
+# ----------------------------------------------------------------------
+# Trade Suppression Engine (TSE)
+# ----------------------------------------------------------------------
+
+TSE_FP_STREAK_HARD = int(os.environ.get("TSE_FP_STREAK_HARD", "5"))
+TSE_FP_STREAK_SOFT = int(os.environ.get("TSE_FP_STREAK_SOFT", "3"))
+
+TSE_SLIPPAGE_Z_HARD = float(os.environ.get("TSE_SLIPPAGE_Z_HARD", "3.0"))
+TSE_SLIPPAGE_Z_SOFT = float(os.environ.get("TSE_SLIPPAGE_Z_SOFT", "1.8"))
+
+TSE_LATENCY_VAR_HARD = float(os.environ.get("TSE_LATENCY_VAR_HARD", "2.5"))
+TSE_LATENCY_VAR_SOFT = float(os.environ.get("TSE_LATENCY_VAR_SOFT", "1.5"))
+
+TSE_SIZE_COMPRESSION_MULT = float(os.environ.get("TSE_SIZE_COMPRESSION_MULT", "0.5"))
+TSE_SOFT_THROTTLE_MULT = float(os.environ.get("TSE_SOFT_THROTTLE_MULT", "0.7"))
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -121,7 +160,17 @@ def _ensure_tables(con) -> None:
         CREATE INDEX IF NOT EXISTS idx_epe_audit_ts ON execution_policy_audit(ts_ms);
         CREATE INDEX IF NOT EXISTS idx_epe_audit_sym ON execution_policy_audit(symbol);
         CREATE INDEX IF NOT EXISTS idx_epe_audit_alert ON execution_policy_audit(source_alert_id);
-        """
+
+        CREATE TABLE IF NOT EXISTS trade_suppression_state (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          ts_ms INTEGER NOT NULL,
+          state TEXT NOT NULL,
+          fp_streak INTEGER,
+          slippage_z REAL,
+          latency_var_z REAL,
+          reason_json TEXT
+        );
+       """
     )
 
 
@@ -151,7 +200,67 @@ def _aggr_rank(aggr: str) -> int:
     return 2  # AGGRESSIVE (default)
 
 
+def _capital_mode() -> str:
+    try:
+        return str(get_state("capital_mode", "normal") or "normal")
+    except Exception:
+        return "normal"
+
+
+def _apply_capital_preservation_mode(
+    order_type: str,
+    aggressiveness: str,
+    sim_lat_ms: int,
+    sim_chunk_pct: float,
+    sim_extra_slip: float,
+    limit_offset_bps: float,
+) -> Tuple[str, str, int, float, float, float, Dict[str, Any]]:
+
+    info: Dict[str, Any] = {"active": 0}
+
+    if _capital_mode() != "preserve":
+        return order_type, aggressiveness, sim_lat_ms, sim_chunk_pct, sim_extra_slip, limit_offset_bps, info
+
+    info["active"] = 1
+    info["cap_tier"] = str(EPE_PRESERVE_CAP_TIER)
+
+    # cap aggressiveness tier
+    try:
+        if _aggr_rank(str(aggressiveness)) > _aggr_rank(str(EPE_PRESERVE_CAP_TIER)):
+            aggressiveness = str(EPE_PRESERVE_CAP_TIER)
+            info["tier_capped"] = 1
+    except Exception:
+        pass
+
+    # force LIMIT in preserve (best-effort)
+    if EPE_PRESERVE_FORCE_LIMIT:
+        if str(order_type).upper() != "LIMIT":
+            order_type = "LIMIT"
+            info["force_limit"] = 1
+
+    # less aggressive microstructure
+    try:
+        sim_lat_ms = int(max(1, float(sim_lat_ms) * float(EPE_PRESERVE_LAT_MS_MULT)))
+    except Exception:
+        pass
+    try:
+        sim_chunk_pct = float(max(0.05, min(1.0, float(sim_chunk_pct) * float(EPE_PRESERVE_CHUNK_MULT))))
+    except Exception:
+        pass
+    try:
+        sim_extra_slip = float(sim_extra_slip) + float(EPE_PRESERVE_EXTRA_SLIP_ADD_BPS)
+    except Exception:
+        pass
+    try:
+        limit_offset_bps = float(limit_offset_bps) + float(EPE_PRESERVE_LIMIT_OFFSET_ADD_BPS)
+    except Exception:
+        pass
+
+    return order_type, aggressiveness, sim_lat_ms, sim_chunk_pct, sim_extra_slip, limit_offset_bps, info
+
+
 def _cap_aggressiveness_by_drawdown(
+
     *,
     dd: float,
     order_type: str,
@@ -302,6 +411,118 @@ def _apply_regime_microstructure_tuning(
 
     return int(sim_lat_ms), float(sim_chunk_pct), float(sim_extra_slip_bps), float(limit_offset_bps), info
 
+def _evaluate_trade_suppression(con) -> Dict[str, Any]:
+    now = _now_ms()
+
+    fp_streak = 0
+    slippage_z = 0.0
+    latency_var_z = 0.0
+
+    # False positive streak (from execution_quality_job / exec_stats)
+    try:
+        from dev_core.exec_stats import get_false_positive_streak
+        fp_streak = int(get_false_positive_streak(con) or 0)
+    except Exception:
+        fp_streak = 0
+
+    # Slippage Z-score
+    try:
+        from dev_core.execution_analytics_engine import get_slippage_zscore
+        slippage_z = float(get_slippage_zscore(con) or 0.0)
+    except Exception:
+        slippage_z = 0.0
+
+    # Latency variance Z-score
+    try:
+        from dev_core.execution_analytics_engine import get_latency_variance_zscore
+        latency_var_z = float(get_latency_variance_zscore(con) or 0.0)
+    except Exception:
+        latency_var_z = 0.0
+
+    state = "NORMAL"
+
+    # load prior state
+    prior_state = "NORMAL"
+    try:
+        row = con.execute(
+            "SELECT state FROM trade_suppression_state WHERE id=1"
+        ).fetchone()
+        if row and row[0]:
+            prior_state = str(row[0])
+    except Exception:
+        prior_state = "NORMAL"
+
+    # HARD trigger
+    hard_trigger = (
+        fp_streak >= TSE_FP_STREAK_HARD
+        or slippage_z >= TSE_SLIPPAGE_Z_HARD
+        or latency_var_z >= TSE_LATENCY_VAR_HARD
+    )
+
+    soft_trigger = (
+        fp_streak >= TSE_FP_STREAK_SOFT
+        or slippage_z >= TSE_SLIPPAGE_Z_SOFT
+        or latency_var_z >= TSE_LATENCY_VAR_SOFT
+    )
+
+    compress_trigger = (
+        slippage_z >= 1.2
+        or latency_var_z >= 1.2
+    )
+
+    if hard_trigger:
+        state = "HARD_BLOCK"
+
+    elif prior_state == "HARD_BLOCK":
+        # require full recovery before leaving hard block
+        if not soft_trigger and not compress_trigger:
+            state = "SOFT_THROTTLE"
+        else:
+            state = "HARD_BLOCK"
+
+    elif soft_trigger:
+        state = "SOFT_THROTTLE"
+
+    elif compress_trigger:
+        state = "SIZE_COMPRESSION"
+
+    else:
+        state = "NORMAL"
+
+    try:
+        con.execute(
+            """
+            INSERT OR REPLACE INTO trade_suppression_state(
+              id, ts_ms, state, fp_streak, slippage_z, latency_var_z, reason_json
+            )
+            VALUES (1,?,?,?,?,?,?)
+            """,
+            (
+                int(now),
+                str(state),
+                int(fp_streak),
+                float(slippage_z),
+                float(latency_var_z),
+                json.dumps(
+                    {
+                        "fp_streak": int(fp_streak),
+                        "slippage_z": float(slippage_z),
+                        "latency_var_z": float(latency_var_z),
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            ),
+        )
+    except Exception:
+        pass
+
+    return {
+        "state": state,
+        "fp_streak": fp_streak,
+        "slippage_z": slippage_z,
+        "latency_var_z": latency_var_z,
+    }
 
 def apply_execution_policy(
     con,
@@ -315,9 +536,63 @@ def apply_execution_policy(
 
     _ensure_tables(con)
 
+    # ---- Trade Suppression Engine (TSE)
+    tse = _evaluate_trade_suppression(con)
+    if tse.get("state") == "HARD_BLOCK":
+        try:
+            con.execute(
+                """
+                INSERT INTO execution_policy_audit(
+                  ts_ms, actor, mode, broker, policy_version,
+                  portfolio_orders_batch_id, source_order_id, source_alert_id,
+                  symbol, to_side, to_weight,
+                  signal_ts_ms, age_ms, ttl_ms, half_life_ms, alpha_remaining,
+                  decision_json
+                )
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    int(_now_ms()),
+                    (str(actor) if actor is not None else None),
+                    (str(mode) if mode is not None else None),
+                    (str(broker) if broker is not None else None),
+                    str(EPE_POLICY_VERSION),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    0.0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    0.0,
+                    json.dumps(
+                        {
+                            "blocked_by_tse": True,
+                            "state": tse.get("state"),
+                            "reason": "hard_block",
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ),
+            )
+        except Exception:
+            pass
+
+        return []
+
     # ---- Execution risk governor (capital guard / trading state) hard gate
     try:
-        from dev_core.capital_guard import trading_allowed as _trading_allowed
+        from dev_core.capital_guard import update_capital_preservation_mode, trading_allowed as _trading_allowed
+        # refresh CPM state (best-effort; never blocks by itself)
+        try:
+            update_capital_preservation_mode(con=con)
+        except Exception:
+            pass
+
         if not bool(_trading_allowed(con=con)):
             return []
     except Exception:
@@ -377,15 +652,55 @@ def apply_execution_policy(
                 signal_ts = 0
 
         if signal_ts <= 0 and STRICT_SIGNAL_TS:
+            try:
+                log_suppression(
+                    source_alert_id=(int(o.get("source_alert_id")) if o.get("source_alert_id") is not None else None),
+                    symbol=str(symbol),
+                    suppression_reason="missing_signal_ts",
+                    signal_json={
+                        "source_order_id": o.get("source_order_id"),
+                        "source_alert_id": o.get("source_alert_id"),
+                        "signal_ts_ms": int(signal_ts),
+                        "strict": True,
+                    },
+                    regime_vector_json=(o.get("exec_regime") if isinstance(o.get("exec_regime"), dict) else None),
+                    decision_json={"blocked": True, "reason": "missing_signal_ts"},
+                )
+            except Exception:
+                pass
             continue
 
         ttl_ms = max(1, int(o.get("alpha_ttl_ms") or DEFAULT_TTL_MS))
         half_life_ms = max(1, int(o.get("alpha_half_life_ms") or DEFAULT_HALF_LIFE_MS))
 
+        # adaptive half-life (auto-shortening per symbol based on decay distribution)
+        try:
+            half_life_ms = int(get_adaptive_half_life_ms(con, symbol=str(symbol), default_half_life_ms=int(half_life_ms)))
+            half_life_ms = max(1, int(half_life_ms))
+        except Exception:
+            pass
+
         age_ms = max(0, now - signal_ts)
 
         # TTL hard wall (fail-closed)
         if age_ms > ttl_ms:
+            try:
+                log_suppression(
+                    source_alert_id=(int(o.get("source_alert_id")) if o.get("source_alert_id") is not None else None),
+                    symbol=str(symbol),
+                    suppression_reason="ttl_expired",
+                    signal_json={
+                        "source_order_id": o.get("source_order_id"),
+                        "source_alert_id": o.get("source_alert_id"),
+                        "signal_ts_ms": int(signal_ts) if signal_ts > 0 else None,
+                        "age_ms": int(age_ms),
+                        "ttl_ms": int(ttl_ms),
+                    },
+                    regime_vector_json=(o.get("exec_regime") if isinstance(o.get("exec_regime"), dict) else None),
+                    decision_json={"blocked": True, "reason": "ttl_expired"},
+                )
+            except Exception:
+                pass
             continue
 
         # ALE: ensure lifecycle record exists + compute alpha_remaining
@@ -417,6 +732,32 @@ def apply_execution_policy(
         order_type, aggressiveness, sim_lat_ms, sim_chunk_pct, sim_extra_slip, limit_offset_bps = \
             _decision_from_alpha(float(alpha_rem))
 
+        # urgency boost (feedback loop): as signal ages toward TTL, allow a bounded tier upgrade
+        if EPE_URGENCY_ENABLED:
+            try:
+                if ttl_ms > 0 and float(alpha_rem) >= float(EPE_URGENCY_MIN_ALPHA):
+                    frac = float(age_ms) / float(ttl_ms)
+                    if frac >= float(EPE_URGENCY_START_FRAC):
+                        # 0..1 after start
+                        u = (frac - float(EPE_URGENCY_START_FRAC)) / max(1e-9, (1.0 - float(EPE_URGENCY_START_FRAC)))
+                        u = max(0.0, min(1.0, float(u)))
+                        step = int(round(float(EPE_URGENCY_MAX_STEP) * float(u)))
+                        step = max(0, min(2, int(step)))
+
+                        # upgrade aggressiveness tier by step (PASSIVE->NEUTRAL->AGGRESSIVE), bounded
+                        if step > 0:
+                            cur = _aggr_rank(str(aggressiveness))
+                            tgt = max(0, min(2, int(cur) + int(step)))
+                            if tgt != cur:
+                                if tgt == 0:
+                                    order_type, aggressiveness, sim_lat_ms, sim_chunk_pct, sim_extra_slip, limit_offset_bps = _tier_params("PASSIVE")
+                                elif tgt == 1:
+                                    order_type, aggressiveness, sim_lat_ms, sim_chunk_pct, sim_extra_slip, limit_offset_bps = _tier_params("NEUTRAL")
+                                else:
+                                    order_type, aggressiveness, sim_lat_ms, sim_chunk_pct, sim_extra_slip, limit_offset_bps = _tier_params("AGGRESSIVE")
+            except Exception:
+                pass
+
         # Drawdown-based aggressiveness scaling (portfolio-level)
         (
             order_type,
@@ -447,6 +788,24 @@ def apply_execution_policy(
             limit_offset_bps=limit_offset_bps,
         )
 
+        # Capital Preservation Mode: cap aggressiveness + force passive execution profile
+        (
+            order_type,
+            aggressiveness,
+            sim_lat_ms,
+            sim_chunk_pct,
+            sim_extra_slip,
+            limit_offset_bps,
+            cap_info,
+        ) = _apply_capital_preservation_mode(
+            order_type=order_type,
+            aggressiveness=aggressiveness,
+            sim_lat_ms=sim_lat_ms,
+            sim_chunk_pct=sim_chunk_pct,
+            sim_extra_slip=sim_extra_slip,
+            limit_offset_bps=limit_offset_bps,
+        )
+
         # Slippage feedback adjustments (analytics loop)
         fb_key = f"{order_type}|{aggressiveness}"
         fb_row = feedback.get(fb_key) or {}
@@ -462,9 +821,41 @@ def apply_execution_policy(
         # Symbol-level kill switch gate (fail-closed)
         allow_sym, sym_reason, sym_meta = execution_allowed(con=con, symbol=symbol, regime=None)
         if not allow_sym:
+            try:
+                log_suppression(
+                    source_alert_id=(int(o.get("source_alert_id")) if o.get("source_alert_id") is not None else None),
+                    symbol=str(symbol),
+                    suppression_reason="kill_switch_symbol",
+                    signal_json={
+                        "source_order_id": o.get("source_order_id"),
+                        "source_alert_id": o.get("source_alert_id"),
+                    },
+                    regime_vector_json=(o.get("exec_regime") if isinstance(o.get("exec_regime"), dict) else None),
+                    execution_policy_json={"kill_switch_symbol": {"allow": False, "reason": sym_reason, "meta": sym_meta}},
+                    decision_json={"blocked": True, "reason": "kill_switch_symbol", "detail": {"reason": sym_reason, "meta": sym_meta}},
+                )
+            except Exception:
+                pass
             continue
+        # ---- Capital Preservation size compression (execution layer)
+        try:
+            if _capital_mode() == "preserve":
+                # execution-level compression (does NOT affect portfolio sizing)
+                to_weight_f = float(to_weight_f) * 0.75
+        except Exception:
+            pass
+
+        # ---- Apply Trade Suppression scaling
+        suppression_state = tse.get("state")
+
+        if suppression_state == "SOFT_THROTTLE":
+            to_weight_f *= float(TSE_SOFT_THROTTLE_MULT)
+
+        elif suppression_state == "SIZE_COMPRESSION":
+            to_weight_f *= float(TSE_SIZE_COMPRESSION_MULT)
 
         shaped = {
+
             **o,
             "symbol": symbol,
             "to_side": to_side,
@@ -537,6 +928,12 @@ def apply_execution_policy(
                                 "vvix": float(stress.get("vvix", 0.0) or 0.0),
                                 "move": float(stress.get("move", 0.0) or 0.0),
                             },
+                                "execution_regime_snapshot": {
+                                "stress_score": float(stress_score),
+                                "stress_raw": stress,
+                                "social_regime": social,
+                            },
+
                             "social_regime": {
                                 "regime": (social or {}).get("regime"),
                                 "regime_conf": float((social or {}).get("regime_conf", 0.0) or 0.0),
@@ -550,8 +947,20 @@ def apply_execution_policy(
                                 "limit_offset_bps": float(fb_row.get("limit_offset_bps", 0.0) or 0.0),
                                 "extra_slip_bps": float(fb_row.get("extra_slip_bps", 0.0) or 0.0),
                             },
-                            "kill_switch_global": {"allow": True, "reason": ks_reason, "meta": ks_meta},
-                            "kill_switch_symbol": {"allow": True, "reason": sym_reason, "meta": sym_meta},
+                            "kill_switch_global": {"allow": bool(allow), "reason": ks_reason, "meta": ks_meta},
+                            "kill_switch_symbol": {"allow": bool(allow_sym), "reason": sym_reason, "meta": sym_meta},
+                               "capital_preservation": {
+                                "mode": _capital_mode(),
+                                "active": 1 if _capital_mode() == "preserve" else 0,
+                                "cap_info": cap_info,
+                            },
+
+                                "trade_suppression": {
+                                "state": tse.get("state"),
+                                "fp_streak": tse.get("fp_streak"),
+                                "slippage_z": tse.get("slippage_z"),
+                                "latency_var_z": tse.get("latency_var_z"),
+                            },
                         },
                         separators=(",", ":"),
                         sort_keys=True,

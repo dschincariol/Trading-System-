@@ -4,6 +4,7 @@ import time
 from typing import Any, Dict, Optional
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from dev_core.kill_switch import execution_allowed
 from dev_core.rules_engine import evaluate_rules
 from dev_core.costs import estimate_cost

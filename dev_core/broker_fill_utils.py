@@ -5,6 +5,7 @@ Utilities to aggregate broker fills into realized entry/exit prices.
 
 from typing import Optional, Dict, Any, Tuple
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 
 def _vwap(rows):

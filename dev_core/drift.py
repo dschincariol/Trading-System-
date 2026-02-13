@@ -12,6 +12,7 @@ import time
 import numpy as np
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 RECENT_N = int(50)        # recent samples
 BASELINE_N = int(200)     # long-term baseline

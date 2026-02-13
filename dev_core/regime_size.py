@@ -48,6 +48,7 @@ from typing import Dict, Any, Tuple, Optional
 
 from dev_core.model_v2 import get_current_regime, classify_regime
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 USE = os.environ.get("PORTFOLIO_REGIME_SCALE_ENABLE", "1") == "1"
 

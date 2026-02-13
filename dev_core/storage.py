@@ -526,6 +526,14 @@ def _ensure_strategy_metrics_schema(con):
         """
     )
 
+    # Optional column used by governance to mark pass/fail states.
+    # Additive migration; safe on existing DBs.
+    try:
+        if not _has_column(con, "strategy_metrics", "is_active"):
+            con.execute("ALTER TABLE strategy_metrics ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1;")
+    except Exception:
+        pass
+
 def _ensure_universe_audit_schema(con):
     # Additive, idempotent: universe selection / exclusion reasons for auditability
     con.executescript(
@@ -591,6 +599,46 @@ def _ensure_kill_switch_schema(con):
 
         CREATE INDEX IF NOT EXISTS idx_kill_switch_audit_ts
           ON kill_switch_audit(ts_ms);
+        """
+    )
+
+
+def _ensure_trade_attribution_ledger_schema(con):
+    # Additive, idempotent: trade attribution ledger (signal/model/regime/policy/suppression -> pnl)
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS trade_attribution_ledger (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts_ms INTEGER NOT NULL,
+
+          source_alert_id INTEGER,
+          symbol TEXT NOT NULL,
+
+          signal_json TEXT,
+          model_json TEXT,
+          regime_vector_json TEXT,
+
+          execution_policy_json TEXT,
+          suppression_reason TEXT,
+
+          pnl REAL,
+          fees REAL,
+          slippage_bps REAL,
+
+          decision_json TEXT,
+          created_ts_ms INTEGER NOT NULL,
+
+          UNIQUE(ts_ms, source_alert_id, symbol, suppression_reason)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_trade_attr_ts
+          ON trade_attribution_ledger(ts_ms);
+
+        CREATE INDEX IF NOT EXISTS idx_trade_attr_alert
+          ON trade_attribution_ledger(source_alert_id);
+
+        CREATE INDEX IF NOT EXISTS idx_trade_attr_symbol_ts
+          ON trade_attribution_ledger(symbol, ts_ms);
         """
     )
 
@@ -1464,6 +1512,7 @@ def init_db():
         _ensure_strategy_metrics_schema(con)
         _ensure_universe_audit_schema(con)
         _ensure_execution_mode_armed_column(con)
+        _ensure_trade_attribution_ledger_schema(con)
 
         # Additive: ensure symbols table exists even for older DBs
         try:

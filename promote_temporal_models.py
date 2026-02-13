@@ -97,18 +97,21 @@ def main() -> int:
             rows = con.execute(
                 """
                 SELECT
-                  e.key_type,
-                  e.key,
-                  e.horizon_s,
-                  e.rmse,
-                  e.baseline_rmse,
-                  e.directional_acc,
-                  e.baseline_directional_acc,
-                  e.n,
-                  json_extract(e.detail_json, '$.latest_model_ts_ms') AS model_ts_ms
+                e.key_type,
+                e.key,
+                e.horizon_s,
+                e.rmse,
+                e.baseline_rmse,
+                e.directional_acc,
+                e.baseline_directional_acc,
+                e.n,
+                json_extract(e.detail_json, '$.latest_model_ts_ms') AS model_ts_ms,
+                json_extract(e.detail_json, '$.capital_efficiency') AS capital_efficiency,
+                json_extract(e.detail_json, '$.drawdown_contribution') AS drawdown_contribution,
+                json_extract(e.detail_json, '$.avg_slippage_impact') AS avg_slippage_impact
                 FROM temporal_shadow_eval e
                 WHERE e.pass_all = 1
-                  AND e.n >= ?
+                AND e.n >= ?
                 """,
                 (int(MIN_N),),
             ).fetchall()
@@ -123,7 +126,11 @@ def main() -> int:
                 b_da,
                 n,
                 model_ts_ms,
+                capital_efficiency,
+                drawdown_contribution,
+                avg_slippage_impact,
             ) in rows or []:
+
 
                 if not model_ts_ms:
                     skipped.append({"key": key, "reason": "missing_model_ts"})
@@ -132,6 +139,22 @@ def main() -> int:
                 age_ms = now_ms - int(model_ts_ms)
                 if age_ms > max_age_ms:
                     skipped.append({"key": key, "reason": "model_too_old"})
+                    continue
+
+                # Safety-first composite score
+                if capital_efficiency is None:
+                    skipped.append({"key": key, "reason": "missing_capital_efficiency"})
+                    continue
+
+                score = (
+                    float(capital_efficiency) * 2.0
+                    - float(drawdown_contribution or 0.0) * 0.5
+                    - float(avg_slippage_impact or 0.0) * 0.5
+                    + float(da or 0.0)
+                )
+
+                if score <= 0:
+                    skipped.append({"key": key, "reason": "negative_safety_score"})
                     continue
 
                 promote_key = f"{key_type}:{key}:{int(horizon_s)}"
@@ -175,6 +198,10 @@ def main() -> int:
                         "baseline_directional_acc": b_da,
                         "n": n,
                         "model_ts_ms": int(model_ts_ms),
+                        "capital_efficiency": capital_efficiency,
+                        "drawdown_contribution": drawdown_contribution,
+                        "avg_slippage_impact": avg_slippage_impact,
+                        "safety_score": score,
                     },
                 )
 

@@ -25,8 +25,10 @@ import os
 import time
 import math
 import hashlib
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 # -----------------------------
 # Small numeric guards
@@ -72,6 +74,95 @@ def _u01(seed: str) -> float:
         # 12 hex chars ~ 48 bits
         n = int(h[:12], 16)
         return (n % 10_000_000) / 10_000_000.0
+    except Exception:
+        return 0.0
+
+
+# -----------------------------
+# Execution ROI conditioning (no sentiment, no LLM)
+# -----------------------------
+
+_EARNINGS_HALF_LIFE_DAYS = float(os.environ.get("EARNINGS_HALF_LIFE_DAYS", "5.0"))
+_EXEC_SKEW_Z_THRESH = float(os.environ.get("EXEC_SKEW_Z_THRESH", "1.5"))
+_EXEC_FLOW_Z_THRESH = float(os.environ.get("EXEC_FLOW_Z_THRESH", "2.0"))
+_EXEC_EARNINGS_SIZE_MAX_REDUCTION = float(os.environ.get("EXEC_EARNINGS_SIZE_MAX_REDUCTION", "0.55"))
+_EXEC_STRESS_SIZE_MAX_REDUCTION = float(os.environ.get("EXEC_STRESS_SIZE_MAX_REDUCTION", "0.35"))
+_EXEC_EARNINGS_SLIP_ADD_BPS = float(os.environ.get("EXEC_EARNINGS_SLIP_ADD_BPS", "0.75"))
+_EXEC_STRESS_SLIP_ADD_BPS = float(os.environ.get("EXEC_STRESS_SLIP_ADD_BPS", "0.75"))
+_EXEC_STRESS_LATENCY_MULT_MAX = float(os.environ.get("EXEC_STRESS_LATENCY_MULT_MAX", "2.0"))
+
+
+def _clamp01(x: float) -> float:
+    return _clamp(float(x), 0.0, 1.0)
+
+
+def _get_factor_feature_asof(con, feature_id: str, ts_ms: int) -> float:
+    try:
+        row = con.execute(
+            """
+            SELECT value
+            FROM factor_features
+            WHERE feature_id=?
+              AND asof_ts <= ?
+              AND effective_ts <= ?
+            ORDER BY asof_ts DESC, effective_ts DESC
+            LIMIT 1
+            """,
+            (str(feature_id), int(ts_ms), int(ts_ms)),
+        ).fetchone()
+        if not row:
+            return 0.0
+        return _safe_f(row[0], 0.0)
+    except Exception:
+        return 0.0
+
+
+def _ymd_from_ts_ms(ts_ms: int) -> str:
+    try:
+        dt = datetime.fromtimestamp(int(ts_ms) / 1000.0, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return time.strftime("%Y-%m-%d", time.gmtime(int(ts_ms) / 1000.0))
+
+
+def _earnings_proximity_decay(con, symbol: str, ts_ms: int) -> float:
+    """
+    Returns [0,1]. 1.0 = very near earnings date, 0.0 = far.
+    Uses nearest earnings_calendar row by date distance.
+    """
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return 0.0
+
+    try:
+        today = _ymd_from_ts_ms(int(ts_ms))
+        row = con.execute(
+            """
+            SELECT earnings_date
+            FROM earnings_calendar
+            WHERE symbol=?
+            ORDER BY ABS(julianday(earnings_date) - julianday(?)) ASC
+            LIMIT 1
+            """,
+            (sym, str(today)),
+        ).fetchone()
+        if not row:
+            return 0.0
+
+        ed = str(row[0] or "").strip()
+        if not ed:
+            return 0.0
+
+        jd = con.execute(
+            "SELECT (julianday(?) - julianday(?))",
+            (str(ed), str(today)),
+        ).fetchone()
+        if not jd or jd[0] is None:
+            return 0.0
+
+        days = float(jd[0])
+        hl = max(0.5, float(_EARNINGS_HALF_LIFE_DAYS))
+        return _clamp01(math.exp(-abs(days) / hl))
     except Exception:
         return 0.0
 
@@ -478,7 +569,48 @@ def apply_new_portfolio_orders(
                 "account": acct,
             }
 
-        max_notional_budget = max(0.0, float(equity) * float(BROKER_MAX_TRADE_PCT_EQUITY))
+        base_max_notional_budget = max(0.0, float(equity) * float(BROKER_MAX_TRADE_PCT_EQUITY))
+
+        # ------------------------------------------------------------
+        # Execution ROI conditioning (sizing/execution only; not signal)
+        # Uses factor_features + earnings_calendar:
+        # - options.skew_25d_z: stressed skew => smaller size + more slippage
+        # - flows.index_constituent_imbalance_z: rotation => smaller size + more slippage/latency
+        # - earnings proximity: near earnings => smaller size + more slippage
+        # ------------------------------------------------------------
+        skew_z = _get_factor_feature_asof(con, "options.skew_25d_z", int(ts_ms))
+        flow_z = _get_factor_feature_asof(con, "flows.index_constituent_imbalance_z", int(ts_ms))
+
+        stress_mag = max(
+            0.0,
+            max(
+                abs(float(skew_z)) - float(_EXEC_SKEW_Z_THRESH),
+                abs(float(flow_z)) - float(_EXEC_FLOW_Z_THRESH),
+            ),
+        )
+
+        # Global stress sizing multiplier (bounded)
+        stress_size_mult = 1.0
+        if stress_mag > 0.0:
+            stress_size_mult = float(_clamp(1.0 - (stress_mag * float(_EXEC_STRESS_SIZE_MAX_REDUCTION)), 0.20, 1.0))
+
+        # Global stress slippage/latency adds (bounded)
+        stress_slip_add_bps = 0.0
+        if stress_mag > 0.0:
+            stress_slip_add_bps = float(_clamp(stress_mag * float(_EXEC_STRESS_SLIP_ADD_BPS), 0.0, 5.0))
+
+        stress_latency_mult = 1.0
+        if abs(float(flow_z)) > float(_EXEC_FLOW_Z_THRESH):
+            stress_latency_mult = float(
+                _clamp(
+                    1.0 + 0.25 * (abs(float(flow_z)) - float(_EXEC_FLOW_Z_THRESH)),
+                    1.0,
+                    float(_EXEC_STRESS_LATENCY_MULT_MAX),
+                )
+            )
+
+        max_notional_budget = max(0.0, float(base_max_notional_budget) * float(stress_size_mult))
+
         # default chunk cap (may be overridden per-order by EPE)
         chunk_cap_notional = max(1e-9, float(max_notional_budget) * float(BROKER_CHUNK_PCT or 0.33))
 
@@ -568,6 +700,17 @@ def apply_new_portfolio_orders(
             local_latency_ms = int(_lat_ms) if (_lat_ms is not None and int(_lat_ms) > 0) else int(BROKER_LATENCY_MS)
             local_chunk_pct = float(_chunk_pct) if (_chunk_pct is not None and 0.01 <= float(_chunk_pct) <= 1.0) else float(BROKER_CHUNK_PCT)
 
+            # global stress conditioning (execution-only)
+            try:
+                local_latency_ms = int(max(1, int(float(local_latency_ms) * float(stress_latency_mult))))
+            except Exception:
+                pass
+            try:
+                if abs(float(skew_z)) > float(_EXEC_SKEW_Z_THRESH) or abs(float(flow_z)) > float(_EXEC_FLOW_Z_THRESH):
+                    local_chunk_pct = float(_clamp(local_chunk_pct * 0.85, 0.05, 1.0))
+            except Exception:
+                pass
+
             # regime-adaptive tweaks (deterministic; auditable)
             # - higher vol => smaller chunks + more latency (slower fill) + more slippage
             # - "ILLQ"/"LOW_LIQ"/"WIDE" => more slippage + smaller chunks
@@ -591,7 +734,7 @@ def apply_new_portfolio_orders(
             elif aggressiveness == "AGGRESSIVE":
                 aggr_slip_bps = 0.50
 
-            local_slip_bps = float(BROKER_SLIPPAGE_BPS) + float(_extra_slip) + float(aggr_slip_bps)
+            local_slip_bps = float(BROKER_SLIPPAGE_BPS) + float(_extra_slip) + float(aggr_slip_bps) + float(stress_slip_add_bps)
 
             # track limit reprice attempts across chunks
             attempts_left = int(max(0, max_reprice_attempts))
@@ -622,11 +765,48 @@ def apply_new_portfolio_orders(
             if abs(delta) < 1e-9:
                 continue
 
+            # --- execution ledger mirror (ensure metrics + attribution work in sim) ---
+            # Create/refresh execution_orders row keyed by the same client_order_id used by _write_fill.
+            try:
+                from dev_core.execution_ledger import log_submit
+
+                _extra = dict(o or {})
+                try:
+                    ex = _extra.get("explain") or {}
+                    if isinstance(ex, dict):
+                        strat = (ex.get("strategy") or {}) if isinstance(ex.get("strategy"), dict) else {}
+                        if strat.get("name"):
+                            _extra["strategy_name"] = str(strat.get("name"))
+                except Exception:
+                    pass
+
+                log_submit(
+                    client_order_id=f"sim_{int(o.get('source_order_id') or 0)}_{symbol}",
+                    broker="sim",
+                    symbol=str(symbol),
+                    qty=float(delta),
+                    submit_ts_ms=int(ts_ms),
+                    ref_px=float(px_mid),
+                    broker_order_id=None,
+                    portfolio_orders_id=(int(o.get("source_order_id")) if o.get("source_order_id") is not None else None),
+                    source_alert_id=(int(o.get("source_alert_id")) if o.get("source_alert_id") is not None else None),
+                    extra=_extra,
+                )
+            except Exception:
+                pass
+
             remaining = float(delta)
             chunk_idx = 0
 
-            # per-order chunk cap (regime/vol adjusted)
-            chunk_cap_notional = max(1e-9, float(max_notional_budget) * float(local_chunk_pct or 0.33))
+            # per-order chunk cap (regime/vol adjusted) + earnings proximity conditioning
+            earnings_decay = _earnings_proximity_decay(con, symbol, int(ts_ms))
+            # size reduction near earnings (bounded)
+            earnings_size_mult = float(_clamp(1.0 - (float(earnings_decay) * float(_EXEC_EARNINGS_SIZE_MAX_REDUCTION)), 0.20, 1.0))
+            local_max_notional_budget = max(0.0, float(max_notional_budget) * float(earnings_size_mult))
+            chunk_cap_notional = max(1e-9, float(local_max_notional_budget) * float(local_chunk_pct or 0.33))
+
+            # slippage add near earnings (execution-only)
+            local_slip_bps = float(local_slip_bps) + float(_clamp(float(earnings_decay) * float(_EXEC_EARNINGS_SLIP_ADD_BPS), 0.0, 5.0))
 
             while abs(remaining) > 1e-9:
 
@@ -641,7 +821,7 @@ def apply_new_portfolio_orders(
                         ("EXPIRED", _now_ms(), int(o.get("source_order_id") or 0), symbol),
                     )
                     break
-                if max_notional_budget <= 0.0:
+                if max_notional_budget <= 0.0 or local_max_notional_budget <= 0.0:
                     break
 
                 chunk_side = "BUY" if remaining > 0 else "SELL"
@@ -671,9 +851,11 @@ def apply_new_portfolio_orders(
                     break
 
                 # cap by remaining and notional budget using provisional px
+                effective_budget = float(min(float(local_max_notional_budget), float(max_notional_budget)))
+
                 remaining_notional = abs(remaining) * px_mkt
-                if remaining_notional > max_notional_budget:
-                    qty_cap = (max_notional_budget / px_mkt) * (1.0 if remaining > 0 else -1.0)
+                if remaining_notional > effective_budget:
+                    qty_cap = (effective_budget / px_mkt) * (1.0 if remaining > 0 else -1.0)
                 else:
                     qty_cap = remaining
 
@@ -809,6 +991,16 @@ def apply_new_portfolio_orders(
                     "aggressiveness": str(aggressiveness),
                     "regime": str(regime),
                     "volatility": float(vol),
+
+                    # --- execution ROI conditioning ---
+                    "exec_stress": {
+                        "skew_z": float(skew_z),
+                        "flow_z": float(flow_z),
+                        "stress_size_mult": float(stress_size_mult),
+                        "stress_slip_add_bps": float(stress_slip_add_bps),
+                        "stress_latency_mult": float(stress_latency_mult),
+                        "earnings_decay": float(earnings_decay),
+                    },
 
                     "spread_bps": float(BROKER_SPREAD_BPS),
                     "slippage_bps": float(local_slip_bps),

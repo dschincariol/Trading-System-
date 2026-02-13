@@ -4,6 +4,7 @@ import time
 from typing import Optional
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from dev_core.model_registry import register_model
 from dev_core.training_guard import training_allowed
 from dev_core.model_v2 import train_regime_model

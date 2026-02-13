@@ -42,3 +42,25 @@ def get_current_drawdown(con=None) -> float:
     finally:
         if owns:
             con.close()
+
+# ============================================================
+# DRAWdown velocity (for TSE tail-risk trigger)
+# ============================================================
+
+def get_drawdown_velocity(con):
+    try:
+        rows = con.execute(
+            """
+            SELECT drawdown
+            FROM equity_snapshots
+            ORDER BY ts_ms DESC
+            LIMIT 5
+            """
+        ).fetchall()
+        if not rows or len(rows) < 2:
+            return 0.0
+        latest = float(rows[0][0] or 0.0)
+        prev = float(rows[1][0] or 0.0)
+        return abs(latest - prev)
+    except Exception:
+        return 0.0

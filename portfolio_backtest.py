@@ -19,7 +19,10 @@ import math
 import statistics
 import logging
 
-from dev_core.storage import connect
+from dev_core.storage import connect, init_db
+from dev_core.regime_stack import compute_regime_vector, regime_compatibility, regime_model_version
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from dev_core.execution_policy_engine import apply_execution_policy
 from dev_core.portfolio import (
     init_portfolio_db,
     PORTFOLIO_LOOKBACK_S,
@@ -280,6 +283,23 @@ def _ensure_tables(con):
     con.executescript(SCHEMA)
     con.commit()
 
+def _get_tse_state(con):
+    try:
+        row = con.execute(
+            "SELECT ts_ms, state, fp_streak, slippage_z, latency_var_z FROM trade_suppression_state WHERE id=1"
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "ts_ms": int(row[0]),
+            "state": str(row[1]),
+            "fp_streak": int(row[2]) if row[2] is not None else None,
+            "slippage_z": float(row[3]) if row[3] is not None else None,
+            "latency_var_z": float(row[4]) if row[4] is not None else None,
+        }
+    except Exception:
+        return None
+
 # -------------            -- ------------------------------------------------------
 # Label lookup
 # -------------            -- ------------------------------------------------------
@@ -434,7 +454,11 @@ def _targets_from_recent_alerts(con, now_ms, lookback_s):
                 "exec_cost": 0.0,
                 "slippage": 0.0,
                 "fees": 0.0,
+                "regime_model_version": str(regime_model_version()),
+                "regime_vector": compute_regime_vector(symbol=sym, ts_ms=int(now_ms), con=con),
+                "regime_compatibility": 1.0,
                 "_score": float(score),
+
             }
 
     positions = list(best.values())[: int(PORTFOLIO_MAX_POSITIONS)]
@@ -518,6 +542,11 @@ def run_backtest():
         max_dd = 0.0
         curve = []  # (ts_ms, ret, equity, drawdown, detail_dict)
 
+        # TSE / suppression accounting (for tail-risk validation)
+        suppression_blocks = 0
+        suppression_nonblocks = 0
+        suppression_state_counts = {}
+
         alerts = con.execute(
             """
             SELECT ts_ms
@@ -531,6 +560,83 @@ def run_backtest():
         for (ts,) in (alerts or []):
             ts_ms = int(ts)
             positions = _targets_from_recent_alerts(con, ts_ms, lookback_s)
+
+            # --- Route through EPE so TSE can HARD_BLOCK / SOFT_THROTTLE / SIZE_COMPRESSION in backtest
+            intents = []
+            for p in (positions or []):
+                sym = str(p.get("symbol") or "").strip().upper()
+                if not sym:
+                    continue
+                side = str(p.get("side") or "").upper().strip()
+                w = float(_safe_f(p.get("weight", 0.0), 0.0))
+                if w <= 0.0:
+                    continue
+                intents.append(
+                    {
+                        "symbol": sym,
+                        "to_side": ("LONG" if side == "LONG" else "SHORT"),
+                        "to_weight": float(w),
+                        "signal_ts_ms": int(ts_ms),
+                        # provide defaults so EPE TTL/half-life works even without alert_id linkage
+                        "alpha_ttl_ms": int(os.environ.get("EPE_DEFAULT_TTL_MS", str(5 * 60 * 1000))),
+                        "alpha_half_life_ms": int(os.environ.get("EPE_DEFAULT_HALF_LIFE_MS", str(90 * 1000))),
+                        "source_alert_id": None,
+                        "source_order_id": None,
+                    }
+                )
+
+            shaped = apply_execution_policy(
+                con=con,
+                intents=intents,
+                actor="backtest",
+                mode="backtest",
+                broker="sim",
+                portfolio_orders_batch_id=None,
+                default_signal_ts_ms=int(ts_ms),
+            )
+
+            # Read current TSE state snapshot (written by EPE)
+            tse_state = _get_tse_state(con)
+            tse_key = str((tse_state or {}).get("state") or "NONE")
+            suppression_state_counts[tse_key] = int(suppression_state_counts.get(tse_key, 0)) + 1
+
+            if intents and not shaped:
+                # HARD_BLOCK (or all intents suppressed) -> treat as no trades for this step
+                suppression_blocks += 1
+                positions = []
+            else:
+                suppression_nonblocks += 1
+                # Apply any size compression / throttle already embedded in shaped to_weight
+                wmap = {}
+                smap = {}
+                for o in (shaped or []):
+                    try:
+                        s = str(o.get("symbol") or "").strip().upper()
+                        if not s:
+                            continue
+                        wmap[s] = float(o.get("to_weight") or 0.0)
+                        smap[s] = str(o.get("to_side") or "").upper().strip()
+                    except Exception:
+                        continue
+
+                new_positions = []
+                for p in (positions or []):
+                    sym = str(p.get("symbol") or "").strip().upper()
+                    if not sym:
+                        continue
+                    if sym not in wmap:
+                        continue
+                    nw = float(wmap.get(sym) or 0.0)
+                    if nw <= 0.0:
+                        continue
+                    p = dict(p)
+                    p["weight"] = float(nw)
+                    # keep side consistent
+                    if smap.get(sym) in ("LONG", "SHORT"):
+                        p["side"] = smap.get(sym)
+                    new_positions.append(p)
+                positions = new_positions
+
             gross = sum(abs(float(p.get("weight", 0.0))) for p in positions)
             gross = float(gross if gross > 1e-12 else 1.0)
 
@@ -567,6 +673,9 @@ def run_backtest():
                 "exec_cost": float(exec_cost),
                 "slippage": float(slippage),
                 "fees": float(fees),
+
+                # TSE snapshot for this step (if present)
+                "tse_state": tse_state,
             }
 
             con.execute(
@@ -620,6 +729,11 @@ def run_backtest():
             "total_exec_cost": float(total_exec_cost),
             "total_slippage": float(total_slippage),
             "total_fees": float(total_fees),
+
+            # TSE / suppression validation metrics
+            "suppression_blocks": int(suppression_blocks),
+            "suppression_nonblocks": int(suppression_nonblocks),
+            "suppression_state_counts": dict(suppression_state_counts),
         }
 
         con.execute(

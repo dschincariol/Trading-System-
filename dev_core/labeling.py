@@ -4,6 +4,7 @@ from typing import Dict, List
 from dev_core.prices.returns import compute_return
 from dev_core.prices.volatility import compute_volatility
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from dev_core.model_v2 import classify_regime
 
 HORIZONS_S = {

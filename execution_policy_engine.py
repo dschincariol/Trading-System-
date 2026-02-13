@@ -1,13 +1,19 @@
 """
-Execution Policy Engine (Unified)
+Execution Policy Engine (Unified + Regime Compatible)
 
-Combines:
-- Legacy slicing + kill switch enforcement
+Preserves:
 - TTL hard stop
-- Half-life decay aggressiveness
-- New alpha_remaining model
-- Full structured audit trail
+- Half-life alpha decay
+- Aggressiveness tiers
+- Volatility slicing
 - Broker-sim overrides
+- Kill switch enforcement
+- Structured audit trail
+- Strict signal timestamp enforcement
+
+Adds:
+- Regime compatibility sizing
+- Regime compatibility audit logging
 """
 
 import json
@@ -17,7 +23,14 @@ import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from dev_core.kill_switch import execution_allowed
+from dev_core.execution_mode import get_execution_mode
+from dev_core.regime_stack import (
+    compute_regime_vector,
+    regime_compatibility,
+    regime_model_version,
+)
 
 
 # ============================================================
@@ -62,6 +75,7 @@ def _ensure_tables(con) -> None:
           age_ms INTEGER,
           ttl_ms INTEGER,
           volatility REAL,
+          regime_compat REAL,
           source_order_id INTEGER,
           policy_json TEXT NOT NULL
         );
@@ -73,9 +87,7 @@ def _ensure_tables(con) -> None:
 
 
 def _alpha_remaining(age_ms: int, half_life_ms: int, ttl_ms: int) -> float:
-    if ttl_ms <= 0:
-        return 0.0
-    if age_ms >= ttl_ms:
+    if ttl_ms <= 0 or age_ms >= ttl_ms:
         return 0.0
     hl = max(1, half_life_ms)
     rem = math.pow(0.5, float(age_ms) / float(hl))
@@ -99,7 +111,6 @@ def apply_execution_policy(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     try:
         _ensure_tables(con)
 
-        # Kill switch enforcement (fail-soft)
         allow, ks_reason, ks_meta = execution_allowed(con=con, symbol=None, regime=None)
         if not allow:
             return []
@@ -113,9 +124,8 @@ def apply_execution_policy(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             signal_ts = int(o.get("signal_ts_ms") or 0)
             ttl_ms = int(o.get("alpha_ttl_ms") or DEFAULT_TTL_MS)
 
-            if signal_ts <= 0:
-                if STRICT_SIGNAL_TS:
-                    continue
+            if signal_ts <= 0 and STRICT_SIGNAL_TS:
+                continue
 
             age_ms = now_ms - signal_ts if signal_ts > 0 else 0
             if age_ms > ttl_ms:
@@ -138,7 +148,35 @@ def apply_execution_policy(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             side = str(o.get("side") or "").upper().strip()
             volatility = float(o.get("volatility") or 0.0)
 
-            # Volatility-based slicing
+            # ----------------------------
+            # Regime compatibility shaping
+            # ----------------------------
+            try:
+                regime_vec = compute_regime_vector(symbol=symbol, ts_ms=int(signal_ts), con=con)
+            except Exception:
+                regime_vec = None
+
+            try:
+                prof = o.get("regime_profile")
+                if isinstance(prof, dict) and regime_vec:
+                    regime_comp = float(regime_compatibility(prof, regime_vec))
+                else:
+                    regime_comp = 1.0
+            except Exception:
+                regime_comp = 1.0
+
+            if not (regime_comp == regime_comp):
+                regime_comp = 1.0
+
+            regime_comp = max(0.0, min(1.0, float(regime_comp)))
+
+            qty = float(qty) * float(regime_comp)
+            if qty == 0.0:
+                continue
+
+            compat = float(regime_comp)
+
+            # Volatility slicing
             slice_pct = 0.15 if volatility > 0.03 else 0.25
             slice_qty = abs(qty) * slice_pct
             if slice_qty <= 0.0:
@@ -147,23 +185,17 @@ def apply_execution_policy(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             slices = max(1, int(abs(qty) // slice_qty))
             slices = max(1, min(25, slices))
 
-            source_order_id = o.get("source_order_id")
-            try:
-                source_order_id_i = int(source_order_id) if source_order_id is not None else None
-            except Exception:
-                source_order_id_i = None
-
-            # Per-slice expansion
             for _ in range(slices):
                 shaped.append(
                     {
                         **o,
+                        "qty": slice_qty if qty > 0 else -slice_qty,
                         "order_type": order_type,
                         "aggressiveness": aggressiveness,
-                        "slice_qty": slice_qty,
                         "cancel_replace": True,
                         "max_reprice_attempts": 3,
                         "epe_alpha_remaining": alpha_rem,
+                        "regime_compatibility": float(regime_comp),
                         "epe_broker_sim_overrides": {
                             "latency_ms": sim_lat_ms,
                             "chunk_pct": sim_chunk_pct,
@@ -172,40 +204,44 @@ def apply_execution_policy(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                     }
                 )
 
-            # Audit per original order
-            con.execute(
-                """
-                INSERT INTO execution_policy_audit(
-                  ts_ms, signal_id, symbol, side, qty, age_ms, ttl_ms, volatility, source_order_id, policy_json
-                )
-                VALUES (?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    now_ms,
-                    str(o.get("signal_id") or ""),
-                    symbol,
-                    side,
-                    qty,
-                    age_ms,
-                    ttl_ms,
-                    volatility,
-                    source_order_id_i,
-                    json.dumps(
-                        {
-                            "alpha_remaining": alpha_rem,
-                            "order_type": order_type,
-                            "aggressiveness": aggressiveness,
-                            "slice_pct": slice_pct,
-                            "slice_qty": slice_qty,
-                            "slices": slices,
-                            "kill_switch_reason": ks_reason,
-                            "kill_switch_meta": ks_meta,
-                        },
-                        separators=(",", ":"),
-                        sort_keys=True,
+                con.execute(
+                    """
+                    INSERT INTO execution_policy_audit(
+                    ts_ms, signal_id, symbol, side, qty,
+                    age_ms, ttl_ms, volatility, regime_compat,
+                    source_order_id, policy_json
+                    )
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        now_ms,
+                        str(o.get("signal_id") or ""),
+                        symbol,
+                        side,
+                        qty,
+                        age_ms,
+                        ttl_ms,
+                        volatility,
+                        float(regime_comp),
+                        int(o.get("source_order_id") or 0),
+                        json.dumps(
+                            {
+                                "alpha_remaining": alpha_rem,
+                                "order_type": order_type,
+                                "aggressiveness": aggressiveness,
+                                "slice_pct": slice_pct,
+                                "slice_qty": slice_qty,
+                                "slices": slices,
+                                "execution_mode": get_execution_mode(),
+                                "regime_model_version": str(regime_model_version()),
+                                "regime_compat": float(regime_comp),
+                            },
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
                     ),
-                ),
-            )
+                )
+
 
         con.commit()
         return shaped

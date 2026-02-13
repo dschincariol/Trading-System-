@@ -42,6 +42,7 @@ except Exception:
 # SINGLE SOURCE OF TRUTH FOR SQLITE
 from dev_core.storage import connect as _db_connect
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from dev_core.storage import init_db as _init_db
 
 from dev_core.learning import learn_relevance_stats

@@ -10,6 +10,7 @@ import time
 from typing import Dict, Optional
 
 from dev_core.storage import connect
+from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 
 def _since_ms(lookback_days: int) -> int:
@@ -110,3 +111,29 @@ def get_exec_stats_by_symbol(con=None, lookback_days: int = 30) -> Dict[str, Dic
     finally:
         if owns:
             con.close()
+
+# ============================================================
+# TSE SUPPORT FUNCTIONS
+# ============================================================
+
+def get_false_positive_streak(con):
+    try:
+        rows = con.execute(
+            """
+            SELECT was_false_positive
+            FROM execution_outcomes
+            ORDER BY ts_ms DESC
+            LIMIT 50
+            """
+        ).fetchall()
+        if not rows:
+            return 0
+        streak = 0
+        for r in rows:
+            if int(r[0]) == 1:
+                streak += 1
+            else:
+                break
+        return int(streak)
+    except Exception:
+        return 0

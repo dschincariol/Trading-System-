@@ -13,6 +13,7 @@ Responsibilities:
 import json
 import math
 import time
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -292,3 +293,76 @@ def apply_alpha_lifecycle(
         "annotated_n": int(annotated),
     }
     return kept, meta
+
+# ============================================================
+# Alpha Decay Tracking
+# - Time to MFE
+# - Time to mean reversion
+# - Signal expiry vs realized move
+# ============================================================
+
+def compute_alpha_decay_metrics(
+    signal_ts_ms: int,
+    entry_ts_ms: int,
+    exit_ts_ms: Optional[int],
+    prices: list,
+    side: str,
+    ttl_ms: Optional[int],
+) -> Dict[str, Any]:
+    """
+    prices: list[(ts_ms, price)] sorted ascending
+    side: "long" or "short"
+    """
+
+    if not prices:
+        return {}
+
+    entry_price = prices[0][1]
+    mfe = 0.0
+    mfe_ts = None
+
+    for ts, px in prices:
+        move = (px - entry_price) if side == "long" else (entry_price - px)
+        if move > mfe:
+            mfe = move
+            mfe_ts = ts
+
+    time_to_mfe_ms = (mfe_ts - entry_ts_ms) if mfe_ts else None
+
+    mean_rev_ts = None
+    for ts, px in prices:
+        if side == "long" and px <= entry_price:
+            mean_rev_ts = ts
+            break
+        if side == "short" and px >= entry_price:
+            mean_rev_ts = ts
+            break
+
+    time_to_mean_rev_ms = (
+        (mean_rev_ts - entry_ts_ms) if mean_rev_ts else None
+    )
+
+    realized_move = (
+        (prices[-1][1] - entry_price)
+        if side == "long"
+        else (entry_price - prices[-1][1])
+    )
+
+    expired = False
+    if ttl_ms and exit_ts_ms:
+        expired = (exit_ts_ms - signal_ts_ms) > ttl_ms
+
+    return {
+        "mfe": mfe,
+        "time_to_mfe_ms": time_to_mfe_ms,
+        "time_to_mean_rev_ms": time_to_mean_rev_ms,
+        "realized_move": realized_move,
+        "expired": expired,
+    }
+
+
+def alpha_is_stale(signal_ts_ms: int, ttl_ms: Optional[int]) -> bool:
+    if not ttl_ms:
+        return False
+    now = int(time.time() * 1000)
+    return (now - signal_ts_ms) > ttl_ms

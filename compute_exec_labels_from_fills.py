@@ -16,8 +16,11 @@ from dev_core.storage import (
     touch_job_lock,
     put_job_heartbeat,
 )
-from dev_core.broker_fill_utils import get_realized_trade
 
+from dev_core.broker_fill_utils import get_realized_trade
+from dev_core.alpha_lifecycle_engine import compute_alpha_decay_metrics
+from dev_core.regime_compat import update_regime_compat
+from dev_core.model_v2 import get_current_regime
 
 # -----------------------------
 # Step 7: Production job safety
@@ -56,6 +59,65 @@ def _latest_price(con, symbol: str):
         return int(row[0]), float(row[1])
     except Exception:
         return None
+
+
+def _price_path(con, symbol: str, entry_ts_ms: int, exit_ts_ms: int, max_points: int = 512):
+    """
+    Returns list[(ts_ms, price)] ascending between [entry_ts_ms, exit_ts_ms].
+    Downsamples if too many points.
+    """
+    try:
+                # Ensure labels_exec table exists (idempotent safety)
+        con.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS labels_exec(
+              event_id INTEGER NOT NULL,
+              symbol TEXT NOT NULL,
+              horizon_s INTEGER NOT NULL,
+              ts_ms INTEGER NOT NULL,
+              side INTEGER,
+              gross_ret REAL,
+              net_ret REAL,
+              gross_z REAL,
+              net_z REAL,
+              mid_in REAL,
+              mid_out REAL,
+              spread_in REAL,
+              fees_bps REAL,
+              slippage_bps REAL,
+              spread_bps REAL,
+              total_cost_bps REAL,
+              source TEXT,
+              realized INTEGER,
+              extra_json TEXT,
+              PRIMARY KEY (event_id, symbol, horizon_s)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_labels_exec_sym_h
+            ON labels_exec(symbol, horizon_s);
+            """
+        )
+
+        rows = con.execute(
+            """
+            SELECT ts_ms, price
+            FROM prices
+            WHERE symbol=?
+              AND ts_ms BETWEEN ? AND ?
+            ORDER BY ts_ms ASC
+            """,
+            (str(symbol), int(entry_ts_ms), int(exit_ts_ms)),
+        ).fetchall() or []
+        out = [(int(ts), float(px)) for ts, px in rows if px is not None]
+        if not out:
+            return []
+        if len(out) <= int(max_points):
+            return out
+        step = max(1, int(len(out) / int(max_points)))
+        return out[::step]
+    except Exception:
+        return []
+
 
 
 import math
@@ -255,6 +317,8 @@ def main():
         except Exception:
             return 0
 
+
+
         rows = con.execute(
             """
             SELECT p.event_id, p.symbol, p.horizon_s, p.ts_ms
@@ -271,6 +335,22 @@ def main():
             """,
             (int(max(1, MAX_BATCH)),),
         ).fetchall()
+        # Ensure alpha_decay_metrics table exists (idempotent)
+        con.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS alpha_decay_metrics(
+              event_id INTEGER NOT NULL,
+              symbol TEXT NOT NULL,
+              horizon_s INTEGER NOT NULL,
+              ts_ms INTEGER NOT NULL,
+              metrics_json TEXT NOT NULL,
+              PRIMARY KEY (event_id, symbol, horizon_s)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_alpha_decay_sym_ts
+            ON alpha_decay_metrics(symbol, ts_ms);
+            """
+        )
 
         n_used = 0
         n_skip = 0
@@ -291,6 +371,7 @@ def main():
                             separators=(",", ":"),
                         ),
                     )
+
                 except Exception:
                     pass
                 last_hb_s = now_s
@@ -332,9 +413,45 @@ def main():
                         "exit_target_ts_ms": int(exit_ts),
                     }
 
+                if float(px_in) <= 1e-12:
+                    n_skip += 1
+                    continue
                 gross_ret = (float(px_out_use) / float(px_in) - 1.0) * float(side)
-                net_ret = float(gross_ret) - float(trade.get("fees_total") or 0.0)
+                # Convert total_cost_bps into return units for net_ret consistency
+                cost_bps = float(_cost_bps_from_trade(trade, float(px_in), float(px_out_use), int(side)).get("total_cost_bps") or 0.0)
+                net_ret = float(gross_ret) - (float(cost_bps) / 10000.0)
 
+                # alpha decay metrics (per event_id/symbol/horizon_s)
+                try:
+
+                    exit_use_ts = int(exit_ts)
+                    if px_out is None and m2m_ctx and "m2m_ts_ms" in m2m_ctx:
+                        exit_use_ts = int(m2m_ctx["m2m_ts_ms"])
+
+                    path = _price_path(con, str(sym), int(ts_ms), int(exit_use_ts))
+                    decay = compute_alpha_decay_metrics(
+                        signal_ts_ms=int(ts_ms),
+                        entry_ts_ms=int(ts_ms),
+                        exit_ts_ms=int(exit_use_ts),
+                        prices=path,
+                        side=("long" if int(side) > 0 else "short"),
+                        ttl_ms=int(horizon_s) * 1000,
+                    )
+                    decay["_meta"] = {
+                        "event_id": int(eid),
+                        "symbol": str(sym),
+                        "horizon_s": int(horizon_s),
+                        "ts_ms": int(ts_ms),
+                        "realized": int(realized),
+                        "side": int(side),
+                    }
+
+                    con.execute(
+                        "INSERT OR REPLACE INTO alpha_decay_metrics VALUES (?,?,?,?,?)",
+                        (int(eid), str(sym), int(horizon_s), int(ts_ms), json.dumps(decay, separators=(",", ":"), sort_keys=True)),
+                    )
+                except Exception:
+                    pass
                 net_z = _rolling_exec_z(
                     con, str(sym), int(horizon_s), float(net_ret),
                     exclude_event_id=int(eid),
@@ -392,16 +509,41 @@ def main():
                                 "realized": int(realized),
                                 "trade": trade,
                                 "m2m": m2m_ctx,
+                                "exec_stress": (
+                                    trade.get("raw", {}).get("exec_stress")
+                                    if isinstance(trade, dict)
+                                    else None
+                                ),
+                                "alpha_decay": decay,
+
                             },
+
                             separators=(",", ":"),
                         ),
                     ),
                 )
+                # ----------------------------
+                # Regime compatibility update
+                # Only update on fully realized trades
+                # ----------------------------
+                if int(realized) == 1:
+                    try:
+                        model_name = os.environ.get("MODEL_NAME", "embed_regressor").strip() or "embed_regressor"
+                        regime = get_current_regime("SPY") or "MID"
+
+                        update_regime_compat(
+                            model_name=str(model_name),
+                            regime=str(regime).upper(),
+                            net_return=float(net_ret),
+                        )
+                    except Exception:
+                        pass
 
                 n_used += 1
 
                 # crash-safe: commit in small chunks so reruns resume naturally
-                if n_used % int(max(1, COMMIT_EVERY)) == 0:
+                if n_used % int(max(1, int(COMMIT_EVERY))) == 0:
+
                     try:
                         con.commit()
                     except Exception:
