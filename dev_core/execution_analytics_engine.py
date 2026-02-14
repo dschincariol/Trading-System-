@@ -36,7 +36,7 @@ def _ensure_tables(con):
 CREATE TABLE IF NOT EXISTS execution_analytics (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts_ms INTEGER NOT NULL,                 -- primary event timestamp (fill_ts_ms)
-  client_order_id TEXT NOT NULL,
+  client_order_id TEXT NOT NULL UNIQUE,
   broker TEXT,
   symbol TEXT NOT NULL,
 
@@ -256,7 +256,7 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
 
             con.execute(
                 """
-                INSERT INTO execution_analytics(
+                INSERT OR IGNORE INTO execution_analytics(
                   ts_ms,
                   client_order_id,
                   broker,
@@ -640,7 +640,7 @@ def _ensure_tables(con):
 CREATE TABLE IF NOT EXISTS execution_analytics (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts_ms INTEGER NOT NULL,                 -- primary event timestamp (fill_ts_ms)
-  client_order_id TEXT NOT NULL,
+  client_order_id TEXT NOT NULL UNIQUE,
   broker TEXT,
   symbol TEXT NOT NULL,
 
@@ -860,7 +860,7 @@ def build_execution_analytics(limit: int = 5000) -> Dict[str, Any]:
 
             con.execute(
                 """
-                INSERT INTO execution_analytics(
+                INSERT OR IGNORE INTO execution_analytics(
                   ts_ms,
                   client_order_id,
                   broker,
@@ -1209,14 +1209,29 @@ def _build_alpha_preservation_kpis(con, lookback_n: int = 2000) -> None:
 
 def get_slippage_zscore(con):
     try:
-        row = con.execute(
+        rows = con.execute(
             """
-            SELECT AVG(slippage_bps), 
-                   COALESCE(NULLIF(STDDEV(slippage_bps),0), 0)
+            SELECT slippage_bps
             FROM execution_analytics
             WHERE ts_ms >= (SELECT MAX(ts_ms) - 86400000 FROM execution_analytics)
             """
-        ).fetchone()
+        ).fetchall()
+
+        vals = [float(r[0]) for r in rows or [] if r and r[0] is not None]
+        if len(vals) < 5:
+            return 0.0
+
+        mean = sum(vals) / float(len(vals))
+        var = sum((x - mean) ** 2 for x in vals) / float(len(vals))
+        std = var ** 0.5
+        if std <= 1e-12:
+            return 0.0
+
+        latest = vals[0]
+        return (float(latest) - mean) / std
+
+    except Exception:
+        return 0.0
         if not row:
             return 0.0
         mu = float(row[0] or 0.0)
@@ -1232,28 +1247,255 @@ def get_slippage_zscore(con):
     except Exception:
         return 0.0
 
-
 def get_latency_variance_zscore(con):
     try:
-        row = con.execute(
+        rows = con.execute(
             """
-            SELECT AVG(latency_ms), 
-                   COALESCE(NULLIF(STDDEV(latency_ms),0), 0)
+            SELECT age_ms
             FROM execution_analytics
             WHERE ts_ms >= (SELECT MAX(ts_ms) - 86400000 FROM execution_analytics)
             """
-        ).fetchone()
-        if not row:
+        ).fetchall()
+
+        vals = [float(r[0]) for r in rows or [] if r and r[0] is not None]
+        if len(vals) < 5:
             return 0.0
-        mu = float(row[0] or 0.0)
-        sigma = float(row[1] or 0.0)
-        if sigma <= 1e-12:
+
+        mean = sum(vals) / float(len(vals))
+        var = sum((x - mean) ** 2 for x in vals) / float(len(vals))
+        std = var ** 0.5
+        if std <= 1e-12:
             return 0.0
-        latest = con.execute(
-            "SELECT latency_ms FROM execution_analytics ORDER BY ts_ms DESC LIMIT 1"
-        ).fetchone()
-        if not latest:
-            return 0.0
-        return (float(latest[0]) - mu) / sigma
+
+        latest = vals[0]
+        return (float(latest) - mean) / std
+
     except Exception:
         return 0.0
+
+# ============================================================
+# Bayesian Rolling Expectancy (for TSE gating)
+# ============================================================
+
+def get_rolling_expectancy_stats(con, lookback_n: int = 100):
+    """
+    Returns:
+        {
+            mean: float,
+            std: float,
+            n: int,
+            sharpe: float
+        }
+    Uses realized_pnl from execution_ledger if available.
+    """
+    try:
+        rows = con.execute(
+            """
+            SELECT realized_pnl
+            FROM execution_ledger
+            WHERE realized_pnl IS NOT NULL
+            ORDER BY ts_ms DESC
+            LIMIT ?
+            """,
+            (int(lookback_n),),
+        ).fetchall()
+        if not rows:
+            return {"mean": 0.0, "std": 0.0, "n": 0, "sharpe": 0.0}
+
+        vals = []
+        for r in rows:
+            try:
+                vals.append(float(r[0]))
+            except Exception:
+                continue
+
+        if not vals:
+            return {"mean": 0.0, "std": 0.0, "n": 0, "sharpe": 0.0}
+
+        n = len(vals)
+        mean = sum(vals) / float(n)
+
+        var = sum((x - mean) ** 2 for x in vals) / float(n) if n > 1 else 0.0
+        std = var ** 0.5 if var > 0.0 else 0.0
+
+        sharpe = (mean / std) * (n ** 0.5) if std > 1e-12 else 0.0
+
+        return {
+            "mean": float(mean),
+            "std": float(std),
+            "n": int(n),
+            "sharpe": float(sharpe),
+        }
+
+    except Exception:
+        return {"mean": 0.0, "std": 0.0, "n": 0, "sharpe": 0.0}
+
+def get_expectancy_multiplier(con, lookback_n: int = 100) -> float:
+    """
+    Converts rolling expectancy into suppression multiplier.
+    <1.0 tightens execution
+    >1.0 loosens execution
+    """
+    stats = get_rolling_expectancy_stats(con, lookback_n=lookback_n)
+
+    mean = float(stats.get("mean") or 0.0)
+    sharpe = float(stats.get("sharpe") or 0.0)
+
+    # Negative expectancy → tighten
+    if mean < 0.0 and sharpe < 0.0:
+        return 0.75
+
+    # Strong positive expectancy → allow slight loosen
+    if sharpe > 1.0:
+        return 1.10
+
+    return 1.0
+
+# ============================================================
+# Execution Degradation Snapshot (for auto-pause / TSE)
+# ============================================================
+
+def get_execution_degradation_snapshot(con, lookback_n: int = 500) -> Dict[str, Any]:
+    """
+    Computes:
+      - rolling slippage mean
+      - rolling latency mean
+      - p95 slippage
+      - p95 latency
+    Used by TSE / EPE for hard auto-pause decisions.
+    """
+    try:
+        rows = con.execute(
+            """
+            SELECT slippage_bps, age_ms
+            FROM execution_analytics
+            ORDER BY ts_ms DESC
+            LIMIT ?
+            """,
+            (int(max(50, lookback_n)),),
+        ).fetchall()
+
+        slips = []
+        lats = []
+
+        for sl, lat in rows or []:
+            try:
+                slips.append(float(sl))
+            except Exception:
+                pass
+            try:
+                lats.append(float(lat))
+            except Exception:
+                pass
+
+        if not slips:
+            return {
+                "mean_slippage": 0.0,
+                "p95_slippage": 0.0,
+                "mean_latency": 0.0,
+                "p95_latency": 0.0,
+                "n": 0,
+            }
+
+        slips_sorted = sorted(slips)
+        lats_sorted = sorted(lats)
+
+        def _p(arr, p):
+            if not arr:
+                return 0.0
+            idx = int(round((len(arr) - 1) * p))
+            idx = max(0, min(len(arr) - 1, idx))
+            return float(arr[idx])
+
+        return {
+            "mean_slippage": sum(slips) / float(len(slips)),
+            "p95_slippage": _p(slips_sorted, 0.95),
+            "mean_latency": (sum(lats) / float(len(lats)) if lats else 0.0),
+            "p95_latency": _p(lats_sorted, 0.95) if lats else 0.0,
+            "n": int(len(slips)),
+        }
+
+    except Exception:
+        return {
+            "mean_slippage": 0.0,
+            "p95_slippage": 0.0,
+            "mean_latency": 0.0,
+            "p95_latency": 0.0,
+            "n": 0,
+        }
+
+# ============================================================
+# Adaptive Alpha Half-Life Learning
+# ============================================================
+
+def compute_adaptive_half_life(con, symbol: str, lookback_n: int = 500) -> Optional[int]:
+    """
+    Learns half-life based on alpha_remaining_at_fill decay profile.
+    Returns suggested half-life in ms.
+    """
+    try:
+        rows = con.execute(
+            """
+            SELECT age_ms, alpha_remaining_at_fill
+            FROM execution_analytics
+            WHERE symbol = ?
+            ORDER BY ts_ms DESC
+            LIMIT ?
+            """,
+            (str(symbol), int(max(50, lookback_n))),
+        ).fetchall()
+
+        pairs = [
+            (float(age), float(a))
+            for age, a in rows or []
+            if age is not None and a is not None and a > 0.0
+        ]
+
+        if len(pairs) < 20:
+            return None
+
+        # Estimate half-life where alpha ≈ 0.5
+        diffs = [(abs(a - 0.5), age) for age, a in pairs]
+        diffs_sorted = sorted(diffs, key=lambda x: x[0])
+
+        if not diffs_sorted:
+            return None
+
+        return int(diffs_sorted[0][1])
+
+    except Exception:
+        return None
+
+# ============================================================
+# Broker Performance Ranking
+# ============================================================
+
+def rank_brokers_by_cost(con, lookback_days: int = 7) -> List[Dict[str, Any]]:
+    try:
+        since = _now_ms() - (int(lookback_days) * 86400000)
+
+        rows = con.execute(
+            """
+            SELECT broker,
+                   COUNT(*) as n,
+                   AVG(total_cost_bps) as avg_cost
+            FROM execution_analytics
+            WHERE ts_ms >= ?
+            GROUP BY broker
+            ORDER BY avg_cost ASC
+            """,
+            (int(since),),
+        ).fetchall()
+
+        out = []
+        for broker, n, avg_cost in rows or []:
+            out.append({
+                "broker": broker,
+                "fills": int(n or 0),
+                "avg_total_cost_bps": float(avg_cost or 0.0),
+            })
+
+        return out
+
+    except Exception:
+        return []

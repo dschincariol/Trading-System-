@@ -1,4 +1,4 @@
-"use strict";
+
 import {
   esc,
   escapeHTML,
@@ -440,7 +440,8 @@ initPromotionSafetyEngine({
   toast,
   fetchJSON,
   loadPromotionStatus,
-  loadSizePolicy,
+  loadSizePolicy: loadSizePolicyUI,
+
   refresh,
   getManipBlockedSyms: () => (typeof _manipBlockedSyms !== "undefined" ? _manipBlockedSyms : new Set())
 });
@@ -983,7 +984,8 @@ for (const k of ordered) {
   }
 }
 
-async function loadSizePolicy() {
+async function loadSizePolicyUI() {
+
   const body = document.getElementById("sizePolicyBody");
   const pill = document.getElementById("sizePolicyPill");
   if (!body || !pill) return;
@@ -1405,8 +1407,9 @@ ${ageMin}m ago${
     `;
 
     tbody.appendChild(tr);
-tbody.scrollTop = 0;
   }
+
+  tbody.scrollTop = 0;
 
   tbody.querySelectorAll("button[data-why]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -2494,6 +2497,7 @@ await Promise.allSettled([
   loadRelevanceStats(),
   loadExecutionByConfidence(),
   loadSystemState(),
+  loadPromotionStatus(),
 
   // portfolio layer
   (typeof loadPortfolio === "function") ? loadPortfolio() : Promise.resolve(),
@@ -2508,10 +2512,43 @@ await maybeAutoResumePromotionsAfterRecovery({
   operatorMode: OPERATOR_MODE
 });
 
-applyReadOnlyBanner();
+// --- Telemetry Strip Update (Institutional density layer) ---
+try {
+  const tNav = document.getElementById("tNav");
+  if (!tNav) {
+    // telemetry not present; do nothing (do not exit refresh)
+  } else {
 
+  const navEl = document.getElementById("portfolioMeta");
+  const stressEl = document.getElementById("marketStressHeader");
+  const promoEl = document.getElementById("promotionPill");
 
+  const tReturn = document.getElementById("tReturn");
+  const tDD = document.getElementById("tDD");
+  const tSharpe = document.getElementById("tSharpe");
+  const tCalmar = document.getElementById("tCalmar");
+  const tStress = document.getElementById("tStress");
+  const tPromotion = document.getElementById("tPromotion");
+
+  if (navEl) tNav.textContent = navEl.textContent || "NAV —";
+  if (stressEl && tStress) tStress.textContent = stressEl.textContent || "Stress —";
+  if (promoEl && tPromotion) tPromotion.textContent = promoEl.textContent || "Promo —";
+
+  const summaryRow = document.querySelector("#portfolioBtSummaryBody tr");
+  if (summaryRow) {
+    const cells = summaryRow.querySelectorAll("td");
+    if (cells.length >= 3) {
+      if (tReturn) tReturn.textContent = "RET " + (cells[1]?.textContent || "—");
+      if (tDD) tDD.textContent = "DD " + (cells[2]?.textContent || "—");
+      if (tSharpe) tSharpe.textContent = cells[3]?.textContent || "Sharpe —";
+    }
+  }
+  } // close telemetry else-block
+} catch (e) {
+  console.warn("Telemetry update failed", e);
 }
+
+} // <-- END refresh()
 
 async function loadPromotionStatus() {
   const pill = document.getElementById("promotionPill");
@@ -2657,7 +2694,7 @@ function wireUI() {
         }
 
         if (el) el.textContent += "[ui] size policy train job started\n";
-        setTimeout(loadSizePolicy, 1000);
+        setTimeout(loadSizePolicyUI, 1000);
       } catch (e) {
         const el = document.getElementById("console");
         if (el) el.textContent += `[ui] size policy ERROR: ${e.message}\n`;
@@ -2683,7 +2720,7 @@ if (typeof wireUI === "function") wireUI();
   setTimeout(() => {
     if (sessionStorage.getItem("voice_autosummary_done")) return;
 
-    const rows = Array.isArray(window._lastAlerts) ? window._lastAlerts : [];
+    const rows = Array.isArray(_lastAlerts) ? _lastAlerts : [];
     const crits = rows.filter(r => r.severity === "CRIT" && !r.resolved);
 
     if (crits.length > 0 && typeof _sayAndToast === "function") {
@@ -2700,4 +2737,35 @@ if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", bootDashboard);
 } else {
   bootDashboard();
+}
+
+function renderDockDetail(strategy) {
+  const dock = document.getElementById("right-dock");
+  if (!dock || !strategy) return;
+
+  // Escape everything because this is innerHTML
+  const safe = (v) => escapeHTML(v === null || v === undefined ? "" : String(v));
+
+  dock.innerHTML = `
+    <h3>${safe(strategy.name)}</h3>
+    <div>Return: ${safe(strategy.return)}</div>
+    <div>Drawdown: ${safe(strategy.drawdown)}</div>
+    <div>Decay Sharpe: ${safe(strategy.decay_sharpe)}</div>
+    <div>Slippage: ${safe(strategy.slippage_pct)}%</div>
+    <div>Capital Efficiency: ${safe(strategy.cap_eff)}</div>
+    <div>Regime Fit: ${safe(strategy.regime_fit)}%</div>
+    <div>Promotion Streak: ${safe(strategy.promotion_streak)}</div>
+  `;
+}
+
+function renderEventLog(events) {
+  const log = document.getElementById("bottom-log");
+  if (!log || !Array.isArray(events)) return;
+  log.innerHTML = "";
+
+  events.slice(-50).reverse().forEach(e => {
+    const row = document.createElement("div");
+    row.innerText = `${new Date(e.ts).toLocaleTimeString()} | ${e.type} | ${e.message}`;
+    log.appendChild(row);
+  });
 }

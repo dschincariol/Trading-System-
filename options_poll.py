@@ -1,6 +1,8 @@
 import time
 import os
 import logging
+from dotenv import load_dotenv
+load_dotenv()
 
 from dev_core.storage import (
     connect,
@@ -10,6 +12,7 @@ from dev_core.storage import (
 )
 
 from dev_core.options.tradier_live import fetch_options_chain
+from dev_core.options.options_polygon import fetch_options_chain_snapshot
 from dev_core.universe import get_active_symbols
 
 JOB_NAME = "poll_options"
@@ -36,9 +39,54 @@ def main():
     finally:
         con.close()
 
+    provider = os.environ.get("OPTIONS_PROVIDER", "tradier").lower().strip()
+
     conw = connect()
     try:
         for sym in syms:
+            if provider == "polygon":
+                contracts, err = fetch_options_chain_snapshot(sym, limit=250, max_pages=4)
+                if err:
+                    logging.warning("polygon options error %s: %s", sym, err)
+                if contracts:
+                    conw.executemany(
+                        """
+                        INSERT OR REPLACE INTO options_chain_v2(
+                          ts_ms,
+                          underlying, contract, expiration, contract_type, strike,
+                          iv, open_interest, volume,
+                          bid, ask,
+                          delta, gamma, theta, vega,
+                          source
+                        )
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        [
+                            (
+                                int(c.get("ts_ms") or ts_ms),
+                                str(c.get("underlying") or sym),
+                                str(c.get("contract")),
+                                (str(c.get("expiration")) if c.get("expiration") is not None else None),
+                                (str(c.get("contract_type")) if c.get("contract_type") is not None else None),
+                                (float(c.get("strike")) if c.get("strike") is not None else None),
+                                (float(c.get("iv")) if c.get("iv") is not None else None),
+                                (float(c.get("open_interest")) if c.get("open_interest") is not None else None),
+                                (float(c.get("volume")) if c.get("volume") is not None else None),
+                                (float(c.get("bid")) if c.get("bid") is not None else None),
+                                (float(c.get("ask")) if c.get("ask") is not None else None),
+                                (float(c.get("delta")) if c.get("delta") is not None else None),
+                                (float(c.get("gamma")) if c.get("gamma") is not None else None),
+                                (float(c.get("theta")) if c.get("theta") is not None else None),
+                                (float(c.get("vega")) if c.get("vega") is not None else None),
+                                str(c.get("source") or "polygon"),
+                            )
+                            for c in contracts
+                            if c.get("contract")
+                        ],
+                    )
+                continue
+
+            # default: Tradier (legacy v1 table)
             rows = fetch_options_chain(sym)
             if not rows:
                 continue
@@ -68,7 +116,7 @@ def main():
             )
 
         conw.commit()
-        logging.info("options poll complete")
+        logging.info("options poll complete provider=%s", provider)
     finally:
         conw.close()
         release_job_lock(JOB_NAME, OWNER, PID)

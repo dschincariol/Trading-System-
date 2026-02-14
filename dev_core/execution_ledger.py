@@ -58,7 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_execution_orders_source_alert
 -- ============================================================
 CREATE TABLE IF NOT EXISTS execution_fills (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  client_order_id TEXT NOT NULL,
+  client_order_id TEXT NOT NULL UNIQUE,
   fill_id TEXT,
   broker TEXT,
   symbol TEXT,
@@ -89,7 +89,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_execution_fills_client_fillid
 -- ============================================================
 CREATE TABLE IF NOT EXISTS execution_metrics (
   ts_ms INTEGER NOT NULL,
-  client_order_id TEXT NOT NULL,
+  client_order_id TEXT NOT NULL UNIQUE,
   broker TEXT,
   symbol TEXT NOT NULL,
   submit_qty REAL,
@@ -137,7 +137,7 @@ CREATE TABLE IF NOT EXISTS capital_efficiency (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS execution_capital_efficiency (
   ts_ms INTEGER NOT NULL,
-  client_order_id TEXT NOT NULL,
+  client_order_id TEXT NOT NULL UNIQUE,
   broker TEXT,
   portfolio_orders_id INTEGER,
   source_alert_id INTEGER,

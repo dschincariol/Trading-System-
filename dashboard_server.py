@@ -90,6 +90,9 @@ ALLOWED_JOBS = {
     "compute_exec_z": ("compute_exec_z.py", "oneshot"),
     "recalibrate_confidence": ("recalibrate_confidence.py", "oneshot"),
     "poll_prices": ("poll_prices.py", "daemon"),
+    "stream_prices_polygon_ws": ("stream_prices_polygon_ws.py", "daemon"),
+    "stream_prices_ibkr": ("stream_prices_ibkr.py", "daemon"),
+"provider_monitor": ("provider_monitor_job.py", "daemon"),
     "ingest_now": ("ingest_now.py", "oneshot"),
     "process_events": ("process_events.py", "oneshot"),
     "label_due_events": ("label_due_events.py", "oneshot"),
@@ -145,6 +148,8 @@ PIPELINE_ORDER = [
 # Stable UI ordering (ops “golden” list)
 JOB_ORDER = [
     "poll_prices",
+    "stream_prices_polygon_ws",
+    "stream_prices_ibkr",
     "ingest_now",
     "process_events",
     "label_due_events",
@@ -951,11 +956,6 @@ class JobState:
 # -------------            -- ------------------------------------------------------
 # JOB MANAGER
 # -------------            -- ------------------------------------------------------
-def api_get_embed_model_eval(parsed):
-    return {"ok": False, "error": "not_implemented"}
-
-def api_get_embed_conf_calib(parsed):
-    return {"ok": False, "error": "not_implemented"}
 
 def api_get_jobs(parsed):
     return {"ok": True, "jobs": JOBS.list_jobs()}
@@ -1064,7 +1064,7 @@ class JobManager:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0),
+                creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0),
             )
 
             # update job lock heartbeat on successful start
@@ -1990,6 +1990,9 @@ def _normalize_explain_json(val) -> str:
     except Exception:
         return json.dumps({"raw": s})
 
+from dev_core.model_registry import get_stage_latest
+MODEL_NAME = "embed_regressor"
+
 def _auto_rollback_loop():
 
     bad_streak = 0
@@ -2071,9 +2074,6 @@ def _auto_rollback_loop():
         except Exception:
             bad_streak = 0
             continue
-
-from dev_core.model_registry import get_stage_latest
-MODEL_NAME = "embed_regressor"
 
 def _detect_sustained_equity_drift(con) -> str:
     """
@@ -3166,12 +3166,20 @@ def _auto_size_policy_loop():
 # ------------------------------
 # ROUTE SPECS (split into files)
 # ------------------------------
-from api_system import ROUTE_SPECS_SYSTEM
+try:
+    from api_system import ROUTE_SPECS_SYSTEM
+except Exception:
+    ROUTE_SPECS_SYSTEM = []
 
-from api_jobs import ROUTE_SPECS_JOBS
+try:
+    from api_jobs import ROUTE_SPECS_JOBS
+except Exception:
+    ROUTE_SPECS_JOBS = []
 
-from api_ops import ROUTE_SPECS_OPS
-
+try:
+    from api_ops import ROUTE_SPECS_OPS
+except Exception:
+    ROUTE_SPECS_OPS = []
 
 ROUTE_SPECS = list(ROUTE_SPECS_SYSTEM) + list(ROUTE_SPECS_JOBS) + list(ROUTE_SPECS_OPS)
 
@@ -3280,17 +3288,6 @@ def _wrap_api_post_rollback(parsed, body, _ctx):
     if not api_post_rollback:
         return _missing("api_post_rollback")
     return api_post_rollback(parsed, body)
-
-# ------------------------------
-# API HANDLER BINDINGS
-# ------------------------------
-def _qs(parsed):
-    try:
-        q = parse_qs(parsed.query or "", keep_blank_values=True)
-        return {k: (v[0] if isinstance(v, list) and v else "") for k, v in q.items()}
-    except Exception:
-        return {}
-
 
 def api_get_kill_switches(parsed):
     return _api_get_kill_switches_impl(parsed, {}) if _api_get_kill_switches_impl else {"ok": False, "error": "kill_switches_unavailable"}
@@ -3547,8 +3544,12 @@ def run_server():
     # ---------------------------------------------------
     # HARD DB BOOTSTRAP (idempotent, REQUIRED)
     # ---------------------------------------------------
+    # Ensure lock tables exist before any jobs
     try:
-        _init_db()
+        _ensure_job_locks()
+    except Exception:
+        pass
+
     except Exception as e:
         print(f"[fatal] database init failed: {e}", file=sys.stderr)
         raise
@@ -3662,7 +3663,7 @@ def run_server():
     except Exception:
         pass
 
-    print(f"Dashboard running at http://localhost:{port}/dashboard.html  (or /ui/dashboard.html)")
+    print(f"Dashboard running at http://{host}:{port}/ui/dashboard.html")
 
     if AUTO_PIPELINE:
         print(f"[auto_pipeline] enabled interval_s={AUTO_PIPELINE_INTERVAL_S}")
@@ -3688,7 +3689,8 @@ def run_server():
         except Exception:
             pass
         try:
-            _HTTPD.server_close()
+            if _HTTPD:
+                _HTTPD.server_close()
         except Exception:
             pass
 

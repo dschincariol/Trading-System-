@@ -227,7 +227,7 @@ def _apply_capital_preservation_mode(
     # cap aggressiveness tier
     try:
         if _aggr_rank(str(aggressiveness)) > _aggr_rank(str(EPE_PRESERVE_CAP_TIER)):
-            aggressiveness = str(EPE_PRESERVE_CAP_TIER)
+            order_type, aggressiveness, sim_lat_ms, sim_chunk_pct, sim_extra_slip, limit_offset_bps = _tier_params(str(EPE_PRESERVE_CAP_TIER))
             info["tier_capped"] = 1
     except Exception:
         pass
@@ -418,6 +418,18 @@ def _evaluate_trade_suppression(con) -> Dict[str, Any]:
     slippage_z = 0.0
     latency_var_z = 0.0
 
+    # --- Bayesian expectancy gating
+    expectancy_mean = 0.0
+    expectancy_sharpe = 0.0
+    try:
+        from dev_core.execution_analytics_engine import get_rolling_expectancy_stats
+        est = get_rolling_expectancy_stats(con, lookback_n=100)
+        expectancy_mean = float(est.get("mean") or 0.0)
+        expectancy_sharpe = float(est.get("sharpe") or 0.0)
+    except Exception:
+        expectancy_mean = 0.0
+        expectancy_sharpe = 0.0
+
     # False positive streak (from execution_quality_job / exec_stats)
     try:
         from dev_core.exec_stats import get_false_positive_streak
@@ -452,11 +464,42 @@ def _evaluate_trade_suppression(con) -> Dict[str, Any]:
     except Exception:
         prior_state = "NORMAL"
 
+    # --- Regime-weighted suppression
+    regime = None
+    regime_conf = 0.0
+    try:
+        from dev_core.social_regime import get_social_regime_vector
+        vec = get_social_regime_vector(symbol=None, ts_ms=_now_ms())
+        regime = str((vec or {}).get("regime") or "").upper()
+        regime_conf = float((vec or {}).get("regime_conf") or 0.0)
+    except Exception:
+        regime = None
+        regime_conf = 0.0
+
+    regime_multiplier = 1.0
+
+    if regime == "FEAR":
+        regime_multiplier = 0.7  # tighten thresholds
+    elif regime == "MANIA":
+        regime_multiplier = 1.2  # loosen slightly
+    elif regime == "CHURN":
+        regime_multiplier = 0.9
+
+    # --- Drawdown velocity
+    dd_velocity = 0.0
+    try:
+        from dev_core.drawdown_state import get_drawdown_velocity
+        dd_velocity = float(get_drawdown_velocity(con) or 0.0)
+    except Exception:
+        dd_velocity = 0.0
+
     # HARD trigger
     hard_trigger = (
-        fp_streak >= TSE_FP_STREAK_HARD
-        or slippage_z >= TSE_SLIPPAGE_Z_HARD
-        or latency_var_z >= TSE_LATENCY_VAR_HARD
+        fp_streak >= int(TSE_FP_STREAK_HARD * regime_multiplier)
+        or slippage_z >= float(TSE_SLIPPAGE_Z_HARD) * regime_multiplier
+        or latency_var_z >= float(TSE_LATENCY_VAR_HARD) * regime_multiplier
+        or dd_velocity >= 0.02
+        or (expectancy_mean < 0.0 and expectancy_sharpe < -0.5)
     )
 
     soft_trigger = (
@@ -522,6 +565,11 @@ def _evaluate_trade_suppression(con) -> Dict[str, Any]:
         "fp_streak": fp_streak,
         "slippage_z": slippage_z,
         "latency_var_z": latency_var_z,
+        "expectancy_mean": float(expectancy_mean),
+        "expectancy_sharpe": float(expectancy_sharpe),
+        "regime": regime,
+        "regime_conf": float(regime_conf),
+        "dd_velocity": float(dd_velocity),
     }
 
 def apply_execution_policy(
@@ -538,6 +586,12 @@ def apply_execution_policy(
 
     # ---- Trade Suppression Engine (TSE)
     tse = _evaluate_trade_suppression(con)
+    expectancy_mean = float(tse.get("expectancy_mean") or 0.0)
+    expectancy_sharpe = float(tse.get("expectancy_sharpe") or 0.0)
+    regime = tse.get("regime")
+    regime_conf = float(tse.get("regime_conf") or 0.0)
+    dd_velocity = float(tse.get("dd_velocity") or 0.0)
+
     if tse.get("state") == "HARD_BLOCK":
         try:
             con.execute(
@@ -579,6 +633,11 @@ def apply_execution_policy(
                     ),
                 ),
             )
+        except Exception:
+            pass
+
+        try:
+            con.commit()
         except Exception:
             pass
 
@@ -954,7 +1013,10 @@ def apply_execution_policy(
                                 "active": 1 if _capital_mode() == "preserve" else 0,
                                 "cap_info": cap_info,
                             },
-
+                                "expectancy_mean": float(expectancy_mean),
+                                "expectancy_sharpe": float(expectancy_sharpe),
+                                "regime": regime,
+                                "regime_conf": float(regime_conf),
                                 "trade_suppression": {
                                 "state": tse.get("state"),
                                 "fp_streak": tse.get("fp_streak"),

@@ -92,7 +92,7 @@ def _run_and_stream(app, args, cwd=None, env=None, label="[startup]"):
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0),
+            creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0),
         )
         if p.stdout:
             for line in p.stdout:
@@ -280,7 +280,7 @@ class App(tk.Tk):
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
-                    creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0),
+                    creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0),
                 )
 
                 self.after(0, self.btn_stop.configure, {"state": "normal"})

@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Dict
 
-DB_PATH = Path(os.environ.get("DB_PATH", "dev.db"))
+DB_PATH = Path(os.environ.get("DB_PATH", "dev.db")).expanduser().resolve()
 
 # Production-stable WAL defaults + performance tuning (env-controlled)
 #
@@ -130,53 +130,25 @@ def connect(readonly: bool = False):
 
     readonly=True:
       - opens DB in read-only mode (where supported) to avoid accidental writes
-      - still applies WAL/busy_timeout pragmas (safe)
+      - applies query_only=ON defense-in-depth
+      - reuses a per-thread pooled connection
     """
-    try:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    key = "ro" if readonly else "rw"
+    con = getattr(_TLS, key, None)
 
-    if readonly:
-        # SQLite URI read-only open (requires uri=True)
-        # If file doesn't exist, fallback to normal open to allow bootstrap to create it.
-        uri = f"file:{str(DB_PATH)}?mode=ro"
+    if con is not None:
         try:
-            con = sqlite3.connect(
-                uri,
-                timeout=30.0,
-                isolation_level=None,
-                check_same_thread=False,
-                uri=True,
-            )
+            con.execute("SELECT 1;").fetchone()
+            return con
         except Exception:
-            con = sqlite3.connect(
-                str(DB_PATH),
-                timeout=30.0,
-                isolation_level=None,
-                check_same_thread=False,
-            )
-    else:
-        con = sqlite3.connect(
-            str(DB_PATH),
-            timeout=30.0,
-            isolation_level=None,  # autocommit
-            check_same_thread=False,
-        )
+            try:
+                con.close()
+            except Exception:
+                pass
+            setattr(_TLS, key, None)
 
-    con.row_factory = sqlite3.Row
-
-    for p in _SQLITE_PRAGMAS:
-        try:
-            con.execute(p)
-        except Exception:
-            pass
-
-    try:
-        con.execute("PRAGMA foreign_keys=ON;")
-    except Exception:
-        pass
-
+    con = _new_connection(readonly=readonly)
+    setattr(_TLS, key, con)
     return con
 
 def connect_ro() -> sqlite3.Connection:
@@ -275,6 +247,96 @@ def _ensure_price_quotes_schema(con):
 
         CREATE INDEX IF NOT EXISTS idx_price_quotes_ts
           ON price_quotes(ts_ms);
+        """
+    )
+
+
+def _ensure_price_quotes_raw_schema(con):
+    # Additive, idempotent: per-provider raw snapshots (before ensemble)
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS price_quotes_raw (
+          ts_ms INTEGER NOT NULL,
+          symbol TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          last REAL,
+          bid REAL,
+          ask REAL,
+          spread REAL,
+          volume REAL,
+          PRIMARY KEY(symbol, provider, ts_ms)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_price_quotes_raw_symbol_ts
+          ON price_quotes_raw(symbol, ts_ms);
+
+        CREATE INDEX IF NOT EXISTS idx_price_quotes_raw_provider_ts
+          ON price_quotes_raw(provider, ts_ms);
+
+        CREATE INDEX IF NOT EXISTS idx_price_quotes_raw_ts
+          ON price_quotes_raw(ts_ms);
+        """
+    )
+
+def _ensure_price_anomaly_schema(con):
+    # Cross-provider spread divergence detection
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS price_anomalies (
+          ts_ms INTEGER NOT NULL,
+          symbol TEXT NOT NULL,
+          provider_a TEXT,
+          provider_b TEXT,
+          spread_diff_bps REAL,
+          reason TEXT,
+          PRIMARY KEY(symbol, ts_ms)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_price_anomalies_ts
+          ON price_anomalies(ts_ms);
+
+        CREATE INDEX IF NOT EXISTS idx_price_anomalies_symbol
+          ON price_anomalies(symbol);
+        """
+    )
+
+def _ensure_options_chain_v2_schema(con):
+    # Additive, idempotent: richer options snapshot (Polygon/Tradier/etc)
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS options_chain_v2 (
+          ts_ms INTEGER NOT NULL,
+
+          underlying TEXT NOT NULL,
+          contract TEXT NOT NULL,
+          expiration TEXT,
+          contract_type TEXT,
+          strike REAL,
+
+          iv REAL,
+          open_interest REAL,
+          volume REAL,
+
+          bid REAL,
+          ask REAL,
+
+          delta REAL,
+          gamma REAL,
+          theta REAL,
+          vega REAL,
+
+          source TEXT,
+          PRIMARY KEY(contract, ts_ms)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_options_chain_v2_under_ts
+          ON options_chain_v2(underlying, ts_ms);
+
+        CREATE INDEX IF NOT EXISTS idx_options_chain_v2_under_exp
+          ON options_chain_v2(underlying, expiration);
+
+        CREATE INDEX IF NOT EXISTS idx_options_chain_v2_ts
+          ON options_chain_v2(ts_ms);
         """
     )
 
@@ -1502,7 +1564,10 @@ def init_db():
         _ensure_events_columns(con)
         _ensure_symbol_universe_columns(con)
         _ensure_price_quotes_schema(con)
+        _ensure_price_quotes_raw_schema(con)
+        _ensure_price_anomaly_schema(con)
         _ensure_options_chain_schema(con)
+        _ensure_options_chain_v2_schema(con)
         _ensure_earnings_calendar_schema(con)
         _ensure_sec_filings_schema(con)
         _ensure_domain_blacklist_schema(con)
@@ -1512,6 +1577,7 @@ def init_db():
         _ensure_strategy_metrics_schema(con)
         _ensure_universe_audit_schema(con)
         _ensure_execution_mode_armed_column(con)
+        _ensure_kill_switch_schema(con)
         _ensure_trade_attribution_ledger_schema(con)
 
         # Additive: ensure symbols table exists even for older DBs
@@ -1575,6 +1641,10 @@ def put_event(ts_ms, source, title, body, url, event_key, meta_json=None):
         return int(row[0])
     finally:
         try:
+            _note_write(con)
+        except Exception:
+            pass
+        try:
             _maybe_wal_checkpoint(con, force=True)
         except Exception:
             pass
@@ -1599,7 +1669,12 @@ def put_price(ts_ms, symbol, price):
             ),
         )
     finally:
+        try:
+            _note_write(con)
+        except Exception:
+            pass
         con.close()
+
 
 def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> bool:
     """
@@ -1629,6 +1704,10 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> b
                 (str(job_name), str(owner), int(pid), now_ms, now_ms),
             )
             con.execute("COMMIT;")
+            try:
+                _note_write(con)
+            except Exception:
+                pass
             return True
 
         cur_owner, cur_pid, hb_ms = str(row[0]), int(row[1]), int(row[2])
@@ -1645,6 +1724,10 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> b
                 (str(owner), int(pid), now_ms, str(job_name)),
             )
             con.execute("COMMIT;")
+            try:
+                _note_write(con)
+            except Exception:
+                pass
             return True
 
         con.execute("ROLLBACK;")
@@ -1686,7 +1769,7 @@ def touch_job_lock(job_name: str, owner: str, pid: int) -> None:
     import time
 
     now_ms = int(time.time() * 1000)
-    con = connect()
+    con = connect(readonly=False)
     try:
         con.execute(
             """
@@ -1697,6 +1780,10 @@ def touch_job_lock(job_name: str, owner: str, pid: int) -> None:
             (now_ms, str(job_name), str(owner), int(pid)),
         )
     finally:
+        try:
+            _note_write(con)
+        except Exception:
+            pass
         con.close()
 
 
@@ -1765,6 +1852,10 @@ def put_job_checkpoint(job_name: str, last_event_id: int, last_event_ts_ms: int)
             (str(job_name), int(last_event_id), int(last_event_ts_ms), int(now_ms)),
         )
     finally:
+        try:
+            _note_write(con)
+        except Exception:
+            pass
         try:
             con.close()
         except Exception:

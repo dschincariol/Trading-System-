@@ -43,8 +43,13 @@ def run_pipeline(JOBS):
         return {"ok": False, "error": "pipeline locked"}
 
     try:
-        if not JOBS.is_running("poll_prices"):
-            return {"ok": False, "error": "poll_prices must be running"}
+        if not (
+    JOBS.is_running("poll_prices")
+    or JOBS.is_running("stream_prices_polygon_ws")
+    or JOBS.is_running("stream_prices_ibkr")
+):
+
+            return {"ok": False, "error": "prices daemon must be running (poll_prices or stream_prices_polygon_ws)"}
 
         for name in PIPELINE_ORDER:
             if name in ("portfolio_rebalance", "broker_apply_orders") and not AUTO_PIPELINE_INCLUDE_EXECUTION:

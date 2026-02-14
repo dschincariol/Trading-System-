@@ -45,11 +45,26 @@ def _record_provider_success(name: str):
         con.close()
 
 def get_price_provider():
-    provider = os.environ.get("LIVE_PRICE_PROVIDER", "yfinance").lower()
+    provider = os.environ.get("LIVE_PRICE_PROVIDER", "yfinance").lower().strip()
+
+    return get_price_provider_by_name(provider)
+
+
+def get_price_provider_by_name(provider: str):
+    provider = str(provider or "").lower().strip()
 
     # --------------------------------------------------
     # Preferred provider
     # --------------------------------------------------
+    if provider == "polygon_ws":
+        try:
+            from dev_core.live_prices.polygon_ws_live import PolygonWsPriceProvider
+            p = PolygonWsPriceProvider()
+            _record_provider_success("polygon_ws")
+            return p
+        except Exception:
+            _record_provider_failure("polygon_ws")
+
     if provider == "polygon":
         try:
             from dev_core.live_prices.polygon_live import PolygonPriceProvider
@@ -81,6 +96,14 @@ def get_price_provider():
     # HARD FAILOVER CHAIN (deterministic)
     # --------------------------------------------------
     try:
+        from dev_core.live_prices.polygon_ws_live import PolygonWsPriceProvider
+        p = PolygonWsPriceProvider()
+        _record_provider_success("polygon_ws")
+        return p
+    except Exception:
+        _record_provider_failure("polygon_ws")
+
+    try:
         from dev_core.live_prices.polygon_live import PolygonPriceProvider
         p = PolygonPriceProvider()
         _record_provider_success("polygon")
@@ -105,3 +128,4 @@ def get_price_provider():
         _record_provider_failure("ccxt")
 
     raise RuntimeError("No live price provider available")
+
