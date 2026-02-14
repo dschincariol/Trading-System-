@@ -30,17 +30,17 @@ import time
 import traceback
 from typing import Dict, Any, Tuple, Callable, Optional
 
-from dev_core.storage import (
+from engine.dev_core.storage import (
     connect,
     init_db,
     acquire_job_lock,
     release_job_lock,
 )
 
-from dev_core.universe_discovery import discover_universe_once
-from dev_core.meta_strategy_layer import compute_allocations
-from dev_core.execution_mode import get_execution_mode
-from dev_core.kill_switch import execution_allowed
+from engine.dev_core.universe_discovery import discover_universe_once
+from engine.dev_core.meta_strategy_layer import compute_allocations
+from engine.dev_core.execution_mode import get_execution_mode
+from engine.dev_core.kill_switch import execution_allowed
 
 
 JOB_NAME = "trade_pipeline"
@@ -280,7 +280,7 @@ def main() -> int:
 
         # ----------- 3b. Regime Scaling Snapshot (read-only audit trail) -----------
         try:
-            from dev_core.regime_size import regime_capital_scale
+            from engine.dev_core.regime_size import regime_capital_scale
             _rs = regime_capital_scale(
                 con=con,
                 anchor=str(os.environ.get("PORTFOLIO_REGIME_ANCHOR", "SPY")).strip().upper(),
@@ -301,7 +301,7 @@ def main() -> int:
             pass
 
         # ----------- 4. Risk Filter -----------
-        from dev_core.risk_state import evaluate_risk_guards
+        from engine.dev_core.risk_state import evaluate_risk_guards
 
         ok, _ = _run_stage(
             con,
@@ -349,7 +349,7 @@ def main() -> int:
         else:
             def _dual_check():
                 # If dual is enabled, require an implementation; fail hard if missing.
-                from dev_core.dual_execution import check_dual_divergence
+                from engine.dev_core.dual_execution import check_dual_divergence
                 return check_dual_divergence(con=con, ts_ms=ts_ms, exec_result=exec_res)
 
             ok, _ = _run_stage(con, ts_ms, "divergence_check", _dual_check, deadline_ms=pipeline_deadline_ms)

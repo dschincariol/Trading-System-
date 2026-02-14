@@ -1,5 +1,5 @@
 # snapshot_equity.py
-from dev_core.equity_snapshot import snapshot_equity
+from engine.dev_core.equity_snapshot import snapshot_equity
 
 if __name__ == "__main__":
     ok = snapshot_equity()

@@ -69,7 +69,7 @@ if torch.cuda.is_available():
 # -----------------------------------------------------------------------------
 # Project imports
 # -----------------------------------------------------------------------------
-from dev_core.storage import (
+from engine.dev_core.storage import (
     connect,
     connect_ro,
     init_db,
@@ -79,25 +79,25 @@ from dev_core.storage import (
     put_job_heartbeat,
 )
 
-from dev_core.predictor import predict_event
-from dev_core.alerts import emit_alert, init_alerts_db
-from dev_core.validation import store_prediction, init_validation_db
-from dev_core.decision_log import log_decision, hash_feature_vector
-from dev_core.confidence_adjust import get_adjusted_confidence
-from dev_core.universe import get_active_symbols
-from dev_core.model_v2 import get_current_regime
-from dev_core.news_domain import extract_domain, is_domain_blocked, domain_conf_multiplier
-from dev_core.kill_switch import execution_allowed
-from dev_core.rules_engine import evaluate_rules
+from engine.dev_core.predictor import predict_event
+from engine.dev_core.alerts import emit_alert, init_alerts_db
+from engine.dev_core.validation import store_prediction, init_validation_db
+from engine.dev_core.decision_log import log_decision, hash_feature_vector
+from engine.dev_core.confidence_adjust import get_adjusted_confidence
+from engine.dev_core.universe import get_active_symbols
+from engine.dev_core.model_v2 import get_current_regime
+from engine.dev_core.news_domain import extract_domain, is_domain_blocked, domain_conf_multiplier
+from engine.dev_core.kill_switch import execution_allowed
+from engine.dev_core.rules_engine import evaluate_rules
 
 # Optional subsystems
 try:
-    from dev_core.temporal_predictor import predict_temporal_shadow_for_event
+    from engine.dev_core.temporal_predictor import predict_temporal_shadow_for_event
 except Exception:
     predict_temporal_shadow_for_event = None
 
 try:
-    from dev_core.clustering import assign_cluster
+    from engine.dev_core.clustering import assign_cluster
 except Exception:
     assign_cluster = None
 

@@ -17,8 +17,8 @@ import os
 import sys
 import time
 
-from dev_core.storage import connect, init_db, acquire_job_lock, release_job_lock
-from dev_core.universe_discovery import discover_universe_once
+from engine.dev_core.storage import connect, init_db, acquire_job_lock, release_job_lock
+from engine.dev_core.universe_discovery import discover_universe_once
 
 JOB_NAME = "universe_discovery"
 OWNER = os.environ.get(

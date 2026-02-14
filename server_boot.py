@@ -48,7 +48,7 @@ try:
 except Exception:
     pass
 
-from dev_core.storage import init_db as _init_db
+from engine.dev_core.storage import init_db as _init_db
 
 from dashboard_config import (
     HOST,
@@ -63,7 +63,7 @@ from dashboard_config import (
     AUTO_SIZE_POLICY_INTERVAL_S,
 )
 
-from jobs_manager import (
+from engine.runtime.jobs_manager import (
     JobManager,
     _ensure_job_locks,
     _ensure_job_history,
@@ -84,7 +84,7 @@ from pipeline_runner import (
 from alerts_service import _ensure_alert_acks, _ensure_alert_resolutions
 
 from api_system import ROUTE_SPECS_SYSTEM
-from api_jobs import ROUTE_SPECS_JOBS
+from engine.api.api_jobs import ROUTE_SPECS_JOBS
 from api_ops import ROUTE_SPECS_OPS
 
 from api_handlers import (
@@ -247,7 +247,7 @@ def _wrap_api_post_rollback(parsed, body, _ctx):
 
 
 def _ensure_equity_drift():
-    from dev_core.storage import connect as _db_connect
+    from engine.dev_core.storage import connect as _db_connect
 
     con = _db_connect()
     try:
@@ -267,7 +267,7 @@ def _ensure_equity_drift():
 
 
 def _ensure_temporal_eval_boot():
-    from dev_core.storage import connect as _db_connect
+    from engine.dev_core.storage import connect as _db_connect
 
     con = _db_connect()
     try:
@@ -289,7 +289,7 @@ def _ensure_temporal_eval_boot():
 
 
 def _ensure_temporal_predictions():
-    from dev_core.storage import connect as _db_connect
+    from engine.dev_core.storage import connect as _db_connect
 
     con = _db_connect()
     try:
@@ -311,7 +311,7 @@ def _ensure_temporal_predictions():
 
 
 def _ensure_temporal_models():
-    from dev_core.storage import connect as _db_connect
+    from engine.dev_core.storage import connect as _db_connect
 
     con = _db_connect()
     try:

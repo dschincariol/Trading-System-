@@ -18,7 +18,7 @@ from typing import List, Tuple, Optional, Dict
 
 import numpy as np
 
-from dev_core.storage import (
+from engine.dev_core.storage import (
     connect,
     init_db,
     acquire_job_lock,
@@ -27,7 +27,7 @@ from dev_core.storage import (
     put_job_heartbeat,
 )
 
-from dev_core.factor_universe import put_factor_feature
+from engine.dev_core.factor_universe import put_factor_feature
 
 OWNER = os.environ.get(
     "JOB_OWNER",

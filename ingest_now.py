@@ -5,7 +5,7 @@ import time
 import logging
 from pathlib import Path
 
-from dev_core.storage import (
+from engine.dev_core.storage import (
     connect,
     init_db,
     acquire_job_lock,
@@ -15,8 +15,8 @@ from dev_core.storage import (
     put_event,
 )
 
-from dev_core.ingest.rss_ingest import ingest_rss_sources
-from dev_core.ingest.gdelt_ingest import ingest_gdelt_doc
+from engine.dev_core.ingest.rss_ingest import ingest_rss_sources
+from engine.dev_core.ingest.gdelt_ingest import ingest_gdelt_doc
 
 JOB_NAME = "ingest_now"
 OWNER = os.environ.get(
@@ -73,7 +73,7 @@ def main() -> None:
         try:
             conu = connect()
             try:
-                from dev_core.universe import get_active_symbols
+                from engine.dev_core.universe import get_active_symbols
                 syms = get_active_symbols(conu, limit=int(os.environ.get("GDELT_SYMBOL_LIMIT", "60")))
             finally:
                 conu.close()

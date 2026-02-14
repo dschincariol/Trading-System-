@@ -1,4 +1,4 @@
-from dev_core.storage import connect
+from engine.dev_core.storage import connect
 import sys
 
 def main():

@@ -24,25 +24,25 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from dev_core.storage import connect, init_db, acquire_job_lock, release_job_lock
-from dev_core.kill_switch import execution_allowed
-from dev_core.position_reconcile import pre_live_position_reconcile
-from dev_core.adaptive_order_slicer import AdaptiveOrderSlicer
-from dev_core.portfolio_risk_gate import apply_execution_risk_governor
-from dev_core.rules_engine import evaluate_rules
-from dev_core.execution_mode import get_execution_mode
-from dev_core.regime_stack import compute_regime_vector, regime_compatibility, regime_model_version
-from dev_core.broker_router import apply_new_portfolio_orders_router as apply_new_portfolio_orders
+from engine.dev_core.storage import connect, init_db, acquire_job_lock, release_job_lock
+from engine.dev_core.kill_switch import execution_allowed
+from engine.dev_core.position_reconcile import pre_live_position_reconcile
+from engine.dev_core.adaptive_order_slicer import AdaptiveOrderSlicer
+from engine.dev_core.portfolio_risk_gate import apply_execution_risk_governor
+from engine.dev_core.rules_engine import evaluate_rules
+from engine.dev_core.execution_mode import get_execution_mode
+from engine.dev_core.regime_stack import compute_regime_vector, regime_compatibility, regime_model_version
+from engine.dev_core.broker_router import apply_new_portfolio_orders_router as apply_new_portfolio_orders
 
 # Newer path (preferred)
 try:
-    from dev_core.portfolio_execution_intents import load_latest_execution_intents  # type: ignore
+    from engine.dev_core.portfolio_execution_intents import load_latest_execution_intents  # type: ignore
 except Exception:
     load_latest_execution_intents = None  # type: ignore
 
 # EPE import (support both module names)
 try:
-    from dev_core.execution_policy_engine import apply_execution_policy  # type: ignore
+    from engine.dev_core.execution_policy_engine import apply_execution_policy  # type: ignore
 except Exception:
     try:
         from execution_policy_engine import apply_execution_policy  # type: ignore
@@ -51,7 +51,7 @@ except Exception:
 
 # Optional dual execution (IBKR)
 try:
-    from dev_core.dual_execution import apply_latest_portfolio_orders_dual_ibkr  # type: ignore
+    from engine.dev_core.dual_execution import apply_latest_portfolio_orders_dual_ibkr  # type: ignore
 except Exception:
     apply_latest_portfolio_orders_dual_ibkr = None  # type: ignore
 
@@ -546,7 +546,7 @@ def main() -> int:
         # Institutional completion layer (post-trade):
         # ------------------------------------------------------------
         try:
-            from dev_core.execution_analytics_engine import build_execution_analytics
+            from engine.dev_core.execution_analytics_engine import build_execution_analytics
             build_execution_analytics(limit=2000)
         except Exception:
             pass

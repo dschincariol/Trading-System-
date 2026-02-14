@@ -3,7 +3,7 @@ import time
 import json
 import logging
 
-from dev_core.storage import (
+from engine.dev_core.storage import (
     init_db,
     acquire_job_lock,
     release_job_lock,
@@ -13,8 +13,8 @@ from dev_core.storage import (
     put_event,
 )
 
-from dev_core.universe import get_active_symbols
-from dev_core.ingest.gdelt_ingest import ingest_gdelt_doc
+from engine.dev_core.universe import get_active_symbols
+from engine.dev_core.ingest.gdelt_ingest import ingest_gdelt_doc
 
 JOB_NAME = "poll_gdelt"
 OWNER = os.environ.get(

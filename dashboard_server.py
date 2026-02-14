@@ -26,6 +26,8 @@ import subprocess
 import sys
 import threading
 import time
+# Allow importing engine from project root
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -40,32 +42,32 @@ except Exception:
     pass
 
 # SINGLE SOURCE OF TRUTH FOR SQLITE
-from dev_core.storage import connect as _db_connect
-from dev_core.storage import connect
-from dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
-from dev_core.storage import init_db as _init_db
+from engine.dev_core.storage import connect as _db_connect
+from engine.dev_core.storage import connect
+from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.dev_core.storage import init_db as _init_db
 
-from dev_core.learning import learn_relevance_stats
-from dev_core.training_guard import (
+from engine.dev_core.learning import learn_relevance_stats
+from engine.dev_core.training_guard import (
     training_allowed,
     get_training_status,
     set_training_mode,
 )
 
-from dev_core.kill_switch import (
+from engine.dev_core.kill_switch import (
     snapshot as _kill_switch_snapshot,
     set_kill_switch as _kill_switch_set,
     clear as _kill_switch_clear,
 )
-from dev_core.promotion_hardening import manual_rollback as _manual_rollback
+from engine.dev_core.promotion_hardening import manual_rollback as _manual_rollback
 
-from dev_core.execution_mode import (
+from engine.dev_core.execution_mode import (
     get_execution_mode as _exec_mode_get,
     set_execution_mode as _exec_mode_set,
     get_execution_overlays as _exec_overlays_get,
 )
 
-from dev_core.market_stress import get_market_stress_snapshot as _market_stress_snapshot
+from engine.dev_core.market_stress import get_market_stress_snapshot as _market_stress_snapshot
 
 try:
     from api_handlers import api_get_kill_switches as _api_get_kill_switches_impl
@@ -1516,7 +1518,7 @@ def get_exec_conf_calib():
     Curve is produced by recalibrate_confidence.py (RUN_EXEC_CONF_CALIB=1).
     """
     try:
-        from dev_core.exec_conf_calibration import get_latest_exec_conf_calib
+        from engine.dev_core.exec_conf_calibration import get_latest_exec_conf_calib
         return get_latest_exec_conf_calib()
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -1529,11 +1531,11 @@ def get_exec_conf_calib():
 
 def rollback_champion():
     try:
-        from dev_core.model_registry import rollback_champion as _rb
-        from dev_core.promotion_audit import audit as _audit
+        from engine.dev_core.model_registry import rollback_champion as _rb
+        from engine.dev_core.promotion_audit import audit as _audit
         ch_before = None
         try:
-            from dev_core.model_registry import get_stage_latest as _get
+            from engine.dev_core.model_registry import get_stage_latest as _get
             ch_before = _get("embed_regressor", "champion")
         except Exception:
             ch_before = None
@@ -1561,7 +1563,7 @@ def api_post_rollback(_parsed, _body):
 
 def get_promotion_status():
     try:
-        from dev_core.promotion_guard import promotion_allowed
+        from engine.dev_core.promotion_guard import promotion_allowed
         allowed = bool(promotion_allowed())
     except Exception:
         allowed = False
@@ -1607,7 +1609,7 @@ def get_promotion_explain():
     }
 
     try:
-        from dev_core.model_registry import list_recent
+        from engine.dev_core.model_registry import list_recent
         rec = list_recent("embed_regressor", limit=50) or []
         out["registry"]["embed_regressor"] = rec
     except Exception:
@@ -1643,8 +1645,8 @@ def get_promotion_explain():
 
 def set_promotion_enabled(on_value: str):
     try:
-        from dev_core.promotion_guard import set_guard
-        from dev_core.promotion_audit import audit as _audit
+        from engine.dev_core.promotion_guard import set_guard
+        from engine.dev_core.promotion_audit import audit as _audit
         v = "1" if str(on_value) == "1" else "0"
         set_guard("promotion_enabled", v)
         _audit(
@@ -1990,7 +1992,7 @@ def _normalize_explain_json(val) -> str:
     except Exception:
         return json.dumps({"raw": s})
 
-from dev_core.model_registry import get_stage_latest
+from engine.dev_core.model_registry import get_stage_latest
 MODEL_NAME = "embed_regressor"
 
 def _auto_rollback_loop():
@@ -3024,7 +3026,7 @@ def api_get_alerts(_parsed):
 
 def api_get_validation(_parsed):
     try:
-        from dev_core.validation import get_validation
+        from engine.dev_core.validation import get_validation
         return {"ok": True, "rows": get_validation()}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -3172,7 +3174,7 @@ except Exception:
     ROUTE_SPECS_SYSTEM = []
 
 try:
-    from api_jobs import ROUTE_SPECS_JOBS
+    from engine.api.api_jobs import ROUTE_SPECS_JOBS
 except Exception:
     ROUTE_SPECS_JOBS = []
 
@@ -3182,13 +3184,6 @@ except Exception:
     ROUTE_SPECS_OPS = []
 
 ROUTE_SPECS = list(ROUTE_SPECS_SYSTEM) + list(ROUTE_SPECS_JOBS) + list(ROUTE_SPECS_OPS)
-
-def _qs(parsed):
-    try:
-        q = parse_qs(parsed.query or "", keep_blank_values=True)
-        return {k: (v[0] if isinstance(v, list) and v else "") for k, v in q.items()}
-    except Exception:
-        return {}
 
 def _missing(name: str):
     return {"ok": False, "error": f"handler_unavailable:{name}"}

@@ -139,13 +139,13 @@ Dashboard running at http://localhost:8000/dashboard.html  (or /ui/dashboard.htm
 [ui] server not running
 Ready. Click 'Start Server'.
 [ui] startup: bootstrapping environment + database...
-[startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', '-c', "from dev_core.storage import init_db; init_db(); print('[startup] init_db ok')"]
+[startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', '-c', "from engine.dev_core.storage import init_db; init_db(); print('[startup] init_db ok')"]
 [startup] init_db ok
 [startup] rc=0
-[startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', '-c', "from dev_core.portfolio import init_portfolio_db; from dev_core.broker_sim import init_broker_db; from dev_core.alerts import init_alerts_db; from dev_core.validation import init_validation_db; from dev_core.model_v2 import init_model_db; init_portfolio_db(); init_broker_db(); init_alerts_db(); init_validation_db(); init_model_db(); print('[startup] module db init ok')"]
+[startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', '-c', "from engine.dev_core.portfolio import init_portfolio_db; from engine.dev_core.broker_sim import init_broker_db; from engine.dev_core.alerts import init_alerts_db; from engine.dev_core.validation import init_validation_db; from engine.dev_core.model_v2 import init_model_db; init_portfolio_db(); init_broker_db(); init_alerts_db(); init_validation_db(); init_model_db(); print('[startup] module db init ok')"]
 [startup] module db init ok
 [startup] rc=0
-[startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', '-c', "import portfolio_backtest as p; from dev_core.storage import connect; con=connect(); con.executescript(p.SCHEMA); con.commit(); con.close(); print('[startup] portfolio_backtest schema ok')"]
+[startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', '-c', "import portfolio_backtest as p; from engine.dev_core.storage import connect; con=connect(); con.executescript(p.SCHEMA); con.commit(); con.close(); print('[startup] portfolio_backtest schema ok')"]
 [startup] portfolio_backtest schema ok
 [startup] rc=0
 [startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', 'compute_exec_labels.py']

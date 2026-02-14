@@ -8,7 +8,7 @@ import os
 import time
 from typing import Optional
 
-from dev_core.storage import (
+from engine.dev_core.storage import (
     connect,
     init_db,
     acquire_job_lock,
@@ -17,10 +17,10 @@ from dev_core.storage import (
     put_job_heartbeat,
 )
 
-from dev_core.broker_fill_utils import get_realized_trade
-from dev_core.alpha_lifecycle_engine import compute_alpha_decay_metrics
-from dev_core.regime_compat import update_regime_compat
-from dev_core.model_v2 import get_current_regime
+from engine.dev_core.broker_fill_utils import get_realized_trade
+from engine.dev_core.alpha_lifecycle_engine import compute_alpha_decay_metrics
+from engine.dev_core.regime_compat import update_regime_compat
+from engine.dev_core.model_v2 import get_current_regime
 
 # -----------------------------
 # Step 7: Production job safety

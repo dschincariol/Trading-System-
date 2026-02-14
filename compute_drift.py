@@ -4,7 +4,7 @@ import time
 import json
 import logging
 
-from dev_core.storage import (
+from engine.dev_core.storage import (
     init_db,
     connect,
     acquire_job_lock,
@@ -12,7 +12,7 @@ from dev_core.storage import (
     touch_job_lock,
     put_job_heartbeat,
 )
-from dev_core.drift import compute_drift
+from engine.dev_core.drift import compute_drift
 
 JOB_NAME = "compute_drift"
 OWNER = os.environ.get(

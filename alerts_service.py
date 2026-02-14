@@ -1,7 +1,7 @@
 # alerts_service.py
 import json
 import time
-from dev_core.storage import connect as _db_connect
+from engine.dev_core.storage import connect as _db_connect
 from health_checks import _normalize_explain_json
 from dashboard_config import (
     EQ_CRIT_EMAIL_TO,

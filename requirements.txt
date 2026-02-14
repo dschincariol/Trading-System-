@@ -6,6 +6,10 @@ sentence-transformers==3.0.1
 torch==2.4.1
 yfinance==0.2.43
 ccxt==4.4.16
+<<<<<<< Updated upstream
 websocket-client==1.8.0
 ibapi==9.81.1.post1
 python-dotenv==1.0.1
+=======
+ib_insync==0.9.86
+>>>>>>> Stashed changes

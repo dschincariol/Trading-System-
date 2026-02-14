@@ -118,7 +118,7 @@ def _startup_procedure(app):
     # 1) Create core DB tables (dev_core/storage.py)
     ok = _run_and_stream(
         app,
-        [py, "-u", "-c", "from dev_core.storage import init_db; init_db(); print('[startup] init_db ok')"],
+        [py, "-u", "-c", "from engine.dev_core.storage import init_db; init_db(); print('[startup] init_db ok')"],
         label="[startup]"
     )
     if not ok:
@@ -128,11 +128,11 @@ def _startup_procedure(app):
     ok = _run_and_stream(
         app,
         [py, "-u", "-c",
-         "from dev_core.portfolio import init_portfolio_db; "
-         "from dev_core.broker_sim import init_broker_db; "
-         "from dev_core.alerts import init_alerts_db; "
-         "from dev_core.validation import init_validation_db; "
-         "from dev_core.model_v2 import init_model_db; "
+         "from engine.dev_core.portfolio import init_portfolio_db; "
+         "from engine.dev_core.broker_sim import init_broker_db; "
+         "from engine.dev_core.alerts import init_alerts_db; "
+         "from engine.dev_core.validation import init_validation_db; "
+         "from engine.dev_core.model_v2 import init_model_db; "
          "init_portfolio_db(); init_broker_db(); init_alerts_db(); init_validation_db(); init_model_db(); "
          "print('[startup] module db init ok')"],
         label="[startup]"
@@ -145,7 +145,7 @@ def _startup_procedure(app):
         app,
         [py, "-u", "-c",
          "import portfolio_backtest as p; "
-         "from dev_core.storage import connect; "
+         "from engine.dev_core.storage import connect; "
          "con=connect(); con.executescript(p.SCHEMA); con.commit(); con.close(); "
          "print('[startup] portfolio_backtest schema ok')"],
         label="[startup]"

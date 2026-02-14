@@ -12,18 +12,18 @@ import time
 import json
 import logging
 
-from dev_core.execution_ledger import (
+from engine.dev_core.execution_ledger import (
     init_execution_ledger,
     compute_metrics_snapshot,
     compute_pnl_attribution_snapshot,
     compute_capital_efficiency_snapshot,
 )
-from dev_core.storage import connect
-from dev_core.trade_attribution_ledger import (
+from engine.dev_core.storage import connect
+from engine.dev_core.trade_attribution_ledger import (
     upsert_from_latest_pnl_attribution_snapshot,
     suppression_opportunity_snapshot,
 )
-from dev_core.pnl_decomposition_engine import compute_pnl_decomposition_snapshot
+from engine.dev_core.pnl_decomposition_engine import compute_pnl_decomposition_snapshot
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -145,20 +145,20 @@ def main() -> int:
 
     # Poll fills from each broker adapter that exists.
     try:
-        from dev_core.broker_alpaca_rest import poll_and_log_fills
+        from engine.dev_core.broker_alpaca_rest import poll_and_log_fills
         poll_and_log_fills(after_ts_ms=after_ts_ms)
     except Exception:
         pass
 
     try:
-        from dev_core.broker_ibkr_gateway import poll_and_log_fills as ibkr_poll
+        from engine.dev_core.broker_ibkr_gateway import poll_and_log_fills as ibkr_poll
         ibkr_poll(after_ts_ms=after_ts_ms)
     except Exception:
         pass
 
     # Phase 2: manage open orders (cancel/replace) best-effort
     try:
-        from dev_core.execution_microstructure import manage_open_orders
+        from engine.dev_core.execution_microstructure import manage_open_orders
         manage_open_orders()
     except Exception:
         pass

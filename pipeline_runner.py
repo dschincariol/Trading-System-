@@ -14,7 +14,7 @@ LAST_AUTO_CHALLENGER_HEARTBEAT_TS = None
 LAST_AUTO_SIZE_POLICY_TS = None
 LAST_AUTO_SIZE_POLICY_HEARTBEAT_TS = None
 
-from dev_core.storage import connect as _db_connect
+from engine.dev_core.storage import connect as _db_connect
 
 from dashboard_config import (
     PIPELINE_ORDER,
@@ -31,7 +31,7 @@ from dashboard_config import (
     AUTO_SIZE_POLICY_LOG,
 )
 
-from jobs_manager import _acquire_lock, _release_lock
+from engine.runtime.jobs_manager import _acquire_lock, _release_lock
 
 
 # -------------------------------------------------

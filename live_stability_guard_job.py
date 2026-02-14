@@ -23,8 +23,8 @@ import sys
 import time
 import math
 
-from dev_core.storage import connect, init_db
-from dev_core.execution_mode import set_execution_mode, set_execution_armed
+from engine.dev_core.storage import connect, init_db
+from engine.dev_core.execution_mode import set_execution_mode, set_execution_armed
 
 MAX_DD = float(os.environ.get("LIVE_MAX_DRAWDOWN", "0.25"))
 MAX_DAILY_LOSS = float(os.environ.get("LIVE_MAX_DAILY_LOSS", "0.05"))
