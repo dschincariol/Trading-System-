@@ -146,6 +146,7 @@ if not ROUTE_SPECS:
     ROUTE_SPECS = [
         # UI convenience
         ("GET",  "/api/health", "api_get_health"),
+("GET",  "/api/system/state", "api_get_system_state"),
         ("GET",  "/api/jobs", "api_get_jobs"),
         ("POST", "/api/jobs/start", "api_post_job_start"),
         ("POST", "/api/jobs/stop", "api_post_job_stop"),

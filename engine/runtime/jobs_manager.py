@@ -8,9 +8,9 @@ from collections import deque
 from typing import Deque, Dict, Optional
 
 from engine.dev_core.storage import connect as _db_connect
+from engine.runtime.job_registry import ALLOWED_JOBS, JOB_ORDER
+
 from dashboard_config import (
-    ALLOWED_JOBS,
-    JOB_ORDER,
     AUTO_RESTART_DAEMONS,
     DAEMON_RESTART_BASE_DELAY_MS,
     DAEMON_RESTART_MAX_DELAY_MS,
@@ -323,10 +323,11 @@ def get_job_history(job_name: str, limit: int = 200) -> list:
 # ------------------------------
 
 class JobState:
-    def __init__(self, name: str, script: str, mode: str):
+    def __init__(self, name: str, script: str, mode: str, group: str = None):
         self.name = name
         self.script = script
         self.mode = mode
+        self.group = group
         self.proc: Optional[subprocess.Popen] = None
         self.started_at_ms: Optional[int] = None
         self.exited_at_ms: Optional[int] = None
@@ -347,6 +348,7 @@ class JobState:
                 "name": self.name,
                 "script": self.script,
                 "mode": self.mode,
+                "group": self.group,
                 "running": bool(running),
                 "started_at_ms": self.started_at_ms,
                 "exited_at_ms": self.exited_at_ms,
@@ -453,9 +455,18 @@ class JobManager:
                 return {"ok": True, "status": "already_running"}
 
             if job.mode == "daemon":
-                for j in self._jobs.values():
-                    if j is not job and j.mode == "daemon" and j.proc and j.proc.poll() is None:
-                        return {"ok": False, "error": f"daemon already running: {j.name}"}
+                # Only enforce exclusivity within the same daemon group (e.g. price_feed).
+                # If job.group is None, do not enforce exclusivity.
+                if getattr(job, "group", None):
+                    for j in self._jobs.values():
+                        if (
+                            j is not job
+                            and j.mode == "daemon"
+                            and getattr(j, "group", None) == getattr(job, "group", None)
+                            and j.proc
+                            and j.proc.poll() is None
+                        ):
+                            return {"ok": False, "error": f"daemon already running in group '{job.group}': {j.name}"}
 
             if job.mode == "oneshot":
                 if not _acquire_lock(f"job:{job.name}", ttl_ms=10 * 60 * 1000):

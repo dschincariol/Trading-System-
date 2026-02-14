@@ -142,7 +142,7 @@ def api_post_job_stop(_parsed, body, _ctx):
 
 def api_post_pipeline_run(_parsed, _body, _ctx):
     JOBS = _ctx["JOBS"]
-    return run_pipeline(JOBS)
+    return ORCHESTRATOR.run_pipeline()
 
 
 def api_get_job_log(parsed, _ctx):

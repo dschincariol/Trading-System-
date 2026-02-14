@@ -37,7 +37,7 @@ except Exception:
 # Allow importing engine from project root
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from engine.api.http_transport import build_handler, run_http_server
 from urllib.parse import urlparse, parse_qs
 from collections import deque
 from typing import Deque, Dict, Optional, Tuple
@@ -85,100 +85,30 @@ except Exception:
     _api_get_job_log_impl = None
     _api_get_job_history_impl = None
 
-ALLOWED_JOBS = {
+from engine.runtime.job_registry import ALLOWED_JOBS, PIPELINE_ORDER, JOB_ORDER
+from engine.runtime.supervisor import RuntimeSupervisor
+from engine.runtime.jobs_manager import JobManager
+from engine.runtime.orchestrator import RuntimeOrchestrator
+from engine.runtime.health import (
+    get_health_snapshot,
+    run_preflight,
+    preflight_cached,
+    get_schema_audit,
+)
+from engine.runtime.locks import (
+    acquire_lock,
+    release_lock,
+    write_job_history,
+    read_job_history,
+    _ensure_job_locks,
+    _ensure_job_history,
+)
 
-    "post_promotion_monitor": ("post_promotion_monitor.py", "oneshot"),
-    "kill_slippage_monitor": ("kill_slippage_monitor.py", "oneshot"),
-    "kill_drift_monitor": ("kill_drift_monitor.py", "oneshot"),
-    "kill_health_monitor": ("kill_health_monitor.py", "oneshot"),
-    "snapshot_equity": ("snapshot_equity.py", "oneshot"),
-    "train_drawdown_policy": ("train_drawdown_policy.py", "oneshot"),
-    "train_size_policy": ("train_size_policy.py", "oneshot"),
-    "compute_exec_labels_from_fills": ("compute_exec_labels_from_fills.py", "oneshot"),
-    "compute_exec_labels": ("compute_exec_labels.py", "oneshot"),
-    "compute_exec_z": ("compute_exec_z.py", "oneshot"),
-    "recalibrate_confidence": ("recalibrate_confidence.py", "oneshot"),
-    "poll_prices": ("poll_prices.py", "daemon"),
-    "stream_prices_polygon_ws": ("stream_prices_polygon_ws.py", "daemon"),
-    "stream_prices_ibkr": ("stream_prices_ibkr.py", "daemon"),
-    "provider_monitor": ("provider_monitor_job.py", "daemon"),
-    "ingest_now": ("ingest_now.py", "oneshot"),
-    "process_events": ("process_events.py", "oneshot"),
-    "label_due_events": ("label_due_events.py", "oneshot"),
-    "compute_drift": ("compute_drift.py", "oneshot"),
-    "calibrate_price_confidence": ("calibrate_price_confidence.py", "oneshot"),
-    "monitor_calibration_health": ("monitor_calibration_health.py", "oneshot"),
-
-    # A.1 supervised embed regressor training (oneshot, idempotent)
-    "train_embed_models": ("train_embed_models.py", "oneshot"),
-    "train_and_eval_challenger": ("pipeline_train_and_eval.py", "oneshot"),
-
-    # Backtests / scoring
-    "backtest_walk_forward": ("backtest_walk_forward.py", "oneshot"),
-    "portfolio_backtest": ("portfolio_backtest.py", "oneshot"),
-
-    # Model
-    "train_model_v2": ("train_model_v2.py", "oneshot"),
-    "validate_now": ("validate_now.py", "oneshot"),
-
-    # Checks
-    "check_predictions": ("check_predictions.py", "oneshot"),
-    "check_events": ("check_events.py", "oneshot"),
-    "check_labels": ("check_labels.py", "oneshot"),
-    "check_alerts": ("check_alerts.py", "oneshot"),
-
-    # Portfolio + execution
-    "portfolio_rebalance": ("portfolio_rebalance.py", "oneshot"),
-    "broker_apply_orders": ("broker_apply_orders.py", "oneshot"),
-
-    # Production preflight (compile + schema + smoke)
-    "prod_preflight": ("prod_preflight.py", "oneshot"),
-}
-
-PIPELINE_ORDER = [
-    "poll_prices",
-    "ingest_now",
-    "process_events",
-    "label_due_events",
-    "compute_drift",
-
-    # A.1: train supervised embed models when labels advance (script skips if not needed)
-    "train_embed_models",
-
-    "train_model_v2",
-    "validate_now",
-    "process_events",
-
-    # execution (guarded by AUTO_PIPELINE_INCLUDE_EXECUTION)
-    "portfolio_rebalance",
-    "broker_apply_orders",
-]
-
-# Stable UI ordering (ops “golden” list)
-JOB_ORDER = [
-    "poll_prices",
-    "stream_prices_polygon_ws",
-    "stream_prices_ibkr",
-    "ingest_now",
-    "process_events",
-    "label_due_events",
-    "compute_drift",
-    "post_promotion_monitor",
-    "kill_health_monitor",
-    "kill_drift_monitor",
-    "kill_slippage_monitor",
-    "train_embed_models",
-    "train_model_v2",
-    "validate_now",
-    "check_predictions",
-    "check_events",
-    "check_labels",
-    "check_alerts",
-    "portfolio_rebalance",
-    "portfolio_backtest",
-    "broker_apply_orders",
-    "backtest_walk_forward",
-]
+from engine.runtime.guards import (
+    auto_rollback_loop,
+    detect_sustained_equity_drift,
+    classify_equity_diff,
+)
 
 # -------------            -- ------------------------------------------------------
 # CONFIG (auto-restart guards)
@@ -312,179 +242,12 @@ SCHEMA_EXPECTATIONS = {
     "size_policy_points": {"required": False, "cols": ["policy_id", "bucket_idx", "conf_lo", "conf_hi", "factor"]},
 }
 
-def _get_table_cols(con, table: str):
-    try:
-        rows = con.execute(f"PRAGMA table_info({table})").fetchall()
-    except Exception:
-        rows = []
-    # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
-    return [r[1] for r in rows] if rows else []
-
-def get_schema_audit():
-    """
-    Returns:
-      ok: bool
-      missing_tables: []
-      missing_cols: {table: [col,...]}
-      have_tables: []
-      ts_ms: int
-    """
-    ts_ms = int(time.time() * 1000)
-    con = _db_connect()
-    try:
-        try:
-            rows = con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            have = {r[0] for r in rows}
-        except Exception:
-            have = set()
-
-        missing_tables = []
-        missing_cols = {}
-
-        for t, spec in (SCHEMA_EXPECTATIONS or {}).items():
-            required = bool(spec.get("required"))
-            cols_req = list(spec.get("cols") or [])
-
-            if t not in have:
-                if required:
-                    missing_tables.append(t)
-                continue
-
-            cols_have = _get_table_cols(con, t)
-            if cols_req:
-                miss = [c for c in cols_req if c not in cols_have]
-                if miss and required:
-                    missing_cols[t] = miss
-
-        ok = (len(missing_tables) == 0) and (len(missing_cols) == 0)
-        return {
-            "ok": bool(ok),
-            "ts_ms": int(ts_ms),
-            "missing_tables": missing_tables,
-            "missing_cols": missing_cols,
-            "have_tables": sorted(list(have)),
-        }
-    finally:
-        con.close()
-
 def api_get_schema_audit(_parsed):
     return get_schema_audit()
 
 _PREFLIGHT_CACHE = {"ok": True, "notes": [], "tables_ok": True, "health_ok": True, "ts_ms": 0}
 
 from typing import Tuple
-
-def _preflight_check_tables() -> Tuple[bool, str]:
-
-    try:
-        con = _db_connect()
-        try:
-            rows = con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            have = {r[0] for r in rows}
-        finally:
-            con.close()
-
-        missing = [t for t in PREFLIGHT_REQUIRED_TABLES if t not in have]
-        if missing:
-            return False, "missing tables: " + ", ".join(missing)
-        return True, "tables ok"
-    except Exception as e:
-        return False, f"table check failed: {e}"
-
-def _bootstrap_prices_if_empty():
-    con = _db_connect()
-    try:
-        row = con.execute("SELECT COUNT(*) FROM prices").fetchone()
-        if row and row[0] > 0:
-            return
-
-        csv_path = os.path.join("data", "prices.csv")
-        if not os.path.exists(csv_path):
-            return
-
-        import csv
-        with open(csv_path, "r", newline="") as f:
-            rdr = csv.DictReader(f)
-            rows = [
-                (r["ts_ms"], r["symbol"], r["price"])
-                for r in rdr
-            ]
-
-        con.executemany(
-            "INSERT OR REPLACE INTO prices (ts_ms, symbol, price) VALUES (?, ?, ?)",
-            rows,
-        )
-        con.commit()
-        print(f"[bootstrap] loaded {len(rows)} prices from prices.csv")
-    finally:
-        con.close()
-
-def run_preflight() -> Dict:
-    global _PREFLIGHT_CACHE
-    ts_ms = int(time.time() * 1000)
-    out = {"ok": True, "notes": [], "tables_ok": True, "health_ok": True, "ts_ms": ts_ms}
-
-    if not PREFLIGHT_ENABLE:
-        out["notes"].append("preflight disabled (PREFLIGHT_ENABLE=0)")
-        _PREFLIGHT_CACHE = out
-        return out
-    _bootstrap_prices_if_empty()
-
-    ok_tables, note_tables = _preflight_check_tables()
-    out["tables_ok"] = ok_tables
-    out["notes"].append(note_tables)
-    if not ok_tables:
-        out["ok"] = False
-
-    # health snapshot already checks model + label presence; we add stricter price freshness for ops startup
-    try:
-        h = get_health_snapshot()
-        prices_ok = bool(h.get("prices", {}).get("ok"))
-        labels_ok = bool(h.get("labels", {}).get("ok"))
-        model_ok  = bool(h.get("model", {}).get("ok"))
-        out["health_ok"] = bool(prices_ok and labels_ok and model_ok)
-
-        # stricter startup freshness gate (PREFLIGHT_PRICES_MAX_AGE_S)
-        age_s = float(h.get("prices", {}).get("age_s") or 1e9)
-        if age_s > PREFLIGHT_PRICES_MAX_AGE_S:
-            if os.environ.get("ALLOW_STALE_PRICES", "0") == "1":
-                out["notes"].append(
-                    f"prices stale but allowed by ALLOW_STALE_PRICES: age_s={age_s:.1f}"
-                )
-            else:
-                out["ok"] = False
-                out["notes"].append(
-                    f"prices too stale for preflight: age_s={age_s:.1f} > {PREFLIGHT_PRICES_MAX_AGE_S:.1f}"
-                )
-
-        else:
-            out["notes"].append(f"prices age ok: {age_s:.1f}s")
-
-        if not labels_ok:
-            try:
-                subprocess.check_call([sys.executable, "compute_exec_labels.py"])
-                out["notes"].append("labels bootstrapped")
-            except Exception as e:
-                out["ok"] = False
-                out["notes"].append(f"labels not ok: {e}")
-
-        if not model_ok:
-            try:
-                subprocess.check_call([sys.executable, "train_size_policy.py"])
-                out["notes"].append("model bootstrapped")
-            except Exception as e:
-                out["ok"] = False
-                out["notes"].append(f"model not ok: {e}")
-    except Exception as e:
-        out["ok"] = False
-        out["health_ok"] = False
-        out["notes"].append(f"health check failed: {e}")
-
-    _PREFLIGHT_CACHE = out
-    return out
-
-def preflight_cached() -> Dict:
-    return dict(_PREFLIGHT_CACHE or {})
 
 # -------------            -- ------------------------------------------------------
 # CRIT notifications (email / webhook)
@@ -538,222 +301,6 @@ def _ensure_equity_drift():
               level TEXT NOT NULL
             )
         """)
-        con.commit()
-    finally:
-        con.close()
-
-# -------------            -- ------------------------------------------------------
-# SQLITE-BASED JOB LOCKS (cross-process safe)
-# -------------            -- ------------------------------------------------------
-
-def _ensure_job_locks():
-    """
-    Cross-process job locks + heartbeats.
-
-    Legacy schema used:
-      job_locks(key TEXT PRIMARY KEY, owner TEXT, expires_ms INTEGER)
-
-    Current schema uses:
-      job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms (+ optional expires_ms)
-
-    Safe to call repeatedly:
-      - creates table if missing
-      - migrates legacy schema if detected
-      - adds missing columns via ALTER TABLE (best-effort)
-    """
-    con = _db_connect()
-    try:
-        # Detect existing schema (if table missing PRAGMA returns [])
-        try:
-            cols = [r[1] for r in con.execute("PRAGMA table_info(job_locks)").fetchall()]
-        except Exception:
-            cols = []
-
-        has_legacy_key = ("key" in cols) and ("job_name" not in cols)
-
-        if has_legacy_key:
-            # Migrate legacy schema -> new schema
-            try:
-                con.execute("ALTER TABLE job_locks RENAME TO job_locks_legacy")
-            except Exception:
-                pass
-            cols = []
-
-        # Ensure base table exists
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_locks (
-              job_name TEXT PRIMARY KEY,
-              owner TEXT NOT NULL,
-              pid INTEGER NOT NULL,
-              acquired_ts_ms INTEGER NOT NULL,
-              heartbeat_ts_ms INTEGER NOT NULL,
-              expires_ms INTEGER
-            )
-            """
-        )
-
-        # Copy legacy rows best-effort (pid unknown -> 0, acquired/heartbeat -> now)
-        if has_legacy_key:
-            now = int(time.time() * 1000)
-            try:
-                legacy_rows = con.execute(
-                    "SELECT key, owner, expires_ms FROM job_locks_legacy"
-                ).fetchall()
-            except Exception:
-                legacy_rows = []
-
-            for k, owner, exp in legacy_rows or []:
-                con.execute(
-                    """
-                    INSERT OR REPLACE INTO job_locks
-                    (job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms, expires_ms)
-                    VALUES (?,?,?,?,?,?)
-                    """,
-                    (
-                        str(k),
-                        str(owner or ""),
-                        0,
-                        int(now),
-                        int(now),
-                        int(exp) if exp is not None else None,
-                    ),
-                )
-
-        # Add missing columns (idempotent best-effort)
-        try:
-            cols = [r[1] for r in con.execute("PRAGMA table_info(job_locks)").fetchall()]
-        except Exception:
-            cols = []
-
-        def _add(col: str, ddl: str) -> None:
-            if col in cols:
-                return
-            try:
-                con.execute(ddl)
-            except Exception:
-                pass
-
-        _add("job_name", "ALTER TABLE job_locks ADD COLUMN job_name TEXT")
-        _add("owner", "ALTER TABLE job_locks ADD COLUMN owner TEXT")
-        _add("pid", "ALTER TABLE job_locks ADD COLUMN pid INTEGER")
-        _add("acquired_ts_ms", "ALTER TABLE job_locks ADD COLUMN acquired_ts_ms INTEGER")
-        _add("heartbeat_ts_ms", "ALTER TABLE job_locks ADD COLUMN heartbeat_ts_ms INTEGER")
-        _add("expires_ms", "ALTER TABLE job_locks ADD COLUMN expires_ms INTEGER")
-
-        con.commit()
-    finally:
-        con.close()
-
-
-def _acquire_lock(name: str, ttl_ms: int = 10_000) -> bool:
-    """Acquire a best-effort cross-process lock with TTL."""
-    _ensure_job_locks()
-    con = _db_connect()
-    try:
-        now = int(time.time() * 1000)
-        exp = int(now + int(ttl_ms))
-        owner = f"{os.getpid()}:{threading.get_ident()}"
-        pid = int(os.getpid())
-
-        row = con.execute(
-            "SELECT owner, pid, expires_ms FROM job_locks WHERE job_name=?",
-            (str(name),),
-        ).fetchone()
-
-        if row:
-            try:
-                cur_exp = int(row[2] or 0)
-            except Exception:
-                cur_exp = 0
-            # lock still valid
-            if cur_exp > now:
-                return False
-
-        con.execute(
-            """
-            INSERT OR REPLACE INTO job_locks
-              (job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms, expires_ms)
-            VALUES (?,?,?,?,?,?)
-            """,
-            (str(name), str(owner), int(pid), int(now), int(now), int(exp)),
-        )
-        con.commit()
-        return True
-    except Exception:
-        try:
-            con.rollback()
-        except Exception:
-            pass
-        return False
-    finally:
-        con.close()
-
-
-def _touch_lock(name: str, ttl_ms: int = 10_000) -> None:
-    """Extend TTL + update heartbeat of an existing lock (best-effort)."""
-    _ensure_job_locks()
-    con = _db_connect()
-    try:
-        now = int(time.time() * 1000)
-        exp = int(now + int(ttl_ms))
-        owner = f"{os.getpid()}:{threading.get_ident()}"
-        pid = int(os.getpid())
-
-        con.execute(
-            """
-            UPDATE job_locks
-            SET expires_ms=?,
-                heartbeat_ts_ms=?,
-                owner=?,
-                pid=?
-            WHERE job_name=?
-            """,
-            (int(exp), int(now), str(owner), int(pid), str(name)),
-        )
-        con.commit()
-    except Exception:
-        try:
-            con.rollback()
-        except Exception:
-            pass
-    finally:
-        con.close()
-
-
-def _heartbeat_lock(job_name: str, ttl_ms: int = 60_000) -> None:
-    """
-    Extend TTL + update heartbeat atomically.
-    """
-    _ensure_job_locks()
-    now = int(time.time() * 1000)
-    exp = int(now + int(ttl_ms))
-    owner = f"{os.getpid()}:{threading.get_ident()}"
-    pid = int(os.getpid())
-
-    con = _db_connect()
-    try:
-        con.execute(
-            """
-            UPDATE job_locks
-            SET heartbeat_ts_ms=?,
-                expires_ms=?,
-                owner=?,
-                pid=?
-            WHERE job_name=?
-            """,
-            (now, exp, str(owner), pid, str(job_name)),
-        )
-        con.commit()
-    finally:
-        con.close()
-
-
-def _release_lock(job_name: str) -> None:
-    _ensure_job_locks()
-    con = _db_connect()
-    try:
-        con.execute("DELETE FROM job_locks WHERE job_name=?", (str(job_name),))
         con.commit()
     finally:
         con.close()
@@ -885,112 +432,6 @@ def _is_alert_resolved(alert_id: int) -> bool:
     finally:
         con.close()
 
-# -------------            -- ------------------------------------------------------
-# JOB HISTORY (server-side persistence)
-# -------------            -- ------------------------------------------------------
-
-def _ensure_job_history():
-    con = _db_connect()
-    try:
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_history (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              ts_ms INTEGER NOT NULL,
-              job_name TEXT NOT NULL,
-              event TEXT NOT NULL,
-              detail TEXT,
-              exit_code INTEGER
-            )
-            """
-        )
-        con.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_job_history_job_ts
-              ON job_history(job_name, ts_ms)
-            """
-        )
-        con.commit()
-    finally:
-        con.close()
-
-def _write_job_history(
-    job_name: str,
-    event: str,
-    detail: str = "",
-    exit_code: int = None,
-    ts_ms: int = None,
-) -> None:
-    """Append a compact job history row (best-effort)."""
-    try:
-        _ensure_job_history()
-    except Exception:
-        pass
-
-    con = _db_connect()
-    try:
-        now = int(ts_ms or (time.time() * 1000))
-        con.execute(
-            """
-            INSERT INTO job_history(ts_ms, job_name, event, detail, exit_code)
-            VALUES (?,?,?,?,?)
-            """,
-            (
-                int(now),
-                str(job_name or ""),
-                str(event or ""),
-                str(detail or ""),
-                (int(exit_code) if exit_code is not None else None),
-            ),
-        )
-
-        # Best-effort pruning (keep latest N rows total)
-        try:
-            max_rows = int(os.environ.get("JOB_HISTORY_MAX_ROWS", "20000"))
-        except Exception:
-            max_rows = 20000
-
-        if max_rows > 0:
-            con.execute(
-                "DELETE FROM job_history WHERE id NOT IN (SELECT id FROM job_history ORDER BY ts_ms DESC LIMIT ?)",
-                (int(max_rows),),
-            )
-
-        con.commit()
-    finally:
-        con.close()
-
-
-def _read_job_history(job_name: str, limit: int = 200) -> list:
-    """Read recent job history rows for a job."""
-    _ensure_job_history()
-    con = _db_connect()
-    try:
-        rows = con.execute(
-            """
-            SELECT ts_ms, event, detail, exit_code
-            FROM job_history
-            WHERE job_name=?
-            ORDER BY ts_ms DESC
-            LIMIT ?
-            """,
-            (str(job_name or ""), int(limit)),
-        ).fetchall()
-        out = []
-        for ts_ms, event, detail, exit_code in rows or []:
-            out.append(
-                {
-                    "ts_ms": int(ts_ms or 0),
-                    "event": str(event or ""),
-                    "detail": str(detail or ""),
-                    "exit_code": (int(exit_code) if exit_code is not None else None),
-                }
-            )
-        return out
-    finally:
-        con.close()
-
-
 def _read_kill_switch_audit(limit: int = 200):
     limit = max(1, min(5000, int(limit)))
     con = _db_connect()
@@ -1028,390 +469,28 @@ def _read_kill_switch_audit(limit: int = 200):
             continue
     return out
 
-
-# -------------            -- ------------------------------------------------------
-# JOB STATE
-# -------------            -- ------------------------------------------------------
-
-class JobState:
-    def __init__(self, name: str, script: str, mode: str):
-        self.name = name
-        self.script = script
-        self.mode = mode
-        self.proc: Optional[subprocess.Popen] = None
-        self.started_at_ms: Optional[int] = None
-        self.exited_at_ms: Optional[int] = None
-        self.exit_code: Optional[int] = None
-        self.log: Deque[str] = deque(maxlen=4000)
-        self._lock = threading.Lock()
-
-        # auto-restart guards (daemon only)
-        self.stop_requested: bool = False
-        self.restart_attempts_window: Deque[int] = deque(maxlen=50)  # ts_ms of restarts (rolling)
-        self.next_restart_ms: int = 0
-        self.last_start_args: Optional[list] = None
-        self.last_start_cwd: Optional[str] = None
-
-    def to_dict(self) -> Dict:
-        with self._lock:
-            running = self.proc is not None and self.proc.poll() is None
-            return {
-                "name": self.name,
-                "script": self.script,
-                "mode": self.mode,
-                "running": bool(running),
-                "started_at_ms": self.started_at_ms,
-                "exited_at_ms": self.exited_at_ms,
-                "exit_code": self.exit_code,
-                "log_lines": len(self.log),
-                # auto-restart visibility (additive)
-                "stop_requested": bool(self.stop_requested),
-                "next_restart_ms": int(self.next_restart_ms or 0),
-            }
-
-    def append_log(self, line: str) -> None:
-        with self._lock:
-            self.log.append(line.rstrip("\n"))
-
-    def tail(self, n: int) -> str:
-        with self._lock:
-            if n <= 0:
-                return ""
-            return "\n".join(list(self.log)[-n:])
-
-
-# -------------            -- ------------------------------------------------------
-# JOB MANAGER
-# -------------            -- ------------------------------------------------------
-
-def api_get_jobs(parsed):
-    return {"ok": True, "jobs": JOBS.list_jobs()}
-
-def api_post_job_start(_parsed, body):
-    name = body.get("name")
-    return JOBS.start(name)
-
-def api_post_job_stop(_parsed, body):
-    name = body.get("name")
-    return JOBS.stop(name)
-
-class JobManager:
-    def __init__(self):
-        self._jobs: Dict[str, JobState] = {
-            name: JobState(name, script, mode)
-            for name, (script, mode) in ALLOWED_JOBS.items()
-        }
-        self._lock = threading.Lock()
-
-        # daemon watchdog thread (auto-restart guards)
-        self._watchdog_started = False
-        self._start_watchdog_once()
-
-    def _start_watchdog_once(self):
-        if self._watchdog_started:
-            return
-        self._watchdog_started = True
-        t = threading.Thread(target=self._daemon_watchdog_loop, daemon=True)
-        t.start()
-
-    def list_jobs(self):
-        with self._lock:
-            # stable ops ordering, then any extras alphabetically
-            out = []
-            seen = set()
-
-            for name in JOB_ORDER:
-                if name in self._jobs:
-                    out.append(self._jobs[name].to_dict())
-                    seen.add(name)
-
-            for name in sorted(self._jobs):
-                if name in seen:
-                    continue
-                out.append(self._jobs[name].to_dict())
-
-            return out
-
-    def get(self, name: str) -> Optional[JobState]:
-        with self._lock:
-            return self._jobs.get(name)
-
-    def start(self, name: str) -> Dict:
-        job = self.get(name)
-        if not job:
-            return {"ok": False, "error": f"unknown job: {name}"}
-
-        # Safe startup gating (ops checklist)
-        if PREFLIGHT_ENABLE and PREFLIGHT_BLOCK_JOBS:
-            p = run_preflight()
-            if not p.get("ok"):
-                return {"ok": False, "error": "preflight_failed", "notes": p.get("notes", [])}
-
-        with job._lock:
-
-            # operator intent: starting clears stop_requested
-            job.stop_requested = False
-
-            if job.proc and job.proc.poll() is None:
-                return {"ok": True, "status": "already_running"}
-
-            if job.mode == "daemon":
-                for j in self._jobs.values():
-                    if j is not job and j.mode == "daemon" and j.proc and j.proc.poll() is None:
-                        return {"ok": False, "error": f"daemon already running: {j.name}"}
-
-            if job.mode == "oneshot":
-                if not _acquire_lock(f"job:{job.name}", ttl_ms=10 * 60 * 1000):
-                    return {"ok": False, "error": f"job locked: {job.name}"}
-
-            job.exited_at_ms = None
-            job.exit_code = None
-
-            py = sys.executable
-            args = [py, "-u", job.script]
-
-            if not os.path.exists(job.script):
-                if job.mode == "oneshot":
-                    _release_lock(f"job:{job.name}")
-                job.append_log(f"[server] script not found: {job.script}")
-                _write_job_history(job.name, "start_failed", f"script not found: {job.script}", None)
-                return {"ok": False, "error": f"script not found: {job.script}"}
-
-            job.append_log(f"[server] starting: {args}")
-            _write_job_history(job.name, "start", f"{args}", None)
-
-            job.started_at_ms = int(time.time() * 1000)
-            job.last_start_args = list(args)
-            job.last_start_cwd = os.getcwd()
-
-            try:
-                job.proc = subprocess.Popen(
-                    args,
-                    cwd=os.getcwd(),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0),
-                )
-            except Exception as e:
-                # IMPORTANT: release oneshot lock if spawn fails
-                if job.mode == "oneshot":
-                    try:
-                        _release_lock(f"job:{job.name}")
-                    except Exception:
-                        pass
-                job.append_log(f"[server] spawn failed: {e}")
-                _write_job_history(job.name, "start_failed", f"spawn failed: {e}", None)
-                return {"ok": False, "error": f"spawn failed: {e}"}
-
-            # update job lock heartbeat on successful start
-            try:
-                con_hb = _db_connect()
-                con_hb.execute(
-                    "UPDATE job_locks SET heartbeat_ts_ms=? WHERE job_name=?",
-                    (int(time.time() * 1000), f"job:{job.name}"),
-                )
-                con_hb.commit()
-            finally:
-                try:
-                    con_hb.close()
-                except Exception:
-                    pass
-
-            threading.Thread(target=self._pump_output, args=(job,), daemon=True).start()
-            return {"ok": True, "status": "started"}
-
-    def stop(self, name: str) -> Dict:
-        job = self.get(name)
-        if not job:
-            return {"ok": False, "error": f"unknown job: {name}"}
-
-        with job._lock:
-            # operator intent: stop disables auto-restart for this job until start() is called
-            job.stop_requested = True
-            job.next_restart_ms = 0
-
-            if not job.proc or job.proc.poll() is not None:
-                _write_job_history(job.name, "stop", "not_running", None)
-                return {"ok": True, "status": "not_running"}
-
-            job.append_log("[server] stopping...")
-            _write_job_history(job.name, "stop", "terminate()", None)
-
-            try:
-                job.proc.terminate()
-            except Exception as e:
-                job.append_log(f"[server] terminate error: {e}")
-                _write_job_history(job.name, "stop_failed", str(e), None)
-                return {"ok": False, "error": str(e)}
-
-        return {"ok": True, "status": "terminate_sent"}
-
-    def stop_all(self) -> Dict:
-        stopped = []
-        errors = []
-
-        with self._lock:
-            jobs = list(self._jobs.values())
-
-        # first: request stop (disables auto-restart)
-        for job in jobs:
-            try:
-                self.stop(job.name)
-                stopped.append(job.name)
-            except Exception as e:
-                errors.append(f"{job.name}: {e}")
-
-        # second: wait briefly, then hard-kill if needed
-        deadline = time.time() + 3.0
-        for job in jobs:
-            try:
-                with job._lock:
-                    p = job.proc
-                if not p:
-                    continue
-                while time.time() < deadline:
-                    if p.poll() is not None:
-                        break
-                    time.sleep(0.05)
-                if p.poll() is None:
-                    try:
-                        p.kill()
-                        with job._lock:
-                            job.append_log("[server] hard-kill (kill())")
-                            _write_job_history(job.name, "stop_hard_kill", "kill()", None)
-                    except Exception as e:
-                        errors.append(f"{job.name}: kill failed: {e}")
-            except Exception as e:
-                errors.append(f"{job.name}: wait/kill error: {e}")
-
-        return {"ok": len(errors) == 0, "stopped": stopped, "errors": errors}
-
-    def _pump_output(self, job: JobState):
-        proc = job.proc
-        if not proc or not proc.stdout:
-            return
-        try:
-            for line in proc.stdout:
-                if not line:
-                    break
-                job.append_log(line)
-        except Exception as e:
-            job.append_log(f"[server] log pump error: {e}")
-        finally:
-            try:
-                rc = proc.poll()
-                if rc is None:
-                    rc = proc.wait(timeout=1)
-            except Exception:
-                rc = proc.poll()
-
-            with job._lock:
-                job.exited_at_ms = int(time.time() * 1000)
-                job.exit_code = int(rc) if rc is not None else None
-                job.append_log(f"[server] exited rc={job.exit_code}")
-                _write_job_history(job.name, "exit", "process exited", job.exit_code)
-
-            if job.mode == "oneshot":
-                _release_lock(f"job:{job.name}")
-
-    # -------------            -- ------------------------------------------------------
-    # DAEMON WATCHDOG (auto-restart guards)
-    # -------------            -- ------------------------------------------------------
-    def _daemon_watchdog_loop(self):
-        while True:
-            try:
-                if AUTO_RESTART_DAEMONS:
-                    self._check_and_restart_daemons()
-            except Exception:
-                pass
-            time.sleep(DAEMON_WATCHDOG_PERIOD_S)
-
-    def _check_and_restart_daemons(self):
-        now = int(time.time() * 1000)
-        with self._lock:
-            jobs = list(self._jobs.values())
-
-        for job in jobs:
-            if job.mode != "daemon":
-                continue
-
-            with job._lock:
-                # if operator stopped it, never restart
-                if job.stop_requested:
-                    continue
-
-                # if running, refresh heartbeat and continue
-                if _is_job_running(job.name):
-                    try:
-                        _heartbeat_lock(f"job:{job.name}")
-                    except Exception:
-                        pass
-                    continue
-
-                # if never started, don't auto-start (guard: only auto-restart after at least one start)
-                if not job.started_at_ms:
-                    continue
-
-                # backoff timer
-                if job.next_restart_ms and now < job.next_restart_ms:
-                    continue
-
-                # rolling window guard
-                window_start = now - (DAEMON_RESTART_WINDOW_S * 1000)
-                while job.restart_attempts_window and job.restart_attempts_window[0] < window_start:
-                    job.restart_attempts_window.popleft()
-
-                if len(job.restart_attempts_window) >= DAEMON_RESTART_MAX_IN_WINDOW:
-                    job.append_log(
-                        f"[server] auto-restart disabled: too many restarts in {DAEMON_RESTART_WINDOW_S}s"
-                    )
-                    _write_job_history(
-                        job.name,
-                        "autorestart_blocked",
-                        f"too many restarts in {DAEMON_RESTART_WINDOW_S}s",
-                        job.exit_code,
-                    )
-                    # require operator to explicitly start again
-                    job.stop_requested = True
-                    continue
-
-                # compute backoff based on recent attempts
-                attempt_n = len(job.restart_attempts_window)
-                delay = DAEMON_RESTART_BASE_DELAY_MS * (2 ** attempt_n)
-                delay = min(int(delay), int(DAEMON_RESTART_MAX_DELAY_MS))
-                job.next_restart_ms = now + delay
-
-                job.append_log(f"[server] daemon crashed; scheduling restart in {delay}ms")
-                _write_job_history(job.name, "autorestart_scheduled", f"delay_ms={delay}", job.exit_code)
-
-            # perform restart outside job lock to avoid long holding, but keep correctness
-            time.sleep(delay / 1000.0)
-
-            with job._lock:
-                # re-check before restart (operator might have stopped)
-                if job.stop_requested:
-                    continue
-                if _is_job_running(job.name):
-                    continue
-
-            # restart via start() to reuse all semantics and logging
-            res = self.start(job.name)
-            if not res.get("ok"):
-                with job._lock:
-                    job.append_log(f"[server] auto-restart failed: {res.get('error')}")
-                    _write_job_history(job.name, "autorestart_failed", str(res.get("error") or ""), job.exit_code)
-                continue
-
-            with job._lock:
-                job.restart_attempts_window.append(int(time.time() * 1000))
-                job.next_restart_ms = 0
-                job.append_log("[server] auto-restart: started")
-                _write_job_history(job.name, "autorestart_started", "started", None)
-
-
+# ---------------------------------------------------
+# RUNTIME ORCHESTRATION
+# ---------------------------------------------------
 JOBS = JobManager()
+SUPERVISOR = RuntimeSupervisor(jobs=JOBS)
+
+ORCHESTRATOR = RuntimeOrchestrator(
+    jobs=JOBS,
+    acquire_lock=_acquire_lock,
+    release_lock=_release_lock,
+    auto_pipeline_include_execution=AUTO_PIPELINE_INCLUDE_EXECUTION,
+    auto_pipeline_log=AUTO_PIPELINE_LOG,
+    auto_pipeline_interval_s=AUTO_PIPELINE_INTERVAL_S,
+    auto_pipeline_start_delay_s=AUTO_PIPELINE_START_DELAY_S,
+    auto_challenger_log=AUTO_CHALLENGER_LOG,
+    auto_challenger_interval_s=AUTO_CHALLENGER_INTERVAL_S,
+    auto_challenger_start_delay_s=AUTO_CHALLENGER_START_DELAY_S,
+    auto_challenger_min_drift=AUTO_CHALLENGER_MIN_DRIFT,
+    auto_size_policy_log=AUTO_SIZE_POLICY_LOG,
+    auto_size_policy_interval_s=AUTO_SIZE_POLICY_INTERVAL_S,
+    auto_size_policy_start_delay_s=AUTO_SIZE_POLICY_START_DELAY_S,
+)
 
 # -------------            -- ------------------------------------------------------
 # SERVER LIFECYCLE (status + graceful shutdown)
@@ -1425,81 +504,66 @@ DASHBOARD_API_TOKEN = os.environ.get("DASHBOARD_API_TOKEN", "").strip()
 
 SERVER_STARTED_AT_MS = int(time.time() * 1000)
 
+# -------------            -- ------------------------------------------------------
+# GLOBAL SYSTEM LIFECYCLE (NEW)
+# States:
+#   BOOTING  -> process start
+#   WARMING  -> db init + preflight + boot loops
+#   LIVE     -> serving OK
+#   DEGRADED -> serving but health/preflight indicates problems
+#   KILL     -> kill-switch engaged (trading disabled)
+#   SHUTDOWN -> shutting down / no mutations
+# -------------            -- ------------------------------------------------------
+
+LIFECYCLE_STATES = ("BOOTING", "WARMING", "LIVE", "DEGRADED", "KILL", "SHUTDOWN")
+
+_LIFECYCLE = {
+    "state": "BOOTING",
+    "since_ms": int(time.time() * 1000),
+    "last_error": "",
+    "last_transition_ms": int(time.time() * 1000),
+}
+
+_LIFECYCLE_LOCK = threading.Lock()
+
+def _set_lifecycle(state: str, error: str = ""):
+    st = str(state or "").upper().strip()
+    if st not in LIFECYCLE_STATES:
+        st = "DEGRADED"
+        error = error or "invalid_state"
+
+    now_ms = int(time.time() * 1000)
+    with _LIFECYCLE_LOCK:
+        if _LIFECYCLE.get("state") != st:
+            _LIFECYCLE["state"] = st
+            _LIFECYCLE["since_ms"] = now_ms
+            _LIFECYCLE["last_transition_ms"] = now_ms
+        if error:
+            _LIFECYCLE["last_error"] = str(error)[:500]
+
+def _lifecycle_snapshot() -> dict:
+    with _LIFECYCLE_LOCK:
+        return {
+            "state": _LIFECYCLE.get("state"),
+            "since_ms": int(_LIFECYCLE.get("since_ms") or 0),
+            "last_transition_ms": int(_LIFECYCLE.get("last_transition_ms") or 0),
+            "last_error": str(_LIFECYCLE.get("last_error") or ""),
+        }
+
 # HTTP bind
 host = os.environ.get("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1"
 port = int(os.environ.get("DASHBOARD_PORT", "8000"))
 
+# ---------------------------------------------------
+# SUPERVISOR AUTO BOOT (deterministic, ENV-gated)
+# ---------------------------------------------------
+AUTO_BOOT_DAEMONS = os.environ.get("AUTO_BOOT_DAEMONS", "0") == "1"
+AUTO_BOOT_TARGETS = [
+    x.strip() for x in os.environ.get("AUTO_BOOT_TARGETS", "").split(",")
+    if x.strip()
+]
+
 _HTTPD = None  # set in run_server()
-
-# -------------            -- ------------------------------------------------------
-# PIPELINE
-# -------------            -- ------------------------------------------------------
-
-def run_pipeline():
-    if not _acquire_lock("pipeline", ttl_ms=20 * 60 * 1000):
-        return {"ok": False, "error": "pipeline locked (already running?)"}
-
-    try:
-        if not _is_job_running("poll_prices"):
-            return {"ok": False, "error": "poll_prices must be running before pipeline"}
-
-        for name in PIPELINE_ORDER:
-            # execution is opt-in only
-            if name in ("portfolio_rebalance", "broker_apply_orders") and not AUTO_PIPELINE_INCLUDE_EXECUTION:
-                continue
-
-            job = JOBS.get(name)
-            if not job or job.mode == "daemon":
-                continue
-
-            # execution ordering guard
-            if name == "broker_apply_orders":
-                pr = JOBS.get("portfolio_rebalance")
-                if not pr or not pr.exited_at_ms:
-                    return {"ok": False, "error": "broker_apply_orders requires portfolio_rebalance first"}
-
-            res = JOBS.start(name)
-            if not res.get("ok"):
-                return {"ok": False, "error": f"{name}: {res.get('error')}"}
-
-            # wait for oneshot completion
-            while True:
-                time.sleep(0.2)
-                if not job.proc:
-                    break
-                if job.proc.poll() is not None:
-                    if job.exit_code not in (0, None):
-                        return {"ok": False, "error": f"{name} exited rc={job.exit_code}"}
-                    break
-
-        return {"ok": True}
-
-    finally:
-        _release_lock("pipeline")
-
-def api_post_pipeline_run(_parsed, _body):
-    return run_pipeline()
-
-# -------------            -- ------------------------------------------------------
-# A.1 AUTO PIPELINE LOOP (NEW)
-# -------------            -- ------------------------------------------------------
-
-def _is_job_running(name: str) -> bool:
-    """
-    Canonical definition of 'running':
-    - process exists
-    - poll() == None
-    """
-    j = JOBS.get(name)
-    if not j:
-        return False
-    p = j.proc
-    if not p:
-        return False
-    try:
-        return p.poll() is None
-    except Exception:
-        return False
 
 def _auto_pipeline_loop():
     # small delay to allow server startup to finish
@@ -1795,234 +859,29 @@ def set_promotion_enabled(on_value: str):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-def get_health_snapshot():
-    """
-    Old behavior preserved:
-      out["prices"] = {"ok": ..., "age_s": ...}
-      out["labels"] = {"ok": ..., "count": ...}
-      out["model"]  = {"ok": ..., "support_n": ...}
-
-    NEW additive:
-      out["_details"] contains explanation strings and thresholds.
-    """
-
-    con = _db_connect()
-    try:
-        out = {}
-        details = {
-            "thresholds": {
-                "prices_max_age_s": HEALTH_PRICES_MAX_AGE_S,
-                "events_max_age_s": HEALTH_EVENTS_MAX_AGE_S,
-                "predictions_max_age_s": HEALTH_PREDICTIONS_MAX_AGE_S,
-                "jobs_max_stale_s": HEALTH_JOBS_MAX_STALE_S,
-                "min_labels": HEALTH_MIN_LABELS,
-                "min_model_support": HEALTH_MIN_MODEL_SUPPORT,
-            },
-            "notes": {},
-        }
-
-        now_ms = int(time.time() * 1000)
-
-        # prices freshness
-        try:
-            row = con.execute("SELECT MAX(ts_ms) FROM prices").fetchone()
-        except Exception as e:
-            row = None
-            details["notes"]["prices"] = f"prices query failed: {e}"
-
-        if row and row[0]:
-            age_s = (now_ms - int(row[0])) / 1000.0
-            ok = age_s < HEALTH_PRICES_MAX_AGE_S
-            out["prices"] = {"ok": ok, "age_s": round(age_s, 1)}
-            if ok:
-                details["notes"]["prices"] = "OK: prices updated recently"
-            else:
-                details["notes"]["prices"] = (
-                    f"STALE: last price update is {round(age_s,1)}s ago; "
-                    f"expected < {HEALTH_PRICES_MAX_AGE_S}s. "
-                    f"Check poll_prices job and upstream price source."
-                )
-        else:
-            out["prices"] = {"ok": False, "age_s": None}
-            details["notes"]["prices"] = (
-                "MISSING: no rows in prices. Start poll_prices and confirm it is writing into the DB."
-            )
-
-        # events freshness
-        try:
-            row = con.execute("SELECT MAX(ts_ms) FROM events").fetchone()
-        except Exception as e:
-            row = None
-            details["notes"]["events"] = f"events query failed: {e}"
-
-        if row and row[0]:
-            age_s = (now_ms - int(row[0])) / 1000.0
-            ok = age_s < HEALTH_EVENTS_MAX_AGE_S
-            out["events"] = {"ok": ok, "age_s": round(age_s, 1)}
-            if ok:
-                details["notes"]["events"] = "OK: events updated recently"
-            else:
-                details["notes"]["events"] = (
-                    f"STALE: last event ts is {round(age_s,1)}s ago; "
-                    f"expected < {HEALTH_EVENTS_MAX_AGE_S}s. "
-                    f"Check ingest_now and RSS sources."
-                )
-        else:
-            out["events"] = {"ok": False, "age_s": None}
-            details["notes"]["events"] = (
-                "MISSING: no rows in events. Run ingest_now and confirm it is writing into the DB."
-            )
-
-        # labels count
-        try:
-            row = con.execute("SELECT COUNT(*) FROM labels").fetchone()
-            label_n = int(row[0] or 0)
-            ok = label_n >= HEALTH_MIN_LABELS
-            out["labels"] = {"ok": ok, "count": label_n}
-            if ok:
-                details["notes"]["labels"] = "OK: enough labeled examples exist"
-            else:
-                details["notes"]["labels"] = (
-                    f"LOW: labels count={label_n}; expected >= {HEALTH_MIN_LABELS}. "
-                    f"Run label_due_events / validate_now and confirm labels table is populated."
-                )
-        except Exception as e:
-            out["labels"] = {"ok": False, "count": 0}
-            details["notes"]["labels"] = f"labels query failed: {e}"
-
-        # model support
-        try:
-            row = con.execute("SELECT SUM(n) FROM model_stats_regime").fetchone()
-            model_n = int(row[0] or 0)
-            ok = model_n >= HEALTH_MIN_MODEL_SUPPORT
-            out["model"] = {"ok": ok, "support_n": model_n}
-            if ok:
-                details["notes"]["model"] = "OK: model has enough support"
-            else:
-                details["notes"]["model"] = (
-                    f"LOW: model support_n={model_n}; expected >= {HEALTH_MIN_MODEL_SUPPORT}. "
-                    f"Run train_model_v2 and confirm model_stats_regime has rows."
-                )
-        except Exception as e:
-            out["model"] = {"ok": False, "support_n": 0}
-            details["notes"]["model"] = f"model query failed: {e}"
-
-        # predictions freshness
-        try:
-            row = con.execute("SELECT MAX(ts_ms) FROM predictions").fetchone()
-        except Exception as e:
-            row = None
-            details["notes"]["predictions"] = f"predictions query failed: {e}"
-
-        if row and row[0]:
-            age_s = (now_ms - int(row[0])) / 1000.0
-            ok = age_s < HEALTH_PREDICTIONS_MAX_AGE_S
-            out["predictions"] = {"ok": ok, "age_s": round(age_s, 1)}
-            if ok:
-                details["notes"]["predictions"] = "OK: predictions updated recently"
-            else:
-                details["notes"]["predictions"] = (
-                    f"STALE: last prediction ts is {round(age_s,1)}s ago; "
-                    f"expected < {HEALTH_PREDICTIONS_MAX_AGE_S}s. "
-                    f"Check process_events and predictor pipeline."
-                )
-        else:
-            out["predictions"] = {"ok": False, "age_s": None}
-            details["notes"]["predictions"] = (
-                "MISSING: no rows in predictions. Run process_events and confirm it is writing into the DB."
-            )
-
-        # job locks / heartbeats (requires storage.py Patch 1)
-        try:
-            rows = con.execute(
-                """
-                SELECT job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms
-                FROM job_locks
-                ORDER BY job_name
-                """
-            ).fetchall()
-        except Exception as e:
-            rows = []
-            details["notes"]["jobs"] = f"job_locks query failed: {e}"
-
-        jobs = []
-        any_stale = False
-        for job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms in rows:
-            hb_age_s = (now_ms - int(heartbeat_ts_ms or 0)) / 1000.0 if heartbeat_ts_ms else None
-            ok = (hb_age_s is not None) and (hb_age_s < HEALTH_JOBS_MAX_STALE_S)
-            if not ok:
-                any_stale = True
-            jobs.append(
-                {
-                    "job_name": str(job_name),
-                    "owner": str(owner),
-                    "pid": int(pid),
-                    "acquired_ts_ms": int(acquired_ts_ms),
-                    "heartbeat_ts_ms": int(heartbeat_ts_ms),
-                    "heartbeat_age_s": (round(hb_age_s, 1) if hb_age_s is not None else None),
-                    "ok": bool(ok),
-                }
-            )
-
-        out["jobs"] = {"ok": (not any_stale), "locks": jobs}
-
-        if rows:
-            if any_stale:
-                details["notes"]["jobs"] = (
-                    f"STALE: one or more job locks have heartbeat_age_s >= {HEALTH_JOBS_MAX_STALE_S}. "
-                    f"Check daemon jobs and ensure they are running (poll_prices) and writing heartbeats."
-                )
-            else:
-                details["notes"]["jobs"] = "OK: job locks present and heartbeats are fresh"
-        else:
-            details["notes"]["jobs"] = "INFO: no job locks currently present"
-
-        # ------            -- ------------------------------------------------------
-        # AUTO-PAUSE TRAINING ON CRIT HEALTH
-        # ------            -- ------------------------------------------------------
-        try:
-            # define CRIT as any core subsystem failing
-            core_ok = (
-                out.get("prices", {}).get("ok")
-                and out.get("events", {}).get("ok")
-                and out.get("labels", {}).get("ok")
-                and out.get("model", {}).get("ok")
-            )
-
-            if not core_ok:
-                ts = get_training_status()
-                if ts.get("allowed"):
-                    set_training_mode(
-                        "paused",
-                        actor="health_guard",
-                        reason="auto-pause: CRIT health",
-                    )
-                    try:
-                        _write_job_history(
-                            job_name="training_guard",
-                            event="auto_pause",
-                            detail="CRIT health detected",
-                            exit_code=None,
-                        )
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-        # training status (kill switch visibility)
-        try:
-            out["training"] = get_training_status()
-        except Exception:
-            out["training"] = {"mode": "unknown", "allowed": False}
-
-        out["_details"] = details
-        return out
-
-    finally:
-        con.close()
-
 def api_get_health(_parsed):
     return get_health_snapshot()
+
+
+def api_get_system_state(_parsed):
+    from engine.runtime.system_state import compute_system_state
+    health = get_health_snapshot()
+
+    try:
+        jobs = JOBS.list_jobs()
+    except Exception:
+        jobs = []
+
+    try:
+        kill_switches = api_get_kill_switches(_parsed)
+    except Exception:
+        kill_switches = {}
+
+    return compute_system_state(
+        health=health,
+        jobs=jobs,
+        kill_switches=kill_switches,
+    )
 
 def get_model_diagnostics():
     con = _db_connect()
@@ -2121,139 +980,6 @@ def _normalize_explain_json(val) -> str:
 
 from engine.dev_core.model_registry import get_stage_latest
 MODEL_NAME = "embed_regressor"
-
-def _auto_rollback_loop():
-
-    bad_streak = 0
-
-    while True:
-        try:
-            time.sleep(float(os.environ.get("AUTO_ROLLBACK_POLL_S", "30")))
-
-            champ = get_stage_latest(MODEL_NAME, stage="champion")
-            if not champ:
-                bad_streak = 0
-                continue
-
-            champ_rmse = champ.get("rmse")
-            if champ_rmse is None:
-                bad_streak = 0
-                continue
-
-            window = int(os.environ.get("AUTO_ROLLBACK_WINDOW", "100"))
-            sustained = int(os.environ.get("AUTO_ROLLBACK_SUSTAINED", "3"))
-            rmse_mult = float(os.environ.get("AUTO_ROLLBACK_RMSE_MULT", "1.10"))
-            min_n = int(os.environ.get("AUTO_ROLLBACK_MIN_N", "20"))
-
-            conn = _db_connect()
-            try:
-                rows = conn.execute(
-                    """
-                    SELECT rmse, n
-                    FROM validation_points
-                    WHERE model_name = ?
-                    ORDER BY ts_ms DESC
-                    LIMIT ?
-                    """,
-                    (MODEL_NAME, window),
-                ).fetchall()
-            finally:
-                conn.close()
-
-            if not rows:
-                bad_streak = 0
-                continue
-
-            rmse_w = 0.0
-            n_tot = 0
-            for r in rows:
-                rmse_val = r[0]
-                n_val = r[1]
-
-                if rmse_val is None or n_val is None:
-                    continue
-
-                rmse_w += float(rmse_val) * float(n_val)
-                n_tot += int(n_val)
-
-            if n_tot < min_n:
-                bad_streak = 0
-                continue
-
-            cur_rmse = rmse_w / max(1, n_tot)
-
-            if cur_rmse >= champ_rmse * rmse_mult:
-                bad_streak += 1
-            else:
-                bad_streak = 0
-
-            if bad_streak >= sustained:
-                try:
-                    result = rollback_champion()
-
-                    _write_job_history(
-                        job_name="auto_rollback",
-                        event="rollback",
-                        detail=f"rollback executed: {result}",
-                        exit_code=None,
-                    )
-
-                except Exception:
-                    # rollback or logging failure should not crash the loop
-                    pass
-                finally:
-                    bad_streak = 0
-
-        except Exception:
-            bad_streak = 0
-            continue
-
-def _detect_sustained_equity_drift(con) -> str:
-    """
-    Returns: "CRIT", "WARN", or None
-    Based on recent equity_drift samples.
-    """
-    try:
-        rows = con.execute(
-            """
-            SELECT level
-            FROM equity_drift
-            ORDER BY ts_ms DESC
-            LIMIT ?
-            """,
-            (EQ_DRIFT_SUSTAINED_WINDOW,),
-        ).fetchall()
-    except Exception:
-        return None
-
-    if not rows:
-        return None
-
-    levels = [r[0] for r in rows]
-
-    crit_n = sum(1 for l in levels if l == "CRIT")
-    warn_n = sum(1 for l in levels if l == "WARN")
-
-    if crit_n >= EQ_DRIFT_SUSTAINED_MIN_CRIT:
-        return "CRIT"
-    if warn_n >= EQ_DRIFT_SUSTAINED_MIN_WARN:
-        return "WARN"
-
-    return None
-
-def _classify_equity_diff(diff_pct: float, diff_abs: float = None):
-    if diff_pct is None and diff_abs is None:
-        return ("UNKNOWN", "no diff computed")
-
-    ap = abs(float(diff_pct or 0.0))
-    aa = abs(float(diff_abs or 0.0))
-
-    if ap >= EQ_DIFF_CRIT_PCT or aa >= EQ_DIFF_CRIT_ABS:
-        return ("CRIT", "equity diff exceeds CRIT threshold")
-    if ap >= EQ_DIFF_WARN_PCT or aa >= EQ_DIFF_WARN_ABS:
-        return ("WARN", "equity diff exceeds WARN threshold")
-
-    return ("OK", "equity diff within tolerance")
 
 def get_model_registry(limit: int = 50):
     """
@@ -3320,7 +2046,7 @@ def _qs(parsed):
 # ROUTE SPECS (split into files)
 # ------------------------------
 try:
-    from api_system import ROUTE_SPECS_SYSTEM
+    from engine.api.api_system import ROUTE_SPECS_SYSTEM
 except Exception:
     ROUTE_SPECS_SYSTEM = []
 
@@ -3330,7 +2056,7 @@ except Exception:
     ROUTE_SPECS_JOBS = []
 
 try:
-    from api_ops import ROUTE_SPECS_OPS
+    from engine.api.api_ops import ROUTE_SPECS_OPS
 except Exception:
     ROUTE_SPECS_OPS = []
 
@@ -3343,6 +2069,7 @@ if not ROUTE_SPECS:
     ROUTE_SPECS = [
         # UI convenience
         ("GET",  "/api/health", "api_get_health"),
+        ("GET",  "/api/system/state", "api_get_system_state"),
         ("GET",  "/api/jobs", "api_get_jobs"),
         ("POST", "/api/jobs/start", "api_post_job_start"),
         ("POST", "/api/jobs/stop", "api_post_job_stop"),
@@ -3570,6 +2297,7 @@ API_HANDLERS = {
     # GET
     "api_get_kill_switches": api_get_kill_switches,
     "api_get_health": api_get_health,
+    "api_get_system_state": api_get_system_state,
     "api_get_jobs": api_get_jobs,
     "api_get_job_log": api_get_job_log,
     "api_get_job_history": api_get_job_history,
@@ -3598,143 +2326,6 @@ API_HANDLERS = {
     "api_post_pipeline_run": api_post_pipeline_run,
     "api_post_rollback": api_post_rollback,
 }
-
-class Handler(SimpleHTTPRequestHandler):
-
-    # ------------------------------
-    # API ROUTE TABLE (collapsed)
-    # ------------------------------
-    ROUTES = {(m, p): h for (m, p, h) in ROUTE_SPECS}
-
-    def _normalize_ui_legacy_path(self):
-        # Backward-compat: allow /dashboard.html and / -> /ui/dashboard.html
-        try:
-            parsed = urlparse(self.path)
-            if parsed.path in ("/", "/dashboard.html"):
-                self.path = "/ui/dashboard.html"
-        except Exception:
-            pass
-
-    def _read_json_body(self):
-        try:
-            n = int(self.headers.get("Content-Length") or "0")
-        except Exception:
-            n = 0
-        if n <= 0:
-            return None
-        try:
-            raw = self.rfile.read(n)
-        except Exception:
-            return None
-        try:
-            return json.loads(raw.decode("utf-8", errors="replace") or "{}")
-        except Exception:
-            return None
-
-    def respond_json(self, obj, status=200):
-        try:
-            data = json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        except Exception:
-            data = b'{"ok":false,"error":"json_encode_failed"}'
-            status = 500
-
-        self.send_response(int(status))
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        # permissive CORS (safe for local dashboard; helps when UI is hosted separately)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Token")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        try:
-            self.wfile.write(data)
-        except Exception:
-            pass
-
-    def _is_localhost_client(self) -> bool:
-        try:
-            ip = str(self.client_address[0] or "")
-            return ip in ("127.0.0.1", "::1")
-        except Exception:
-            return False
-
-    def _require_mutation_auth(self):
-        """
-        Mutating endpoints:
-        - If DASHBOARD_API_TOKEN is set: require token for ALL clients.
-        - Else: allow only localhost.
-        """
-        token = (DASHBOARD_API_TOKEN or "").strip()
-        if token:
-            try:
-                hdr = (self.headers.get("X-API-Token") or "").strip()
-            except Exception:
-                hdr = ""
-            if hdr == token:
-                return None
-
-            try:
-                parsed = urlparse(self.path)
-                q = parse_qs(parsed.query)
-                qtok = (q.get("token") or [""])[0]
-            except Exception:
-                qtok = ""
-
-            if str(qtok).strip() == token:
-                return None
-
-            return {"ok": False, "error": "unauthorized"}
-
-        if self._is_localhost_client():
-            return None
-
-        return {"ok": False, "error": "forbidden (localhost only)"}
-
-    def _dispatch(self):
-        method = str(self.command or "").upper().strip()
-        self._normalize_ui_legacy_path()
-
-        parsed = urlparse(self.path)
-        key = (method, parsed.path)
-        handler_name = self.ROUTES.get(key)
-        if not handler_name:
-            if method == "GET":
-                return super().do_GET()
-            return self.respond_json({"ok": False, "error": "unknown endpoint"}, 404)
-
-        fn = API_HANDLERS.get(handler_name)
-        if not fn:
-            return self.respond_json({"ok": False, "error": f"handler_missing:{handler_name}"}, 500)
-
-        # auth for POST/PUT/PATCH/DELETE
-        if method != "GET":
-            auth = self._require_mutation_auth()
-            if auth:
-                return self.respond_json(auth, 403)
-
-        try:
-            if method == "GET":
-                return self.respond_json(fn(parsed))
-            body = self._read_json_body() or {}
-            return self.respond_json(fn(parsed, body))
-        except Exception as e:
-            return self.respond_json({"ok": False, "error": str(e)}, 500)
-
-    def do_GET(self):
-        return self._dispatch()
-
-    def do_POST(self):
-        return self._dispatch()
-
-    def do_OPTIONS(self):
-        # Preflight response for browsers
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Token")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
 
 # -------------            -- ------------------------------------------------------
 # SERVER
@@ -3776,7 +2367,11 @@ def run_server():
 
     # Optional: auto-rollback watcher (ONLY ONE LOOP)
     try:
-        t = threading.Thread(target=_auto_rollback_loop, daemon=True)
+        t = threading.Thread(
+    target=auto_rollback_loop,
+    args=(rollback_champion, write_job_history),
+    daemon=True,
+)
         t.start()
     except Exception:
         pass
@@ -3861,25 +2456,43 @@ def run_server():
         _ensure_temporal_models()
     except Exception:
         pass
+        print(f"Dashboard running at http://{host}:{port}/ui/dashboard.html")
 
-    print(f"Dashboard running at http://{host}:{port}/ui/dashboard.html")
+    # ---------------------------------------------------
+    # Deterministic Supervisor Boot (optional)
+    # ---------------------------------------------------
+    if AUTO_BOOT_DAEMONS and AUTO_BOOT_TARGETS:
+        try:
+            print("[supervisor] deterministic_start targets:", AUTO_BOOT_TARGETS)
+            boot_res = SUPERVISOR.deterministic_start(
+                AUTO_BOOT_TARGETS,
+                include_deps=True,
+                strict=False,
+            )
+            print("[supervisor] boot result:", boot_res)
+        except Exception as e:
+            print("[supervisor] boot exception:", str(e))
 
     if AUTO_PIPELINE:
         print(f"[auto_pipeline] enabled interval_s={AUTO_PIPELINE_INTERVAL_S}")
-        threading.Thread(target=_auto_pipeline_loop, daemon=True).start()
+        threading.Thread(target=ORCHESTRATOR.auto_pipeline_loop, daemon=True).start()
+
     if AUTO_CHALLENGER:
         print(f"[auto_challenger] enabled interval_s={AUTO_CHALLENGER_INTERVAL_S} drift_gate={AUTO_CHALLENGER_MIN_DRIFT}")
-        t2 = threading.Thread(target=_auto_challenger_loop, daemon=True)
-        t2.start()
+        threading.Thread(target=ORCHESTRATOR.auto_challenger_loop, daemon=True).start()
 
     if AUTO_SIZE_POLICY:
         print(f"[auto_size_policy] enabled interval_s={AUTO_SIZE_POLICY_INTERVAL_S}")
-        t_sp = threading.Thread(target=_auto_size_policy_loop, daemon=True)
-        t_sp.start()
+        threading.Thread(target=ORCHESTRATOR.auto_size_policy_loop, daemon=True).start()
 
-    _HTTPD = HTTPServer((host, int(port)), Handler)
+    HandlerCls = build_handler(
+        ROUTE_SPECS=ROUTE_SPECS,
+        API_HANDLERS=API_HANDLERS,
+        dashboard_api_token=DASHBOARD_API_TOKEN,
+    )
 
-    # graceful shutdown (Ctrl+C / service stop)
+    _HTTPD = run_http_server(host, port, HandlerCls)
+
     try:
         import signal
 
@@ -3904,7 +2517,6 @@ def run_server():
     try:
         _HTTPD.serve_forever()
     finally:
-        # best-effort: stop child jobs if the server is exiting
         try:
             JOBS.stop_all()
         except Exception:
@@ -3914,6 +2526,3 @@ def run_server():
                 _HTTPD.server_close()
         except Exception:
             pass
-
-if __name__ == "__main__":
-    run_server()

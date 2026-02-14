@@ -1,40 +1,24 @@
-import subprocess
-import sys
-import time
+# start_system.py
+"""
+Boot entrypoint (legacy)
+
+Production rule:
+- No direct subprocess launching here.
+- The dashboard server owns orchestration via JobManager APIs.
+
+This file remains as a stable entrypoint wrapper.
+"""
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-JOBS = [
-    "stream_prices_polygon_ws.py",
-    "poll_options.py",
-    "dashboard.py"
-]
-
-PROCS = []
-
-def start_job(script):
-    print(f"Starting {script}")
-    p = subprocess.Popen([sys.executable, script])
-    return p
 
 def main():
-    global PROCS
-    try:
-        for job in JOBS:
-            PROCS.append(start_job(job))
-            time.sleep(1)
+    from dashboard_server import run_server
 
-        while True:
-            time.sleep(5)
+    run_server()
 
-    except KeyboardInterrupt:
-        print("Stopping...")
-        for p in PROCS:
-            try:
-                p.terminate()
-            except Exception:
-                pass
 
 if __name__ == "__main__":
     main()

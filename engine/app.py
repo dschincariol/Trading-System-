@@ -1,36 +1,23 @@
-from engine.runtime.supervisor import RuntimeSupervisor
-import time
+# engine/app.py
+"""
+Engine entrypoint wrapper.
+
+This repository's stable runtime entry is dashboard_server.py
+(which owns HTTP + JobManager).
+
+Keep this file so external tooling that runs `python -m engine.app`
+does not break, but do not duplicate orchestration here.
+"""
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def main():
-    supervisor = RuntimeSupervisor()
+    from dashboard_server import run_server
 
-    # Register jobs here
-    supervisor.register_job(
-        name="price_stream",
-        script="backend/stream_prices_polygon_ws.py",
-        daemon=True
-    )
-
-    supervisor.register_job(
-        name="options_poll",
-        script="backend/options_poll.py",
-        daemon=False
-    )
-
-    # Start core daemons
-    supervisor.start("price_stream")
-
-    print("Engine started.")
-    print("Press Ctrl+C to exit.")
-
-    try:
-        while True:
-            time.sleep(5)
-            print(supervisor.status())
-    except KeyboardInterrupt:
-        print("Stopping...")
-        supervisor.stop("price_stream")
+    run_server()
 
 
 if __name__ == "__main__":
