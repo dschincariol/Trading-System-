@@ -13,7 +13,10 @@ def run_llm_explain_with_timeout(prompt: str, timeout_s: float) -> str:
 
     def _worker():
         try:
-            from llm import llmExplain
+            try:
+    from llm import llmExplain
+except Exception:
+    raise RuntimeError("llmExplain unavailable")
             result["text"] = llmExplain(prompt)
         except Exception as e:
             error["error"] = str(e)

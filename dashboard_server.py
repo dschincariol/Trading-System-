@@ -26,13 +26,21 @@ import subprocess
 import sys
 import threading
 import time
+
+# Load .env if present (safe no-op if missing)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 # Allow importing engine from project root
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from collections import deque
-from typing import Deque, Dict, Optional
+from typing import Deque, Dict, Optional, Tuple
 
 # Ensure static UI paths resolve even when launched from another working directory
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -43,7 +51,6 @@ except Exception:
 
 # SINGLE SOURCE OF TRUTH FOR SQLITE
 from engine.dev_core.storage import connect as _db_connect
-from engine.dev_core.storage import connect
 from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from engine.dev_core.storage import init_db as _init_db
 
@@ -94,7 +101,7 @@ ALLOWED_JOBS = {
     "poll_prices": ("poll_prices.py", "daemon"),
     "stream_prices_polygon_ws": ("stream_prices_polygon_ws.py", "daemon"),
     "stream_prices_ibkr": ("stream_prices_ibkr.py", "daemon"),
-"provider_monitor": ("provider_monitor_job.py", "daemon"),
+    "provider_monitor": ("provider_monitor_job.py", "daemon"),
     "ingest_now": ("ingest_now.py", "oneshot"),
     "process_events": ("process_events.py", "oneshot"),
     "label_due_events": ("label_due_events.py", "oneshot"),
@@ -256,9 +263,118 @@ PREFLIGHT_REQUIRED_TABLES = [
     "job_locks",
 ]
 
+# ----------------------------------------
+# STRUCTURAL SCHEMA AUDIT (tables + columns)
+# ----------------------------------------
+# This audits *structure* only (existence + required columns).
+# Optional tables are included but do not fail ok unless required=True.
+SCHEMA_EXPECTATIONS = {
+    # core ingest
+    "prices": {"required": True, "cols": ["ts_ms", "symbol", "price"]},
+    "events": {"required": True, "cols": ["id", "ts_ms"]},
+    "labels": {"required": True, "cols": ["event_id", "label", "ts_ms"]},
+    "predictions": {"required": False, "cols": ["event_id", "ts_ms", "predicted_z"]},
+
+    # ops / UI
+    "alerts": {"required": True, "cols": ["id", "ts_ms", "severity", "symbol", "horizon_s"]},
+    "job_history": {"required": True, "cols": ["id", "ts_ms", "job_name", "event"]},
+    "job_locks": {"required": True, "cols": ["job_name", "owner", "pid", "acquired_ts_ms", "heartbeat_ts_ms"]},
+    "risk_state": {"required": False, "cols": ["key", "value", "updated_ts_ms"]},
+
+    # model + promotion
+    "model_stats_regime": {"required": False, "cols": ["symbol", "horizon_s", "regime", "n", "mean_impact_z"]},
+    "model_stats": {"required": False, "cols": ["symbol", "horizon_s", "n", "mean_impact_z"]},
+    "spillover_beta": {"required": False, "cols": ["target_symbol", "driver_symbol", "horizon_s", "n", "beta"]},
+    "model_registry": {"required": False, "cols": ["model_name", "stage", "model_kind", "model_ts_ms", "created_ts_ms"]},
+    "model_promotion_audit": {"required": False, "cols": ["ts_ms", "model_name", "key", "decision"]},
+    "validation_points": {"required": False, "cols": ["ts_ms", "model_name", "rmse", "n"]},
+
+    # portfolio
+    "portfolio_state": {"required": True, "cols": ["ts_ms"]},
+    "portfolio_orders": {"required": True, "cols": ["ts_ms"]},
+    "portfolio_bt_runs": {"required": True, "cols": ["id", "ts_ms", "start_ts_ms", "end_ts_ms"]},
+    "portfolio_bt_points": {"required": True, "cols": ["run_id", "ts_ms", "equity", "drawdown"]},
+
+    # broker/execution
+    "broker_account": {"required": True, "cols": ["ts_ms"]},
+    "broker_positions": {"required": True, "cols": ["ts_ms", "symbol"]},
+    "broker_meta": {"required": True, "cols": ["key", "value"]},
+    "broker_fills_v2": {"required": False, "cols": ["ts_ms", "symbol"]},
+    "broker_fills": {"required": False, "cols": ["ts_ms", "symbol"]},
+
+    # dashboard-only tables created here
+    "alert_acks": {"required": False, "cols": ["alert_id", "acked_ts_ms"]},
+    "alert_resolutions": {"required": False, "cols": ["alert_id", "resolved_ts_ms"]},
+    "equity_drift": {"required": False, "cols": ["ts_ms", "diff_equity", "diff_equity_pct", "level"]},
+
+    # size policy
+    "size_policy": {"required": False, "cols": ["id", "ts_ms", "lookback_days", "buckets", "method"]},
+    "size_policy_points": {"required": False, "cols": ["policy_id", "bucket_idx", "conf_lo", "conf_hi", "factor"]},
+}
+
+def _get_table_cols(con, table: str):
+    try:
+        rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+    except Exception:
+        rows = []
+    # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
+    return [r[1] for r in rows] if rows else []
+
+def get_schema_audit():
+    """
+    Returns:
+      ok: bool
+      missing_tables: []
+      missing_cols: {table: [col,...]}
+      have_tables: []
+      ts_ms: int
+    """
+    ts_ms = int(time.time() * 1000)
+    con = _db_connect()
+    try:
+        try:
+            rows = con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            have = {r[0] for r in rows}
+        except Exception:
+            have = set()
+
+        missing_tables = []
+        missing_cols = {}
+
+        for t, spec in (SCHEMA_EXPECTATIONS or {}).items():
+            required = bool(spec.get("required"))
+            cols_req = list(spec.get("cols") or [])
+
+            if t not in have:
+                if required:
+                    missing_tables.append(t)
+                continue
+
+            cols_have = _get_table_cols(con, t)
+            if cols_req:
+                miss = [c for c in cols_req if c not in cols_have]
+                if miss and required:
+                    missing_cols[t] = miss
+
+        ok = (len(missing_tables) == 0) and (len(missing_cols) == 0)
+        return {
+            "ok": bool(ok),
+            "ts_ms": int(ts_ms),
+            "missing_tables": missing_tables,
+            "missing_cols": missing_cols,
+            "have_tables": sorted(list(have)),
+        }
+    finally:
+        con.close()
+
+def api_get_schema_audit(_parsed):
+    return get_schema_audit()
+
 _PREFLIGHT_CACHE = {"ok": True, "notes": [], "tables_ok": True, "health_ok": True, "ts_ms": 0}
 
-def _preflight_check_tables() -> tuple[bool, str]:
+from typing import Tuple
+
+def _preflight_check_tables() -> Tuple[bool, str]:
 
     try:
         con = _db_connect()
@@ -532,10 +648,13 @@ def _ensure_job_locks():
 
 def _acquire_lock(name: str, ttl_ms: int = 10_000) -> bool:
     """Acquire a best-effort cross-process lock with TTL."""
+    _ensure_job_locks()
     con = _db_connect()
     try:
         now = int(time.time() * 1000)
         exp = int(now + int(ttl_ms))
+        owner = f"{os.getpid()}:{threading.get_ident()}"
+        pid = int(os.getpid())
 
         row = con.execute(
             "SELECT owner, pid, expires_ms FROM job_locks WHERE job_name=?",
@@ -557,7 +676,7 @@ def _acquire_lock(name: str, ttl_ms: int = 10_000) -> bool:
               (job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms, expires_ms)
             VALUES (?,?,?,?,?,?)
             """,
-            (str(name), str(os.getpid()), int(os.getpid()), int(now), int(now), int(exp)),
+            (str(name), str(owner), int(pid), int(now), int(now), int(exp)),
         )
         con.commit()
         return True
@@ -572,14 +691,25 @@ def _acquire_lock(name: str, ttl_ms: int = 10_000) -> bool:
 
 
 def _touch_lock(name: str, ttl_ms: int = 10_000) -> None:
-    """Extend TTL of an existing lock (best-effort)."""
+    """Extend TTL + update heartbeat of an existing lock (best-effort)."""
+    _ensure_job_locks()
     con = _db_connect()
     try:
         now = int(time.time() * 1000)
         exp = int(now + int(ttl_ms))
+        owner = f"{os.getpid()}:{threading.get_ident()}"
+        pid = int(os.getpid())
+
         con.execute(
-            "UPDATE job_locks SET expires_ms=? WHERE job_name=?",
-            (int(exp), str(name)),
+            """
+            UPDATE job_locks
+            SET expires_ms=?,
+                heartbeat_ts_ms=?,
+                owner=?,
+                pid=?
+            WHERE job_name=?
+            """,
+            (int(exp), int(now), str(owner), int(pid), str(name)),
         )
         con.commit()
     except Exception:
@@ -592,38 +722,33 @@ def _touch_lock(name: str, ttl_ms: int = 10_000) -> None:
 
 
 def _heartbeat_lock(job_name: str, ttl_ms: int = 60_000) -> None:
-    """Heartbeat a held lock (best-effort)."""
-    _touch_lock(job_name, ttl_ms=ttl_ms)
-
+    """
+    Extend TTL + update heartbeat atomically.
+    """
     _ensure_job_locks()
     now = int(time.time() * 1000)
+    exp = int(now + int(ttl_ms))
     owner = f"{os.getpid()}:{threading.get_ident()}"
     pid = int(os.getpid())
 
     con = _db_connect()
     try:
-        # Prefer newer schema if present
-        try:
-            cols = [r[1] for r in con.execute("PRAGMA table_info(job_locks)").fetchall() or []]
-        except Exception:
-            cols = []
-
-        if "heartbeat_ts_ms" in cols:
-            con.execute(
-                "UPDATE job_locks SET heartbeat_ts_ms=?, owner=?, pid=? WHERE job_name=?",
-                (int(now), str(owner), int(pid), str(job_name)),
-            )
-        else:
-            # Fallback: touch acquired_ts_ms
-            if "acquired_ts_ms" in cols:
-                con.execute(
-                    "UPDATE job_locks SET acquired_ts_ms=?, owner=?, pid=? WHERE job_name=?",
-                    (int(now), str(owner), int(pid), str(job_name)),
-                )
-
+        con.execute(
+            """
+            UPDATE job_locks
+            SET heartbeat_ts_ms=?,
+                expires_ms=?,
+                owner=?,
+                pid=?
+            WHERE job_name=?
+            """,
+            (now, exp, str(owner), pid, str(job_name)),
+        )
         con.commit()
     finally:
         con.close()
+
+
 def _release_lock(job_name: str) -> None:
     _ensure_job_locks()
     con = _db_connect()
@@ -1059,15 +1184,26 @@ class JobManager:
             job.last_start_args = list(args)
             job.last_start_cwd = os.getcwd()
 
-            job.proc = subprocess.Popen(
-                args,
-                cwd=os.getcwd(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0),
-            )
+            try:
+                job.proc = subprocess.Popen(
+                    args,
+                    cwd=os.getcwd(),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0),
+                )
+            except Exception as e:
+                # IMPORTANT: release oneshot lock if spawn fails
+                if job.mode == "oneshot":
+                    try:
+                        _release_lock(f"job:{job.name}")
+                    except Exception:
+                        pass
+                job.append_log(f"[server] spawn failed: {e}")
+                _write_job_history(job.name, "start_failed", f"spawn failed: {e}", None)
+                return {"ok": False, "error": f"spawn failed: {e}"}
 
             # update job lock heartbeat on successful start
             try:
@@ -1841,15 +1977,6 @@ def get_health_snapshot():
         else:
             details["notes"]["jobs"] = "INFO: no job locks currently present"
 
-        # training status (kill switch visibility)
-        try:
-            out["training"] = get_training_status()
-        except Exception:
-            out["training"] = {
-                "mode": "unknown",
-                "allowed": False,
-            }
-
         # ------            -- ------------------------------------------------------
         # AUTO-PAUSE TRAINING ON CRIT HEALTH
         # ------            -- ------------------------------------------------------
@@ -2018,7 +2145,7 @@ def _auto_rollback_loop():
             rmse_mult = float(os.environ.get("AUTO_ROLLBACK_RMSE_MULT", "1.10"))
             min_n = int(os.environ.get("AUTO_ROLLBACK_MIN_N", "20"))
 
-            conn = connect()
+            conn = _db_connect()
             try:
                 rows = conn.execute(
                     """
@@ -2040,10 +2167,14 @@ def _auto_rollback_loop():
             rmse_w = 0.0
             n_tot = 0
             for r in rows:
-                if r["rmse"] is None or r["n"] is None:
+                rmse_val = r[0]
+                n_val = r[1]
+
+                if rmse_val is None or n_val is None:
                     continue
-                rmse_w += float(r["rmse"]) * float(r["n"])
-                n_tot += int(r["n"])
+
+                rmse_w += float(rmse_val) * float(n_val)
+                n_tot += int(n_val)
 
             if n_tot < min_n:
                 bad_streak = 0
@@ -2431,16 +2562,18 @@ def get_execution_metrics():
     """
     con = _db_connect()
     try:
+        fills_table = _broker_fills_table(con)
+
         try:
             row = con.execute(
-                """
+                f"""
                 SELECT
                   COUNT(*)        AS n_fills,
                   SUM(slippage)   AS total_slippage,
                   SUM(fees)       AS total_fees,
                   SUM(total_cost) AS total_cost,
                   AVG(slippage)   AS avg_slippage
-                FROM broker_fills
+                FROM {fills_table}
                 """
             ).fetchone()
         except Exception:
@@ -2448,9 +2581,8 @@ def get_execution_metrics():
 
         try:
             last = con.execute(
-                "SELECT MAX(ts_ms) FROM broker_fills"
+                f"SELECT MAX(ts_ms) FROM {fills_table}"
             ).fetchone()
-
         except Exception:
             last = None
 
@@ -2479,6 +2611,8 @@ def get_execution_metrics_rolling():
     """
     con = _db_connect()
     try:
+        fills_table = _broker_fills_table(con)
+
         now_ms = int(time.time() * 1000)
         day_ms = 24 * 60 * 60 * 1000
         week_ms = 7 * day_ms
@@ -2486,14 +2620,14 @@ def get_execution_metrics_rolling():
         def _q(since_ms):
             try:
                 return con.execute(
-                    """
+                    f"""
                     SELECT
                       COUNT(*)        AS n_fills,
                       SUM(slippage)   AS total_slippage,
                       SUM(fees)       AS total_fees,
                       SUM(total_cost) AS total_cost,
                       AVG(slippage)   AS avg_slippage
-                    FROM broker_fills
+                    FROM {fills_table}
                     WHERE ts_ms >= ?
                     """,
                     (int(since_ms),),
@@ -2528,9 +2662,11 @@ def get_execution_metrics_by_symbol(limit: int = 50):
     limit = max(1, min(500, int(limit or 50)))
     con = _db_connect()
     try:
+        fills_table = _broker_fills_table(con)
+
         try:
             rows = con.execute(
-                """
+                f"""
                 SELECT
                   symbol,
                   COUNT(*)        AS n_fills,
@@ -2538,7 +2674,7 @@ def get_execution_metrics_by_symbol(limit: int = 50):
                   SUM(fees)       AS total_fees,
                   SUM(total_cost) AS total_cost,
                   AVG(slippage)   AS avg_slippage
-                FROM broker_fills
+                FROM {fills_table}
                 GROUP BY symbol
                 ORDER BY total_cost DESC
                 LIMIT ?
@@ -2572,15 +2708,17 @@ def get_execution_cost_by_confidence():
     """
     con = _db_connect()
     try:
+        fills_table = _broker_fills_table(con)
+
         try:
             rows = con.execute(
-                """
+                f"""
                 SELECT
                   CAST(confidence * 10 AS INTEGER) AS bucket,
                   COUNT(*)        AS n_fills,
                   SUM(total_cost) AS total_cost,
                   AVG(total_cost) AS avg_cost
-                FROM broker_fills
+                FROM {fills_table}
                 WHERE confidence IS NOT NULL
                 GROUP BY bucket
                 ORDER BY bucket ASC
@@ -2617,6 +2755,12 @@ def _table_exists(con, name: str) -> bool:
         return bool(row)
     except Exception:
         return False
+
+def _broker_fills_table(con) -> str:
+    # Prefer v2 if present; fall back to legacy name
+    if _table_exists(con, "broker_fills_v2"):
+        return "broker_fills_v2"
+    return "broker_fills"
 
 
 def get_social_features(symbol: str, limit: int = 200):
@@ -3165,6 +3309,13 @@ def _auto_size_policy_loop():
                 print("[auto_size_policy] ERROR:", str(e))
         time.sleep(max(300.0, float(AUTO_SIZE_POLICY_INTERVAL_S)))
 
+def _qs(parsed):
+    try:
+        q = parse_qs(parsed.query or "")
+        return {k: v[0] for k, v in q.items()}
+    except Exception:
+        return {}
+
 # ------------------------------
 # ROUTE SPECS (split into files)
 # ------------------------------
@@ -3184,6 +3335,47 @@ except Exception:
     ROUTE_SPECS_OPS = []
 
 ROUTE_SPECS = list(ROUTE_SPECS_SYSTEM) + list(ROUTE_SPECS_JOBS) + list(ROUTE_SPECS_OPS)
+
+# ----------------------------------------------------------------------
+# FALLBACK ROUTES (keeps dashboard usable if split route modules missing)
+# ----------------------------------------------------------------------
+if not ROUTE_SPECS:
+    ROUTE_SPECS = [
+        # UI convenience
+        ("GET",  "/api/health", "api_get_health"),
+        ("GET",  "/api/jobs", "api_get_jobs"),
+        ("POST", "/api/jobs/start", "api_post_job_start"),
+        ("POST", "/api/jobs/stop", "api_post_job_stop"),
+        ("GET",  "/api/jobs/log", "api_get_job_log"),
+        ("GET",  "/api/jobs/history", "api_get_job_history"),
+
+        ("GET",  "/api/alerts", "api_get_alerts"),
+        ("GET",  "/api/validation", "api_get_validation"),
+
+        ("POST", "/api/pipeline/run", "api_post_pipeline_run"),
+
+        ("GET",  "/api/model/diagnostics", "api_get_model_diagnostics"),
+        ("GET",  "/api/model/registry", "api_get_model_registry"),
+
+        ("GET",  "/api/embed_model_eval", "api_get_embed_model_eval"),
+        ("GET",  "/api/embed_conf_calib", "api_get_embed_conf_calib"),
+
+        ("GET",  "/api/confidence_mass", "api_get_confidence_mass"),
+        ("GET",  "/api/schema/audit", "api_get_schema_audit"),
+
+        ("POST", "/api/model/rollback", "api_post_rollback"),
+
+        # execution metrics (additive)
+        ("GET",  "/api/execution/metrics", "api_get_execution_metrics"),
+        ("GET",  "/api/execution/rolling", "api_get_execution_metrics_rolling"),
+        ("GET",  "/api/execution/by_symbol", "api_get_execution_metrics_by_symbol"),
+        ("GET",  "/api/execution/cost_by_confidence", "api_get_execution_cost_by_confidence"),
+
+        # optional social endpoints
+        ("GET",  "/api/social/features", "api_get_social_features"),
+        ("GET",  "/api/social/regimes", "api_get_social_regimes"),
+        ("GET",  "/api/social/blocks", "api_get_social_blocks"),
+    ]
 
 def _missing(name: str):
     return {"ok": False, "error": f"handler_unavailable:{name}"}
@@ -3398,6 +3590,7 @@ API_HANDLERS = {
     "api_get_social_regimes": api_get_social_regimes,
     "api_get_social_blocks": api_get_social_blocks,
     "api_get_confidence_mass": api_get_confidence_mass,
+    "api_get_schema_audit": api_get_schema_audit,
 
     # POST
     "api_post_job_start": api_post_job_start,
@@ -3448,6 +3641,10 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(int(status))
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        # permissive CORS (safe for local dashboard; helps when UI is hosted separately)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Token")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         try:
@@ -3530,33 +3727,32 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         return self._dispatch()
 
+    def do_OPTIONS(self):
+        # Preflight response for browsers
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Token")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
 # -------------            -- ------------------------------------------------------
 # SERVER
 # -------------            -- ------------------------------------------------------
 
 def run_server():
     global _HTTPD
+
     # ---------------------------------------------------
     # HARD DB BOOTSTRAP (idempotent, REQUIRED)
     # ---------------------------------------------------
-    # Ensure lock tables exist before any jobs
     try:
-        _ensure_job_locks()
-    except Exception:
-        pass
-
+        _init_db()
     except Exception as e:
         print(f"[fatal] database init failed: {e}", file=sys.stderr)
         raise
 
-    # Optional: auto-rollback watcher (ONLY ONE LOOP)
-    try:
-        t = threading.Thread(target=_auto_rollback_loop, daemon=True)
-        t.start()
-    except Exception:
-        pass
-
-    # Ensure tables exist early
+    # Ensure coordination + persistence tables exist before any jobs
     try:
         _ensure_job_locks()
     except Exception:
@@ -3577,6 +3773,14 @@ def run_server():
         _ensure_equity_drift()
     except Exception:
         pass
+
+    # Optional: auto-rollback watcher (ONLY ONE LOOP)
+    try:
+        t = threading.Thread(target=_auto_rollback_loop, daemon=True)
+        t.start()
+    except Exception:
+        pass
+
     # ------            -- ------------------------------------------------------
     # PREFLIGHT SNAPSHOT AT BOOT (safe startup checklist)
     # ------            -- ------------------------------------------------------
@@ -3674,6 +3878,28 @@ def run_server():
         t_sp.start()
 
     _HTTPD = HTTPServer((host, int(port)), Handler)
+
+    # graceful shutdown (Ctrl+C / service stop)
+    try:
+        import signal
+
+        def _shutdown(_sig=None, _frame=None):
+            try:
+                if _HTTPD:
+                    _HTTPD.shutdown()
+            except Exception:
+                pass
+
+        try:
+            signal.signal(signal.SIGINT, _shutdown)
+        except Exception:
+            pass
+        try:
+            signal.signal(signal.SIGTERM, _shutdown)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
     try:
         _HTTPD.serve_forever()

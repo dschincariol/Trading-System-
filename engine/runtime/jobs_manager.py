@@ -130,7 +130,7 @@ def _acquire_lock(name: str, ttl_ms: int = 10_000) -> bool:
               (job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms, expires_ms)
             VALUES (?,?,?,?,?,?)
             """,
-            (str(name), str(os.getpid()), int(os.getpid()), int(now), int(now), int(exp)),
+            (str(name), str(owner), int(pid), int(now), int(now), int(exp)),
         )
         con.commit()
         return True

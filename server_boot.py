@@ -139,6 +139,46 @@ except Exception:
 
 ROUTE_SPECS = list(ROUTE_SPECS_SYSTEM) + list(ROUTE_SPECS_JOBS) + list(ROUTE_SPECS_OPS)
 
+# ----------------------------------------------------------------------
+# FALLBACK ROUTES (keeps dashboard usable if split route modules missing)
+# ----------------------------------------------------------------------
+if not ROUTE_SPECS:
+    ROUTE_SPECS = [
+        # UI convenience
+        ("GET",  "/api/health", "api_get_health"),
+        ("GET",  "/api/jobs", "api_get_jobs"),
+        ("POST", "/api/jobs/start", "api_post_job_start"),
+        ("POST", "/api/jobs/stop", "api_post_job_stop"),
+        ("GET",  "/api/jobs/log", "api_get_job_log"),
+        ("GET",  "/api/jobs/history", "api_get_job_history"),
+
+        ("GET",  "/api/alerts", "api_get_alerts"),
+        ("GET",  "/api/validation", "api_get_validation"),
+
+        ("POST", "/api/pipeline/run", "api_post_pipeline_run"),
+
+        ("GET",  "/api/model/diagnostics", "api_get_model_diagnostics"),
+        ("GET",  "/api/model/registry", "api_get_model_registry"),
+
+        ("GET",  "/api/embed_model_eval", "api_get_embed_model_eval"),
+        ("GET",  "/api/embed_conf_calib", "api_get_embed_conf_calib"),
+
+        ("GET",  "/api/confidence_mass", "api_get_confidence_mass"),
+
+        ("POST", "/api/model/rollback", "api_post_rollback"),
+
+        # execution metrics (additive)
+        ("GET",  "/api/execution/metrics", "api_get_execution_metrics"),
+        ("GET",  "/api/execution/rolling", "api_get_execution_metrics_rolling"),
+        ("GET",  "/api/execution/by_symbol", "api_get_execution_metrics_by_symbol"),
+        ("GET",  "/api/execution/cost_by_confidence", "api_get_execution_cost_by_confidence"),
+
+        # optional social endpoints
+        ("GET",  "/api/social/features", "api_get_social_features"),
+        ("GET",  "/api/social/regimes", "api_get_social_regimes"),
+        ("GET",  "/api/social/blocks", "api_get_social_blocks"),
+    ]
+
 def _qs(parsed):
     try:
         q = parse_qs(parsed.query or "", keep_blank_values=True)
