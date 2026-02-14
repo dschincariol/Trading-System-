@@ -62,6 +62,15 @@ def _apply_pragmas(con: sqlite3.Connection, readonly: bool) -> None:
         except Exception:
             pass
 
+    # Ensure WAL actually active (defensive)
+    try:
+        jm = con.execute("PRAGMA journal_mode;").fetchone()
+        if jm and str(jm[0]).upper() != "WAL":
+            con.execute("PRAGMA journal_mode=WAL;")
+    except Exception:
+        pass
+
+
     # Defense-in-depth: block writes on read connections
     if readonly:
         try:
@@ -670,6 +679,89 @@ def _ensure_trade_attribution_ledger_schema(con):
     con.executescript(
         """
         CREATE TABLE IF NOT EXISTS trade_attribution_ledger (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts_ms INTEGER NOT NULL,
+
+          source_alert_id INTEGER,
+          symbol TEXT NOT NULL,
+
+          signal_json TEXT,
+          model_json TEXT,
+          regime_vector_json TEXT,
+
+          execution_policy_json TEXT,
+          suppression_reason TEXT,
+
+          pnl REAL,
+          fees REAL,
+          slippage_bps REAL,
+
+          decision_json TEXT,
+          created_ts_ms INTEGER NOT NULL,
+
+          UNIQUE(ts_ms, source_alert_id, symbol, suppression_reason)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_trade_attr_ts
+          ON trade_attribution_ledger(ts_ms);
+
+        CREATE INDEX IF NOT EXISTS idx_trade_attr_alert
+          ON trade_attribution_ledger(source_alert_id);
+
+        CREATE INDEX IF NOT EXISTS idx_trade_attr_symbol_ts
+          ON trade_attribution_ledger(symbol, ts_ms);
+        """
+    )
+
+
+def _ensure_shadow_capital_schema(con):
+    # Additive, idempotent: shadow capital scoring snapshots (model-level governance)
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS shadow_capital_scores (
+          ts_ms INTEGER NOT NULL,
+          window_s INTEGER NOT NULL,
+          regime TEXT NOT NULL DEFAULT 'global',
+
+          model_name TEXT NOT NULL,
+          model_kind TEXT,
+          model_ts_ms INTEGER,
+
+          n INTEGER NOT NULL DEFAULT 0,
+
+          -- quality
+          rmse REAL,
+          dir_acc REAL,
+          net_rmse REAL,
+
+          -- costs / risk
+          slippage_bps_mean REAL,
+          slippage_bps_std REAL,
+          drawdown_proxy REAL,
+
+          -- capital efficiency (net edge per unit cost proxy)
+          cap_eff REAL,
+
+          -- composite governance score (higher is better)
+          score REAL NOT NULL,
+
+          -- debug/audit
+          weights_json TEXT,
+          components_json TEXT,
+
+          PRIMARY KEY (model_name, window_s, regime)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_shadow_capital_scores_ts
+          ON shadow_capital_scores(ts_ms);
+
+        CREATE INDEX IF NOT EXISTS idx_shadow_capital_scores_score
+          ON shadow_capital_scores(score);
+
+        CREATE INDEX IF NOT EXISTS idx_shadow_capital_scores_regime_score
+          ON shadow_capital_scores(regime, score);
+        """
+    )
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           ts_ms INTEGER NOT NULL,
 
@@ -1579,6 +1671,7 @@ def init_db():
         _ensure_execution_mode_armed_column(con)
         _ensure_kill_switch_schema(con)
         _ensure_trade_attribution_ledger_schema(con)
+        _ensure_shadow_capital_schema(con)
 
         # Additive: ensure symbols table exists even for older DBs
         try:
@@ -1606,6 +1699,10 @@ def init_db():
                 )
             except Exception:
                 pass
+        try:
+            con.commit()
+        except Exception:
+            pass
 
     finally:
         con.close()
@@ -1648,7 +1745,7 @@ def put_event(ts_ms, source, title, body, url, event_key, meta_json=None):
             _maybe_wal_checkpoint(con, force=True)
         except Exception:
             pass
-        con.close()
+
 
 def put_price(ts_ms, symbol, price):
     con = connect(readonly=False)
@@ -1673,7 +1770,6 @@ def put_price(ts_ms, symbol, price):
             _note_write(con)
         except Exception:
             pass
-        con.close()
 
 
 def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> bool:

@@ -27,6 +27,10 @@ import sys
 import threading
 import time
 
+from engine.runtime.logging import get_logger
+log = get_logger("dashboard")
+
+from urllib.parse import parse_qs
 # Load .env if present (safe no-op if missing)
 try:
     from dotenv import load_dotenv
@@ -38,9 +42,6 @@ except Exception:
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from engine.api.http_transport import build_handler, run_http_server
-from urllib.parse import urlparse, parse_qs
-from collections import deque
-from typing import Deque, Dict, Optional, Tuple
 
 # Ensure static UI paths resolve even when launched from another working directory
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -109,6 +110,13 @@ from engine.runtime.guards import (
     detect_sustained_equity_drift,
     classify_equity_diff,
 )
+
+from engine.runtime.lifecycle import (
+    snapshot as lifecycle_snapshot,
+    start_lifecycle_monitor,
+    mark_shutdown,
+)
+
 
 # -------------            -- ------------------------------------------------------
 # CONFIG (auto-restart guards)
@@ -244,6 +252,42 @@ SCHEMA_EXPECTATIONS = {
 
 def api_get_schema_audit(_parsed):
     return get_schema_audit()
+
+
+def api_get_shadow_capital_scores(parsed):
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "50") or "50")
+    regime = str(qs.get("regime", "global") or "global").strip() or "global"
+    try:
+        from engine.dev_core.shadow_capital_allocator import get_shadow_capital_scores
+        return get_shadow_capital_scores(limit=limit, regime=regime)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def api_post_shadow_capital_run(parsed, body):
+    qs = _qs(parsed)
+    window_s = qs.get("window_s", "")
+    regime = qs.get("regime", "")
+
+    if isinstance(body, dict):
+        if not window_s:
+            window_s = body.get("window_s", "")
+        if not regime:
+            regime = body.get("regime", "")
+
+    try:
+        window_s = int(window_s or 86400)
+    except Exception:
+        window_s = 86400
+
+    regime = str(regime or "global").strip() or "global"
+
+    try:
+        from engine.dev_core.shadow_capital_allocator import compute_and_persist_shadow_capital_scores
+        return compute_and_persist_shadow_capital_scores(window_s=window_s, regime=regime)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 _PREFLIGHT_CACHE = {"ok": True, "notes": [], "tables_ok": True, "health_ok": True, "ts_ms": 0}
 
@@ -477,8 +521,8 @@ SUPERVISOR = RuntimeSupervisor(jobs=JOBS)
 
 ORCHESTRATOR = RuntimeOrchestrator(
     jobs=JOBS,
-    acquire_lock=_acquire_lock,
-    release_lock=_release_lock,
+    acquire_lock=acquire_lock,
+    release_lock=release_lock,
     auto_pipeline_include_execution=AUTO_PIPELINE_INCLUDE_EXECUTION,
     auto_pipeline_log=AUTO_PIPELINE_LOG,
     auto_pipeline_interval_s=AUTO_PIPELINE_INTERVAL_S,
@@ -515,41 +559,6 @@ SERVER_STARTED_AT_MS = int(time.time() * 1000)
 #   SHUTDOWN -> shutting down / no mutations
 # -------------            -- ------------------------------------------------------
 
-LIFECYCLE_STATES = ("BOOTING", "WARMING", "LIVE", "DEGRADED", "KILL", "SHUTDOWN")
-
-_LIFECYCLE = {
-    "state": "BOOTING",
-    "since_ms": int(time.time() * 1000),
-    "last_error": "",
-    "last_transition_ms": int(time.time() * 1000),
-}
-
-_LIFECYCLE_LOCK = threading.Lock()
-
-def _set_lifecycle(state: str, error: str = ""):
-    st = str(state or "").upper().strip()
-    if st not in LIFECYCLE_STATES:
-        st = "DEGRADED"
-        error = error or "invalid_state"
-
-    now_ms = int(time.time() * 1000)
-    with _LIFECYCLE_LOCK:
-        if _LIFECYCLE.get("state") != st:
-            _LIFECYCLE["state"] = st
-            _LIFECYCLE["since_ms"] = now_ms
-            _LIFECYCLE["last_transition_ms"] = now_ms
-        if error:
-            _LIFECYCLE["last_error"] = str(error)[:500]
-
-def _lifecycle_snapshot() -> dict:
-    with _LIFECYCLE_LOCK:
-        return {
-            "state": _LIFECYCLE.get("state"),
-            "since_ms": int(_LIFECYCLE.get("since_ms") or 0),
-            "last_transition_ms": int(_LIFECYCLE.get("last_transition_ms") or 0),
-            "last_error": str(_LIFECYCLE.get("last_error") or ""),
-        }
-
 # HTTP bind
 host = os.environ.get("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1"
 port = int(os.environ.get("DASHBOARD_PORT", "8000"))
@@ -564,100 +573,6 @@ AUTO_BOOT_TARGETS = [
 ]
 
 _HTTPD = None  # set in run_server()
-
-def _auto_pipeline_loop():
-    # small delay to allow server startup to finish
-    time.sleep(max(0.0, float(AUTO_PIPELINE_START_DELAY_S)))
-
-    while True:
-        try:
-            # Ensure poll_prices is running (required by run_pipeline)
-            if not _is_job_running("poll_prices"):
-                res = JOBS.start("poll_prices")
-                if AUTO_PIPELINE_LOG:
-                    print("[auto_pipeline] poll_prices start:", res)
-
-            # run_pipeline has its own cross-process lock and safety checks
-            res = run_pipeline()
-            if AUTO_PIPELINE_LOG:
-                print("[auto_pipeline] run_pipeline:", res)
-
-        except Exception as e:
-            if AUTO_PIPELINE_LOG:
-                print("[auto_pipeline] ERROR:", str(e))
-
-        # sleep until next tick
-        try:
-            time.sleep(max(5.0, float(AUTO_PIPELINE_INTERVAL_S)))
-        except Exception:
-            time.sleep(60.0)
-
-def _max_drift_ratio() -> float:
-    con = _db_connect()
-    try:
-        try:
-            r = con.execute("SELECT MAX(drift_ratio) FROM model_drift").fetchone()
-            return float(r[0] or 0.0) if r else 0.0
-        except Exception:
-            return 0.0
-    finally:
-        con.close()
-
-
-def _run_challenger_job_wait() -> dict:
-    if not _acquire_lock("challenger", ttl_ms=30 * 60 * 1000):
-        return {"ok": False, "error": "challenger locked (already running?)"}
-
-    try:
-        res = JOBS.start("train_and_eval_challenger")
-        if not res.get("ok"):
-            return res
-
-        job = JOBS.get("train_and_eval_challenger")
-        # wait for oneshot completion
-        while True:
-            time.sleep(0.25)
-            if not job or not job.proc:
-                break
-            if job.proc.poll() is not None:
-                if job.exit_code not in (0, None):
-                    return {"ok": False, "error": f"train_and_eval_challenger exited rc={job.exit_code}"}
-                break
-
-        return {"ok": True}
-    finally:
-        _release_lock("challenger")
-
-
-def _auto_challenger_loop():
-    time.sleep(max(0.0, float(AUTO_CHALLENGER_START_DELAY_S)))
-
-    while True:
-        try:
-            if AUTO_CHALLENGER_MIN_DRIFT > 0.0:
-                md = _max_drift_ratio()
-                if md < AUTO_CHALLENGER_MIN_DRIFT:
-                    if AUTO_CHALLENGER_LOG:
-                        print(f"[auto_challenger] skip drift_gate max_drift={md:.3f} < {AUTO_CHALLENGER_MIN_DRIFT:.3f}")
-                else:
-                    if AUTO_CHALLENGER_LOG:
-                        print(f"[auto_challenger] running drift_gate max_drift={md:.3f}")
-                    out = _run_challenger_job_wait()
-                    if AUTO_CHALLENGER_LOG:
-                        print("[auto_challenger] result:", out)
-            else:
-                out = _run_challenger_job_wait()
-                if AUTO_CHALLENGER_LOG:
-                    print("[auto_challenger] result:", out)
-
-        except Exception as e:
-            if AUTO_CHALLENGER_LOG:
-                print("[auto_challenger] ERROR:", str(e))
-
-        try:
-            time.sleep(max(30.0, float(AUTO_CHALLENGER_INTERVAL_S)))
-        except Exception:
-            time.sleep(3600.0)
 
 # -------------            -- ------------------------------------------------------
 # RELEVANCE STATS (NEW)
@@ -759,6 +674,9 @@ def rollback_champion():
         return {"ok": False, "error": str(e)}
 
 def api_post_rollback(_parsed, _body):
+    d = _deny_if_shutdown()
+    if d:
+        return d
     return rollback_champion()
 
 def get_promotion_status():
@@ -877,11 +795,14 @@ def api_get_system_state(_parsed):
     except Exception:
         kill_switches = {}
 
-    return compute_system_state(
+    state = compute_system_state(
         health=health,
         jobs=jobs,
         kill_switches=kill_switches,
     )
+
+    state["lifecycle"] = lifecycle_snapshot()
+    return state
 
 def get_model_diagnostics():
     con = _db_connect()
@@ -2012,28 +1933,18 @@ def get_size_policy():
         con.close()
 
 def run_size_policy_job():
-    if not _acquire_lock("train_size_policy", ttl_ms=30 * 60 * 1000):
-
-        return {"ok": False, "error": "train_size_policy locked (already running?)"}
+    acquired = False
     try:
+        acquired = bool(acquire_lock("train_size_policy", ttl_ms=30 * 60 * 1000))
+        if not acquired:
+            return {"ok": False, "error": "train_size_policy locked (already running?)"}
         return JOBS.start("train_size_policy")
     finally:
-        _release_lock("train_size_policy")
-
-
-def _auto_size_policy_loop():
-    time.sleep(max(0.0, float(AUTO_SIZE_POLICY_START_DELAY_S)))
-    while True:
-        try:
-            if AUTO_SIZE_POLICY_LOG:
-                print("[auto_size_policy] running train_size_policy")
-            out = run_size_policy_job()
-            if AUTO_SIZE_POLICY_LOG:
-                print("[auto_size_policy] result:", out)
-        except Exception as e:
-            if AUTO_SIZE_POLICY_LOG:
-                print("[auto_size_policy] ERROR:", str(e))
-        time.sleep(max(300.0, float(AUTO_SIZE_POLICY_INTERVAL_S)))
+        if acquired:
+            try:
+                release_lock("train_size_policy")
+            except Exception:
+                pass
 
 def _qs(parsed):
     try:
@@ -2090,6 +2001,10 @@ if not ROUTE_SPECS:
         ("GET",  "/api/confidence_mass", "api_get_confidence_mass"),
         ("GET",  "/api/schema/audit", "api_get_schema_audit"),
 
+        # shadow capital allocation scoring (governance)
+        ("GET",  "/api/shadow/capital_scores", "api_get_shadow_capital_scores"),
+        ("POST", "/api/shadow/capital_scores/run", "api_post_shadow_capital_run"),
+
         ("POST", "/api/model/rollback", "api_post_rollback"),
 
         # execution metrics (additive)
@@ -2106,6 +2021,15 @@ if not ROUTE_SPECS:
 
 def _missing(name: str):
     return {"ok": False, "error": f"handler_unavailable:{name}"}
+
+def _deny_if_shutdown():
+    try:
+        s = lifecycle_snapshot() or {}
+        if str(s.get("state") or "").upper() == "SHUTDOWN":
+            return {"ok": False, "error": "server_shutting_down"}
+    except Exception:
+        pass
+    return None
 
 def _wrap_get_model_registry(parsed, _ctx):
     if not get_model_registry:
@@ -2204,7 +2128,14 @@ def _wrap_api_post_rollback(parsed, body, _ctx):
     return api_post_rollback(parsed, body)
 
 def api_get_kill_switches(parsed):
-    return _api_get_kill_switches_impl(parsed, {}) if _api_get_kill_switches_impl else {"ok": False, "error": "kill_switches_unavailable"}
+    if not _api_get_kill_switches_impl:
+        return {"ok": False, "error": "kill_switches_unavailable"}
+    # Some callers pass None (lifecycle monitor). Provide a minimal parsed shim.
+    if parsed is None:
+        class _P:  # tiny shim
+            query = ""
+        parsed = _P()
+    return _api_get_kill_switches_impl(parsed, {})
 
 
 def api_get_job_log(parsed):
@@ -2293,6 +2224,272 @@ def api_get_social_blocks(parsed):
     return get_social_blocks(limit=limit)
 
 
+# ------------------------------
+# JOBS + PIPELINE (MISSING IN FILE)
+# ------------------------------
+
+def _job_name_from(parsed, body) -> str:
+    qs = _qs(parsed)
+    name = (qs.get("name") or "").strip()
+    if not name and isinstance(body, dict):
+        name = str(body.get("name") or "").strip()
+    return name
+
+def api_get_jobs(_parsed):
+    """
+    Returns deterministic list for UI:
+      - running jobs from JobManager
+      - plus non-running allowed jobs (status=stopped)
+      - ordered by JOB_ORDER then remaining alphabetical
+    """
+    try:
+        running = JOBS.list_jobs() or []
+    except Exception:
+        running = []
+
+    running_by_name = {}
+    for j in running:
+        try:
+            n = str(j.get("name") or "").strip()
+            if n:
+                running_by_name[n] = j
+        except Exception:
+            continue
+
+    allowed_names = []
+    try:
+        allowed_names = list(ALLOWED_JOBS.keys())
+    except Exception:
+        allowed_names = []
+
+    # ordering: JOB_ORDER first, then remaining allowed sorted
+    order = []
+    try:
+        order = list(JOB_ORDER or [])
+    except Exception:
+        order = []
+
+    remaining = sorted([n for n in allowed_names if n not in set(order)])
+    names = [n for n in order if n in set(allowed_names)] + remaining
+
+    out = []
+    for name in names:
+        if name in running_by_name:
+            out.append(running_by_name[name])
+        else:
+            out.append({
+                "name": name,
+                "pid": None,
+                "started_ts_ms": None,
+                "state": "stopped",
+                "exit_code": None,
+                "meta": {},
+            })
+
+    return {
+        "ok": True,
+        "ts_ms": int(time.time() * 1000),
+        "jobs": out,
+        "pipeline_order": list(PIPELINE_ORDER or []),
+        "allowed": names,
+    }
+
+# ------------------------------
+# EXECUTION HARD-GATE (production safety)
+# ------------------------------
+
+# Default heuristic gate; can be tightened via env.
+# - EXECUTION_JOB_NAMES: comma-separated exact names to treat as execution
+# - EXECUTION_JOB_SUBSTRINGS: comma-separated substrings; any match => execution
+_EXECUTION_JOB_NAMES = {
+    x.strip()
+    for x in os.environ.get("EXECUTION_JOB_NAMES", "").split(",")
+    if x.strip()
+}
+
+# Sensible defaults that catch common "live execution" jobs without blocking ingest/training.
+# Override in prod if you want only exact name matching.
+_EXECUTION_JOB_SUBSTRINGS = [
+    x.strip().lower()
+    for x in os.environ.get(
+        "EXECUTION_JOB_SUBSTRINGS",
+        "broker_apply,apply_orders,apply_latest_portfolio_orders,execute,live_execution,ibkr,alpaca",
+    ).split(",")
+    if x.strip()
+]
+
+def _is_execution_job(job_name: str) -> bool:
+    n = str(job_name or "").strip()
+    if not n:
+        return False
+    if n in _EXECUTION_JOB_NAMES:
+        return True
+    ln = n.lower()
+    for sub in _EXECUTION_JOB_SUBSTRINGS:
+        try:
+            if sub and sub in ln:
+                return True
+        except Exception:
+            continue
+    return False
+
+def _execution_gate_snapshot():
+    """
+    Single place to decide if LIVE execution is allowed.
+    - must be system_state LIVE
+    - must NOT be kill-switch enabled
+    - must be execution_mode armed (if available)
+    """
+    try:
+        from engine.runtime.system_state import compute_system_state
+    except Exception:
+        return {"ok": False, "error": "system_state_module_missing"}
+
+    try:
+        health = get_health_snapshot()
+    except Exception:
+        health = {}
+
+    try:
+        jobs = JOBS.list_jobs()
+    except Exception:
+        jobs = []
+
+    try:
+        kill_switches = api_get_kill_switches(None) or {}
+    except Exception:
+        kill_switches = {}
+
+    st = compute_system_state(health=health, jobs=jobs, kill_switches=kill_switches) or {}
+    state = str(st.get("state") or "")
+    if state != "LIVE":
+        return {
+            "ok": False,
+            "error": "execution_blocked_not_live",
+            "system_state": st,
+        }
+
+    # require explicit arming if execution_mode module is present
+    try:
+        em = _exec_mode_get() or {}
+        armed = bool(em.get("armed")) if isinstance(em, dict) else False
+        if not armed:
+            return {
+                "ok": False,
+                "error": "execution_blocked_not_armed",
+                "execution_mode": em,
+                "system_state": st,
+            }
+    except Exception:
+        # If exec_mode is unavailable, fail-closed by default (safer)
+        if os.environ.get("EXECUTION_GATE_FAIL_OPEN_IF_NO_EXEC_MODE", "0") != "1":
+            return {
+                "ok": False,
+                "error": "execution_blocked_exec_mode_unavailable",
+                "system_state": st,
+            }
+
+    return {"ok": True, "system_state": st}
+
+def api_post_job_start(parsed, body):
+    name = _job_name_from(parsed, body)
+    if not name:
+        return {"ok": False, "error": "missing_name"}
+
+    if name not in ALLOWED_JOBS:
+        return {"ok": False, "error": f"job_not_allowed:{name}"}
+
+    # HARD-GATE: refuse starting execution jobs unless LIVE+ARMED
+    if _is_execution_job(name):
+        gate = _execution_gate_snapshot()
+        if not gate.get("ok"):
+            res = {
+                "ok": False,
+                "error": str(gate.get("error") or "execution_blocked"),
+                "job": name,
+                "gate": gate,
+            }
+            try:
+                write_job_history(job_name=name, event="start_blocked", detail=res)
+            except Exception:
+                pass
+            return res
+
+    try:
+        res = JOBS.start(name)
+    except Exception as e:
+        res = {"ok": False, "error": str(e)}
+
+    try:
+        write_job_history(job_name=name, event="start", detail=res)
+    except Exception:
+        pass
+
+    return res
+
+def api_post_job_stop(parsed, body):
+    d = _deny_if_shutdown()
+    if d:
+        return d
+    name = _job_name_from(parsed, body)
+    if not name:
+        return {"ok": False, "error": "missing_name"}
+
+    if name not in ALLOWED_JOBS:
+        return {"ok": False, "error": f"job_not_allowed:{name}"}
+
+    try:
+        res = JOBS.stop(name)
+    except Exception as e:
+        res = {"ok": False, "error": str(e)}
+
+    try:
+        write_job_history(job_name=name, event="stop", detail=res)
+    except Exception:
+        pass
+
+    return res
+
+def api_post_pipeline_run(parsed, body):
+    """
+    Runs pipeline in-order, with orchestrator-level locking.
+    Optional:
+      - ?include_execution=1 (or body {"include_execution": true})
+    """
+    qs = _qs(parsed)
+    inc = qs.get("include_execution", "")
+    if not inc and isinstance(body, dict):
+        inc = body.get("include_execution", "")
+
+    include_execution = str(inc).strip() in ("1", "true", "True", "yes", "YES")
+
+    # HARD-GATE: refuse pipeline execution leg unless LIVE+ARMED
+    if include_execution:
+        gate = _execution_gate_snapshot()
+        if not gate.get("ok"):
+            res = {
+                "ok": False,
+                "error": str(gate.get("error") or "execution_blocked"),
+                "gate": gate,
+            }
+            try:
+                write_job_history(job_name="pipeline", event="run_blocked", detail=res)
+            except Exception:
+                pass
+            return res
+
+    try:
+        res = ORCHESTRATOR.run_pipeline(include_execution=include_execution)
+    except Exception as e:
+        res = {"ok": False, "error": str(e)}
+
+    try:
+        write_job_history(job_name="pipeline", event="run", detail=res)
+    except Exception:
+        pass
+
+    return res
+
 API_HANDLERS = {
     # GET
     "api_get_kill_switches": api_get_kill_switches,
@@ -2304,11 +2501,11 @@ API_HANDLERS = {
     "api_get_alerts": api_get_alerts,
     "api_get_validation": api_get_validation,
     "api_get_model_diagnostics": api_get_model_diagnostics,
-    "api_get_model_registry": api_get_model_registry,
-    "api_get_embed_model_eval": api_get_embed_model_eval,
-    "api_get_embed_conf_calib": api_get_embed_conf_calib,
-    "api_get_temporal_eval": api_get_temporal_eval,
-    "api_get_temporal_models": api_get_temporal_models,
+    "api_get_model_registry": _wrap_get_model_registry,
+    "api_get_embed_model_eval": _wrap_get_embed_model_eval,
+    "api_get_embed_conf_calib": _wrap_get_embed_conf_calib,
+    "api_get_temporal_eval": _wrap_get_temporal_eval,
+    "api_get_temporal_models": _wrap_get_temporal_models,
     "api_get_latest_portfolio_backtest": api_get_latest_portfolio_backtest,
     "api_get_execution_metrics": api_get_execution_metrics,
     "api_get_execution_metrics_rolling": api_get_execution_metrics_rolling,
@@ -2318,7 +2515,11 @@ API_HANDLERS = {
     "api_get_social_regimes": api_get_social_regimes,
     "api_get_social_blocks": api_get_social_blocks,
     "api_get_confidence_mass": api_get_confidence_mass,
-    "api_get_schema_audit": api_get_schema_audit,
+        ("GET",  "/api/schema/audit", "api_get_schema_audit"),
+
+        # shadow capital allocation scoring (governance)
+        ("GET",  "/api/shadow/capital_scores", "api_get_shadow_capital_scores"),
+        ("POST", "/api/shadow/capital_scores/run", "api_post_shadow_capital_run"),
 
     # POST
     "api_post_job_start": api_post_job_start,
@@ -2340,7 +2541,8 @@ def run_server():
     try:
         _init_db()
     except Exception as e:
-        print(f"[fatal] database init failed: {e}", file=sys.stderr)
+        log.critical("database init failed: %s", e)
+
         raise
 
     # Ensure coordination + persistence tables exist before any jobs
@@ -2364,14 +2566,27 @@ def run_server():
         _ensure_equity_drift()
     except Exception:
         pass
+    # ---------------------------------------------------
+    # Start lifecycle monitor (global state machine)
+    # ---------------------------------------------------
+    try:
+        start_lifecycle_monitor(
+            get_health=lambda: get_health_snapshot(),
+            get_jobs=lambda: JOBS.list_jobs(),
+            get_kill_switches=lambda: api_get_kill_switches(None),
+            interval_s=2.0,
+        )
+    except Exception:
+        pass
 
     # Optional: auto-rollback watcher (ONLY ONE LOOP)
     try:
         t = threading.Thread(
-    target=auto_rollback_loop,
-    args=(rollback_champion, write_job_history),
-    daemon=True,
-)
+            target=auto_rollback_loop,
+            args=(rollback_champion, write_job_history),
+            daemon=True,
+        )
+
         t.start()
     except Exception:
         pass
@@ -2382,13 +2597,16 @@ def run_server():
     try:
         p = run_preflight()
         if not p.get("ok"):
-            print("[preflight] FAILED at startup:")
+            log.error("preflight FAILED at startup")
+
             for note in p.get("notes", []):
-                print("  -", note)
+                log.error("preflight note: %s", note)
+
         else:
-            print("[preflight] OK")
+            log.info("preflight OK")
+
     except Exception as e:
-        print(f"[preflight] exception: {e}")
+        log.exception("preflight exception")
 
     # Temporal predictor tables (shadow-only)
     def _ensure_temporal_eval_boot():
@@ -2456,39 +2674,71 @@ def run_server():
         _ensure_temporal_models()
     except Exception:
         pass
-        print(f"Dashboard running at http://{host}:{port}/ui/dashboard.html")
+
+    log.info("dashboard running at http://%s:%s/ui/dashboard.html", host, port)
 
     # ---------------------------------------------------
     # Deterministic Supervisor Boot (optional)
+    # - HARD-GATE execution jobs at boot unless LIVE+ARMED
     # ---------------------------------------------------
     if AUTO_BOOT_DAEMONS and AUTO_BOOT_TARGETS:
         try:
-            print("[supervisor] deterministic_start targets:", AUTO_BOOT_TARGETS)
+            targets = list(AUTO_BOOT_TARGETS)
+
+            # Filter execution jobs unless gate passes
+            blocked = []
+            try:
+                gate = _execution_gate_snapshot()
+                if not gate.get("ok"):
+                    filt = []
+                    for tname in targets:
+                        if _is_execution_job(tname):
+                            blocked.append(tname)
+                        else:
+                            filt.append(tname)
+                    targets = filt
+            except Exception:
+                pass
+
+            if blocked:
+                log.warning("auto-boot blocked execution targets: %s", blocked)
+
+            log.info("supervisor deterministic_start targets: %s", targets)
             boot_res = SUPERVISOR.deterministic_start(
-                AUTO_BOOT_TARGETS,
+                targets,
                 include_deps=True,
                 strict=False,
             )
-            print("[supervisor] boot result:", boot_res)
+            log.info("supervisor boot result: %s", boot_res)
         except Exception as e:
-            print("[supervisor] boot exception:", str(e))
+            log.exception("supervisor boot exception")
 
     if AUTO_PIPELINE:
-        print(f"[auto_pipeline] enabled interval_s={AUTO_PIPELINE_INTERVAL_S}")
+        log.info("auto_pipeline enabled interval_s=%s", AUTO_PIPELINE_INTERVAL_S)
         threading.Thread(target=ORCHESTRATOR.auto_pipeline_loop, daemon=True).start()
 
     if AUTO_CHALLENGER:
-        print(f"[auto_challenger] enabled interval_s={AUTO_CHALLENGER_INTERVAL_S} drift_gate={AUTO_CHALLENGER_MIN_DRIFT}")
+        log.info(
+            "auto_challenger enabled interval_s=%s drift_gate=%s",
+            AUTO_CHALLENGER_INTERVAL_S,
+            AUTO_CHALLENGER_MIN_DRIFT,
+        )
         threading.Thread(target=ORCHESTRATOR.auto_challenger_loop, daemon=True).start()
 
     if AUTO_SIZE_POLICY:
-        print(f"[auto_size_policy] enabled interval_s={AUTO_SIZE_POLICY_INTERVAL_S}")
+        log.info("auto_size_policy enabled interval_s=%s", AUTO_SIZE_POLICY_INTERVAL_S)
         threading.Thread(target=ORCHESTRATOR.auto_size_policy_loop, daemon=True).start()
 
     HandlerCls = build_handler(
         ROUTE_SPECS=ROUTE_SPECS,
         API_HANDLERS=API_HANDLERS,
         dashboard_api_token=DASHBOARD_API_TOKEN,
+        ctx={
+            "JOBS": JOBS,
+            "SUPERVISOR": SUPERVISOR,
+            "ORCHESTRATOR": ORCHESTRATOR,
+            "ALLOWED_JOBS": ALLOWED_JOBS,
+        },
     )
 
     _HTTPD = run_http_server(host, port, HandlerCls)
@@ -2497,6 +2747,11 @@ def run_server():
         import signal
 
         def _shutdown(_sig=None, _frame=None):
+            # mark shutdown FIRST so all mutating endpoints can fail-closed
+            try:
+                mark_shutdown()
+            except Exception:
+                pass
             try:
                 if _HTTPD:
                     _HTTPD.shutdown()
@@ -2513,10 +2768,13 @@ def run_server():
             pass
     except Exception:
         pass
-
     try:
         _HTTPD.serve_forever()
     finally:
+        try:
+            mark_shutdown()
+        except Exception:
+            pass
         try:
             JOBS.stop_all()
         except Exception:
@@ -2526,3 +2784,10 @@ def run_server():
                 _HTTPD.server_close()
         except Exception:
             pass
+
+if __name__ == "__main__":
+    try:
+        run_server()
+    except Exception:
+        log.exception("dashboard_server crashed")
+        raise

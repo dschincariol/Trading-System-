@@ -33,6 +33,18 @@ def compute_system_state(
 
     kill_switches = kill_switches or {}
 
+    # Explicit shutdown state (from lifecycle snapshot)
+    try:
+        lifecycle = (health or {}).get("lifecycle") or {}
+        if lifecycle.get("shutdown") is True:
+            out["state"] = STATE_SHUTDOWN
+            out["reasons"].append("lifecycle_shutdown")
+            out["ok"] = False
+            return out
+    except Exception:
+        pass
+
+
     # detect running daemons
     running_daemons = []
     running_oneshots = []
@@ -59,14 +71,18 @@ def compute_system_state(
     # kill switch / overlays (if provided)
     ks_enabled = False
     try:
-        # accept either kill_switch_snapshot structure or api_get_kill_switches structure
         if kill_switches.get("enabled") is True:
             ks_enabled = True
-        if kill_switches.get("kill_switches"):
-            # if any core switch is "disabled" -> treat as not-kill, just info
-            pass
+        elif kill_switches.get("state") == "KILL":
+            ks_enabled = True
+        elif isinstance(kill_switches.get("kill_switches"), dict):
+            for v in kill_switches["kill_switches"].values():
+                if isinstance(v, dict) and v.get("enabled") is True:
+                    ks_enabled = True
+                    break
     except Exception:
         pass
+
 
     if ks_enabled:
         out["state"] = STATE_KILL_SWITCH
@@ -93,9 +109,15 @@ def compute_system_state(
         out["ok"] = False
         return out
 
+    # LIVE/DEGRADED freshness threshold (env-controlled)
+    try:
+        max_age_s = float(__import__("os").environ.get("HEALTH_PRICES_MAX_AGE_S", "120"))
+    except Exception:
+        max_age_s = 120.0
+
     # LIVE: at least one price daemon running and prices are fresh
     has_price_daemon = ("poll_prices" in running_daemons) or ("stream_prices_polygon_ws" in running_daemons)
-    if has_price_daemon and prices_age_s <= 120.0:
+    if has_price_daemon and prices_age_s <= float(max_age_s):
         out["state"] = STATE_LIVE
         return out
 
@@ -103,7 +125,5 @@ def compute_system_state(
     out["state"] = STATE_DEGRADED
     if not has_price_daemon:
         out["reasons"].append("no_price_daemon_running")
-    if prices_age_s > 120.0:
+    if prices_age_s > float(max_age_s):
         out["reasons"].append(f"prices_stale_age_s={prices_age_s:.1f}")
-    out["ok"] = False
-    return out

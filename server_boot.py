@@ -190,6 +190,15 @@ def _qs(parsed):
 def _missing(name: str):
     return {"ok": False, "error": f"handler_unavailable:{name}"}
 
+def _deny_if_shutdown():
+    try:
+        s = lifecycle_snapshot() or {}
+        if str(s.get("state") or "").upper() == "SHUTDOWN":
+            return {"ok": False, "error": "server_shutting_down"}
+    except Exception:
+        pass
+    return None
+
 def _wrap_get_model_registry(parsed, _ctx):
     if not get_model_registry:
         return _missing("get_model_registry")

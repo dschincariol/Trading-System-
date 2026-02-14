@@ -14,13 +14,15 @@ from http.server import SimpleHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
 
-def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token):
+def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None):
 
     routes = {(m, p): h for (m, p, h) in ROUTE_SPECS}
 
     class Handler(SimpleHTTPRequestHandler):
 
         ROUTES = routes
+        CTX = ctx or {}
+
 
         def _normalize_ui_legacy_path(self):
             try:
@@ -125,10 +127,28 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token):
                     return self.respond_json(auth, 403)
 
             try:
+                # Flexible call signatures:
+                # GET:
+                #   fn(parsed)
+                #   fn(parsed, ctx)
+                #
+                # POST:
+                #   fn(parsed, body)
+                #   fn(parsed, body, ctx)
+
                 if method == "GET":
-                    return self.respond_json(fn(parsed))
+                    try:
+                        return self.respond_json(fn(parsed, self.CTX))
+                    except TypeError:
+                        return self.respond_json(fn(parsed))
+
                 body = self._read_json_body() or {}
-                return self.respond_json(fn(parsed, body))
+
+                try:
+                    return self.respond_json(fn(parsed, body, self.CTX))
+                except TypeError:
+                    return self.respond_json(fn(parsed, body))
+
             except Exception as e:
                 return self.respond_json({"ok": False, "error": str(e)}, 500)
 

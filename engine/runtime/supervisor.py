@@ -1,23 +1,26 @@
 """
 Unified Runtime Supervisor
 
-Preserves (old behavior):
-- subprocess spawning
+Preserves:
+- register_job()
+- start()
+- stop()
+- restart()
+- stop_all()
+- status()
+- heartbeat()
 - daemon auto-restart
 - restart_count tracking
 - exit code tracking
-- heartbeat tracking
 - monitor loop
-- register_job()
-- restart()
 
-Adds (new behavior):
-- Deterministic startup
-- Dependency graph
-- ALLOWED_JOBS integration
-- Strict orchestration mode
+Adds:
+- deterministic_start()
+- dependency graph (PIPELINE_ORDER)
+- strict mode
+- optional JobManager delegation
 
-No behavior change unless deterministic_start() is explicitly called.
+Safe to replace old file.
 """
 
 from __future__ import annotations
@@ -25,15 +28,14 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
-import os
 from typing import Any, Dict, List, Optional, Set
 
 from engine.runtime.job_registry import ALLOWED_JOBS, JOB_ORDER, PIPELINE_ORDER
 
 
-# ------------------------------------------------------------
-# Internal Specs / State
-# ------------------------------------------------------------
+# ============================================================
+# Internal State Objects
+# ============================================================
 
 class JobSpec:
     def __init__(self, name: str, script: str, daemon: bool = False):
@@ -52,9 +54,9 @@ class JobState:
         self.restart_count: int = 0
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Dependency Helper
-# ------------------------------------------------------------
+# ============================================================
 
 def _default_deps_from_pipeline(pipeline: List[str]) -> Dict[str, List[str]]:
     deps: Dict[str, List[str]] = {}
@@ -68,14 +70,17 @@ def _default_deps_from_pipeline(pipeline: List[str]) -> Dict[str, List[str]]:
     return deps
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Runtime Supervisor
-# ------------------------------------------------------------
+# ============================================================
 
 class RuntimeSupervisor:
-    def __init__(self):
+    def __init__(self, jobs=None):
         self._jobs: Dict[str, JobState] = {}
         self._lock = threading.Lock()
+
+        # Optional delegation layer
+        self._delegate = jobs
 
         self._deps = _default_deps_from_pipeline(list(PIPELINE_ORDER or []))
 
@@ -85,9 +90,9 @@ class RuntimeSupervisor:
         )
         self._monitor_thread.start()
 
-    # --------------------------------------------------------
+    # ========================================================
     # Registration
-    # --------------------------------------------------------
+    # ========================================================
 
     def register_job(self, name: str, script: str, daemon: bool = False):
         with self._lock:
@@ -96,9 +101,9 @@ class RuntimeSupervisor:
             spec = JobSpec(name=name, script=script, daemon=daemon)
             self._jobs[name] = JobState(spec)
 
-    # --------------------------------------------------------
+    # ========================================================
     # Introspection
-    # --------------------------------------------------------
+    # ========================================================
 
     def allowed_jobs(self) -> Dict[str, Any]:
         return dict(ALLOWED_JOBS)
@@ -130,9 +135,9 @@ class RuntimeSupervisor:
                 }
         return out
 
-    # --------------------------------------------------------
+    # ========================================================
     # Control
-    # --------------------------------------------------------
+    # ========================================================
 
     def start(self, name: str) -> Dict[str, Any]:
         with self._lock:
@@ -174,18 +179,18 @@ class RuntimeSupervisor:
                 self.stop(name)
         return {"ok": True}
 
-    # --------------------------------------------------------
+    # ========================================================
     # Heartbeat
-    # --------------------------------------------------------
+    # ========================================================
 
     def heartbeat(self, name: str):
         with self._lock:
             state = self._require(name)
             state.last_heartbeat_ts = time.time()
 
-    # --------------------------------------------------------
+    # ========================================================
     # Deterministic Startup
-    # --------------------------------------------------------
+    # ========================================================
 
     def deterministic_start(
         self,
@@ -195,15 +200,18 @@ class RuntimeSupervisor:
         strict: bool = True,
     ) -> Dict[str, Any]:
 
-        targets = [str(x) for x in (targets or []) if str(x)]
+        targets = [str(x).strip() for x in (targets or []) if str(x).strip()]
 
         if include_deps:
-            resolved = self._topo_expand(targets, strict=strict)
+            try:
+                resolved = self._topo_expand(targets, strict=strict)
+            except Exception as e:
+                return {"ok": False, "order": [], "started": [], "errors": [str(e)]}
         else:
             resolved = targets
 
-        started: List[str] = []
-        errors: List[str] = []
+        started = []
+        errors = []
         ok = True
 
         for name in resolved:
@@ -211,9 +219,7 @@ class RuntimeSupervisor:
                 if strict:
                     ok = False
                     errors.append(f"not_registered:{name}")
-                    continue
-                else:
-                    continue
+                continue
 
             r = self.start(name)
             if not r.get("ok"):
@@ -222,12 +228,7 @@ class RuntimeSupervisor:
             else:
                 started.append(name)
 
-        return {
-            "ok": ok,
-            "order": resolved,
-            "started": started,
-            "errors": errors,
-        }
+        return {"ok": ok, "order": resolved, "started": started, "errors": errors}
 
     def _topo_expand(self, targets: List[str], strict: bool = True) -> List[str]:
         order_index = {name: i for i, name in enumerate(list(JOB_ORDER or []))}
@@ -253,25 +254,13 @@ class RuntimeSupervisor:
             out.append(n)
 
         for t in targets:
-            if t not in self._jobs:
-                if strict:
-                    raise RuntimeError(f"not_registered:{t}")
-                continue
             visit(t, set())
 
-        out_sorted = sorted(out, key=lambda n: order_index.get(n, 10**9))
+        return sorted(out, key=lambda n: order_index.get(n, 10**9))
 
-        pos = {n: i for i, n in enumerate(out_sorted)}
-        for n in out_sorted:
-            for d in (self._deps.get(n) or []):
-                if d in pos and pos[d] > pos[n]:
-                    return out
-
-        return out_sorted
-
-    # --------------------------------------------------------
-    # Monitor Loop (daemon auto-restart preserved)
-    # --------------------------------------------------------
+    # ========================================================
+    # Monitor Loop
+    # ========================================================
 
     def _monitor_loop(self):
         while True:
@@ -296,9 +285,9 @@ class RuntimeSupervisor:
                             )
                             state.last_start_ts = time.time()
 
-    # --------------------------------------------------------
+    # ========================================================
     # Internal
-    # --------------------------------------------------------
+    # ========================================================
 
     def _require(self, name: str) -> JobState:
         if name not in self._jobs:

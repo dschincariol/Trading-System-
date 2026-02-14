@@ -12,7 +12,6 @@ from execution_metrics import (
 )
 
 from pipeline_runner import (
-    run_pipeline,
     LAST_AUTO_PIPELINE_TS,
     LAST_AUTO_CHALLENGER_TS,
     LAST_AUTO_SIZE_POLICY_TS,
@@ -97,24 +96,30 @@ def api_get_health(_parsed, _ctx):
 
 
 def api_get_kill_switches(_parsed, _ctx):
+    # NOTE: This endpoint name is used by dashboard system_state.
+    # Provide a stable shape and include scheduler status under "meta".
     return {
         "ok": True,
-        "kill_switches": {
-            "auto_pipeline": {
-                "enabled": bool(AUTO_PIPELINE),
-                "reason": None if AUTO_PIPELINE else "AUTO_PIPELINE=0",
-                "last_run": LAST_AUTO_PIPELINE_TS,
-            },
-            "auto_challenger": {
-                "enabled": bool(AUTO_CHALLENGER),
-                "reason": None if AUTO_CHALLENGER else "AUTO_CHALLENGER=0",
-                "last_run": LAST_AUTO_CHALLENGER_TS,
-            },
-            "auto_size_policy": {
-                "enabled": bool(AUTO_SIZE_POLICY),
-                "reason": None if AUTO_SIZE_POLICY else "AUTO_SIZE_POLICY=0",
-                "last_run": LAST_AUTO_SIZE_POLICY_TS,
-            },
+        "enabled": False,  # kill-switch NOT engaged by this module
+        "kill_switches": {},
+        "meta": {
+            "schedulers": {
+                "auto_pipeline": {
+                    "enabled": bool(AUTO_PIPELINE),
+                    "reason": None if AUTO_PIPELINE else "AUTO_PIPELINE=0",
+                    "last_run": LAST_AUTO_PIPELINE_TS,
+                },
+                "auto_challenger": {
+                    "enabled": bool(AUTO_CHALLENGER),
+                    "reason": None if AUTO_CHALLENGER else "AUTO_CHALLENGER=0",
+                    "last_run": LAST_AUTO_CHALLENGER_TS,
+                },
+                "auto_size_policy": {
+                    "enabled": bool(AUTO_SIZE_POLICY),
+                    "reason": None if AUTO_SIZE_POLICY else "AUTO_SIZE_POLICY=0",
+                    "last_run": LAST_AUTO_SIZE_POLICY_TS,
+                },
+            }
         },
     }
 
@@ -129,41 +134,76 @@ def api_get_jobs(_parsed, _ctx):
 
 
 def api_post_job_start(_parsed, body, _ctx):
-    JOBS = _ctx["JOBS"]
-    name = body.get("name")
+    JOBS = _ctx.get("JOBS")
+    if JOBS is None:
+        return {"ok": False, "error": "missing_ctx:JOBS"}
+
+    name = ""
+    if isinstance(body, dict):
+        name = str(body.get("name") or "").strip()
+    if not name:
+        return {"ok": False, "error": "missing_name"}
+
+    allowed = _ctx.get("ALLOWED_JOBS") or {}
+    if allowed and name not in allowed:
+        return {"ok": False, "error": f"job_not_allowed:{name}"}
+
     return JOBS.start(name)
 
 
 def api_post_job_stop(_parsed, body, _ctx):
-    JOBS = _ctx["JOBS"]
-    name = body.get("name")
+    JOBS = _ctx.get("JOBS")
+    if JOBS is None:
+        return {"ok": False, "error": "missing_ctx:JOBS"}
+
+    name = ""
+    if isinstance(body, dict):
+        name = str(body.get("name") or "").strip()
+    if not name:
+        return {"ok": False, "error": "missing_name"}
+
+    allowed = _ctx.get("ALLOWED_JOBS") or {}
+    if allowed and name not in allowed:
+        return {"ok": False, "error": f"job_not_allowed:{name}"}
+
     return JOBS.stop(name)
 
 
 def api_post_pipeline_run(_parsed, _body, _ctx):
-    JOBS = _ctx["JOBS"]
-    return ORCHESTRATOR.run_pipeline()
+    orchestrator = _ctx.get("ORCHESTRATOR")
+    if orchestrator is None:
+        return {"ok": False, "error": "missing_ctx:ORCHESTRATOR"}
+    return orchestrator.run_pipeline()
 
 
 def api_get_job_log(parsed, _ctx):
-    q = parsed.query
-    params = dict(
-        p.split("=", 1) for p in q.split("&") if "=" in p
-    ) if q else {}
-    name = params.get("name")
-    tail = int(params.get("tail", "200"))
+    try:
+        from urllib.parse import parse_qs
+        q = getattr(parsed, "query", "") or ""
+        qs = parse_qs(q)
+        name = (qs.get("name", [""])[0] or "").strip()
+        tail = int((qs.get("tail", ["200"])[0] or "200"))
+    except Exception:
+        name = ""
+        tail = 200
+
+    tail = max(1, min(5000, int(tail)))
     return {"ok": True, "log": get_job_log(name, tail)}
 
 
 def api_get_job_history(parsed, _ctx):
-    q = parsed.query
-    params = dict(
-        p.split("=", 1) for p in q.split("&") if "=" in p
-    ) if q else {}
-    name = params.get("name")
-    limit = int(params.get("limit", "200"))
-    return {"ok": True, "rows": get_job_history(name, limit)}
+    try:
+        from urllib.parse import parse_qs
+        q = getattr(parsed, "query", "") or ""
+        qs = parse_qs(q)
+        name = (qs.get("name", [""])[0] or "").strip()
+        limit = int((qs.get("limit", ["200"])[0] or "200"))
+    except Exception:
+        name = ""
+        limit = 200
 
+    limit = max(1, min(5000, int(limit)))
+    return {"ok": True, "rows": get_job_history(name, limit)}
 
 # -------------------------------------------------
 # Alerts

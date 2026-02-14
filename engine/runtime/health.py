@@ -67,6 +67,20 @@ def get_schema_audit():
             "portfolio_state": {"required": True, "cols": ["ts_ms"]},
             "broker_account": {"required": True, "cols": ["ts_ms"]},
             "job_locks": {"required": True, "cols": ["job_name", "owner", "heartbeat_ts_ms"]},
+
+            # shadow capital allocation scoring (optional but recommended)
+            "shadow_capital_scores": {
+                "required": False,
+                "cols": ["ts_ms", "window_s", "regime", "model_name", "score"],
+            },
+        }
+            "events": {"required": True, "cols": ["id", "ts_ms"]},
+            "labels": {"required": True, "cols": ["event_id", "label", "ts_ms"]},
+            "alerts": {"required": True, "cols": ["id", "ts_ms"]},
+            "job_history": {"required": True, "cols": ["id", "ts_ms"]},
+            "portfolio_state": {"required": True, "cols": ["ts_ms"]},
+            "broker_account": {"required": True, "cols": ["ts_ms"]},
+            "job_locks": {"required": True, "cols": ["job_name", "owner", "heartbeat_ts_ms"]},
         }
 
         for t, spec in SCHEMA_EXPECTATIONS.items():
@@ -111,9 +125,17 @@ def get_health_snapshot():
 
         if row and row[0]:
             age_s = (now_ms - int(row[0])) / 1000.0
-            out["prices"] = {"ok": age_s < HEALTH_PRICES_MAX_AGE_S, "age_s": round(age_s, 1)}
+            out["prices"] = {
+                "ok": age_s < HEALTH_PRICES_MAX_AGE_S,
+                "age_s": round(age_s, 1),
+                "max_age_s": HEALTH_PRICES_MAX_AGE_S,
+            }
         else:
-            out["prices"] = {"ok": False, "age_s": None}
+            out["prices"] = {
+                "ok": False,
+                "age_s": None,
+                "max_age_s": HEALTH_PRICES_MAX_AGE_S,
+            }
 
         # events freshness
         try:
@@ -171,7 +193,18 @@ def run_preflight() -> Dict:
         return out
 
     try:
+        # Structural schema validation
+        schema = get_schema_audit()
+        if not schema.get("ok"):
+            out["ok"] = False
+            out["tables_ok"] = False
+            if schema.get("missing_tables"):
+                out["notes"].append(f"missing_tables={schema.get('missing_tables')}")
+            if schema.get("missing_cols"):
+                out["notes"].append(f"missing_cols={schema.get('missing_cols')}")
+
         h = get_health_snapshot()
+
         prices_ok = bool(h.get("prices", {}).get("ok"))
         labels_ok = bool(h.get("labels", {}).get("ok"))
         model_ok = bool(h.get("model", {}).get("ok"))
@@ -190,6 +223,17 @@ def run_preflight() -> Dict:
     _PREFLIGHT_CACHE = out
     return out
 
+def preflight_cached(max_age_s: float = 30.0) -> Dict:
+    """
+    Returns cached preflight only if recent.
+    Prevents stale OK state after system degradation.
+    """
+    now = int(time.time() * 1000)
+    cache = dict(_PREFLIGHT_CACHE or {})
+    ts = int(cache.get("ts_ms") or 0)
+    age_s = (now - ts) / 1000.0 if ts else 1e9
 
-def preflight_cached() -> Dict:
-    return dict(_PREFLIGHT_CACHE or {})
+    if age_s > float(max_age_s):
+        return run_preflight()
+
+    return cache

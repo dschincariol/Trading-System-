@@ -80,9 +80,22 @@ class RuntimeOrchestrator:
     # PIPELINE
     # ---------------------------------------------------
 
-    def run_pipeline(self) -> Dict:
+    def run_pipeline(self, include_execution: bool | None = None) -> Dict:
+        """
+        Runs pipeline jobs in PIPELINE_ORDER.
+        include_execution:
+          - None  => uses AUTO_PIPELINE_INCLUDE_EXECUTION (default behavior)
+          - True  => include portfolio_rebalance + broker_apply_orders
+          - False => skip execution legs
+        """
         if not self._acquire_lock("pipeline", ttl_ms=20 * 60 * 1000):
             return {"ok": False, "error": "pipeline locked (already running?)"}
+
+        include_exec = (
+            bool(self.AUTO_PIPELINE_INCLUDE_EXECUTION)
+            if include_execution is None
+            else bool(include_execution)
+        )
 
         try:
             if not self._is_job_running("poll_prices"):
@@ -90,7 +103,7 @@ class RuntimeOrchestrator:
 
             for name in PIPELINE_ORDER:
 
-                if name in ("portfolio_rebalance", "broker_apply_orders") and not self.AUTO_PIPELINE_INCLUDE_EXECUTION:
+                if name in ("portfolio_rebalance", "broker_apply_orders") and not include_exec:
                     continue
 
                 job = self.JOBS.get(name)
@@ -220,10 +233,26 @@ class RuntimeOrchestrator:
                 if self.AUTO_SIZE_POLICY_LOG:
                     print("[auto_size_policy] running train_size_policy")
 
-                res = self.JOBS.start("train_size_policy")
+                if not self._acquire_lock("train_size_policy", ttl_ms=30 * 60 * 1000):
+                    if self.AUTO_SIZE_POLICY_LOG:
+                        print("[auto_size_policy] skip: train_size_policy locked (already running?)")
+                else:
+                    try:
+                        res = self.JOBS.start("train_size_policy")
+                        if self.AUTO_SIZE_POLICY_LOG:
+                            print("[auto_size_policy] result:", res)
 
-                if self.AUTO_SIZE_POLICY_LOG:
-                    print("[auto_size_policy] result:", res)
+                        # if it's a one-shot job, wait for completion so lock reflects actual run
+                        job = self.JOBS.get("train_size_policy")
+                        if job and getattr(job, "mode", "") != "daemon":
+                            while True:
+                                time.sleep(0.25)
+                                if not job.proc:
+                                    break
+                                if job.proc.poll() is not None:
+                                    break
+                    finally:
+                        self._release_lock("train_size_policy")
 
             except Exception as e:
                 if self.AUTO_SIZE_POLICY_LOG:

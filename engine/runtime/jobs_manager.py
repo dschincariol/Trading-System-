@@ -124,6 +124,9 @@ def _acquire_lock(name: str, ttl_ms: int = 10_000) -> bool:
             if cur_exp > now:
                 return False
 
+        owner = f"{os.getpid()}:{threading.get_ident()}"
+        pid = int(os.getpid())
+
         con.execute(
             """
             INSERT OR REPLACE INTO job_locks
@@ -132,6 +135,7 @@ def _acquire_lock(name: str, ttl_ms: int = 10_000) -> bool:
             """,
             (str(name), str(owner), int(pid), int(now), int(now), int(exp)),
         )
+
         con.commit()
         return True
     except Exception:
@@ -394,6 +398,8 @@ class JobManager:
         }
         self._lock = threading.Lock()
         self._preflight_fn = preflight_fn
+
+        _GLOBAL_JOB_MANAGER.set(self)
 
         self._watchdog_started = False
         self._start_watchdog_once()
