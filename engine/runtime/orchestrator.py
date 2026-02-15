@@ -16,9 +16,9 @@ Pure runtime orchestration.
 
 import time
 from typing import Dict, Optional, Callable
-
 from engine.runtime.job_registry import PIPELINE_ORDER
 from engine.dev_core.storage import connect as _db_connect
+from engine.runtime.gates import execution_gate_snapshot, is_execution_job
 
 class RuntimeOrchestrator:
     def __init__(
@@ -119,79 +119,36 @@ class RuntimeOrchestrator:
     # PIPELINE
     # ---------------------------------------------------
 
-    def run_pipeline(self, *, include_execution: bool = False) -> Dict:
+    def run_pipeline(self, include_execution: bool = False):
         """
-        Runs PIPELINE_ORDER in-order with orchestrator-level locking.
+        Runs jobs in PIPELINE_ORDER.
+        include_execution=False will skip execution jobs.
 
-        HARD RULE:
-          - Execution permission is enforced HERE (not dashboard).
-          - If include_execution=True, gate must pass (LIVE+ARMED etc).
+        HARD EXECUTION GATING (fail-closed):
+          - if include_execution=True and any execution job would run,
+            require execution_gate_snapshot().ok == True
         """
-        # -------------------------
-        # HARD EXECUTION GATE
-        # -------------------------
+        # Fail-closed gate: don't even attempt execution jobs unless LIVE+armed
         if include_execution:
-            gate = execution_gate_snapshot(
-                get_jobs=lambda: (self.JOBS.list_jobs() or []),
-                get_kill_switches=lambda: (self._get_kill_switches() or {}),
-                get_execution_mode=lambda: (self._get_execution_mode() or {}),
-            )
-            if not gate.get("ok"):
-                return {
-                    "ok": False,
-                    "error": str(gate.get("error") or "execution_blocked"),
-                    "gate": gate,
-                }
-
-        # -------------------------
-        # PIPELINE LOCK
-        # -------------------------
-        if not self._acquire_lock("pipeline", ttl_ms=30 * 60 * 1000):
-            return {"ok": False, "error": "pipeline locked (already running?)"}
-
-        started = []
-        skipped = []
-        try:
-            for name in list(PIPELINE_ORDER or []):
-                # Never run execution jobs unless include_execution=True
-                if is_execution_job(name) and not include_execution:
-                    skipped.append(name)
-                    continue
-
-                res = self.JOBS.start(name)
-                if not isinstance(res, dict) or not res.get("ok"):
-                    return {
-                        "ok": False,
-                        "error": f"job_failed_to_start:{name}",
-                        "detail": res,
-                        "started": started,
-                        "skipped": skipped,
-                    }
-
-                started.append(name)
-
-                # wait if one-shot; daemons return immediately
-                wait_res = self._wait_job_exit(name)
-                if not wait_res.get("ok"):
-                    return {
-                        "ok": False,
-                        "error": f"job_failed:{name}",
-                        "detail": wait_res,
-                        "started": started,
-                        "skipped": skipped,
-                    }
-
-            return {
-                "ok": True,
-                "started": started,
-                "skipped": skipped,
-                "include_execution": bool(include_execution),
-            }
-        finally:
             try:
-                self._release_lock("pipeline")
+                wants_exec = any(is_execution_job(n) for n in (PIPELINE_ORDER or []))
             except Exception:
-                pass
+                wants_exec = False
+
+            if wants_exec:
+                snap = execution_gate_snapshot()
+                if not snap.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": "execution_gate_blocked",
+                        "gate": snap,
+                        "results": [],
+                    }
+
+        results = []
+        for name in PIPELINE_ORDER:
+            if (not include_execution) and is_execution_job(name):
+                continue
 
     # ---------------------------------------------------
     # AUTO PIPELINE

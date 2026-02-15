@@ -129,6 +129,7 @@ def compute_system_state(
     has_price_daemon = ("poll_prices" in running_daemons) or ("stream_prices_polygon_ws" in running_daemons)
     if has_price_daemon and prices_age_s <= float(max_age_s):
         out["state"] = STATE_LIVE
+        out["ok"] = True
         return out
 
     # DEGRADED: health ok, but price daemon not running or prices stale

@@ -97,6 +97,21 @@ def get_relevance_stats():
 
 def _qs(parsed):
     try:
+        q = parse_qs(parsed.query or "")
+        return {k: v[0] for k, v in q.items()}
+    except Exception:
+        return {}
+
+
+def _deny_if_shutdown():
+    try:
+        snap = lifecycle_snapshot() or {}
+        if str(snap.get("state") or "").upper() == "SHUTDOWN":
+            return {"ok": False, "error": "server_shutting_down"}
+    except Exception:
+        pass
+    return None
+    try:
         q = getattr(parsed, "query", "") or ""
         d = parse_qs(q, keep_blank_values=True)
         return {k: (v[0] if isinstance(v, list) and v else "") for k, v in d.items()}

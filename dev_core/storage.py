@@ -131,7 +131,7 @@ def _new_connection(*, readonly: bool) -> sqlite3.Connection:
             if row and str(row[0]).lower() != "ok":
                 raise RuntimeError("SQLite integrity_check failed")
         except Exception:
-            raisea
+            raise
 
     return con
 

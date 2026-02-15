@@ -1,61 +1,79 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
-from fastapi.middleware.cors import CORSMiddleware
-import dashboard_server as legacy
-from urllib.parse import urlparse
+"""
+FastAPI shim layer.
+
+Purpose:
+- Retain FastAPI compatibility.
+- Delegate all logic to engine/api layer.
+- No business logic here.
+- No duplicate route definitions.
+"""
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+
+from engine.api.api_system import api_get_system_state
+from engine.api.api_handlers import (
+    api_get_jobs,
+    api_start_job,
+    api_stop_job,
+    api_get_job_log,
+    api_get_job_history,
+    api_get_health,
+    api_run_pipeline,
+    api_model_diagnostics,
+    api_confidence_mass,
+)
+
+from engine.api.server import JOBS, SUPERVISOR
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-def _call_legacy(method, path, query, body, request):
-    handler_name = legacy.Handler.ROUTES.get((method, path))
-    if not handler_name:
-        return 404, {"ok": False, "error": "unknown endpoint"}
+@app.get("/api/system/state")
+def get_system_state():
+    return api_get_system_state(JOBS)
 
-    fn = legacy.API_HANDLERS.get(handler_name)
-    if not fn:
-        return 500, {"ok": False, "error": "handler_missing"}
 
-    if method != "GET":
-        auth = legacy._require_mutation_auth(request)
-        if auth:
-            return 403, auth
+@app.get("/api/jobs")
+def get_jobs():
+    return api_get_jobs(JOBS)
 
-    parsed = urlparse(path + ("?" + query if query else ""))
-    try:
-        if method == "GET":
-            return 200, fn(parsed)
-        return 200, fn(parsed, body or {})
-    except Exception as e:
-        return 500, {"ok": False, "error": str(e)}
 
-@app.on_event("startup")
-def startup():
-    legacy.bootstrap_server()
+@app.post("/api/jobs/start")
+def start_job(name: str):
+    return api_start_job(JOBS, name)
 
-@app.get("/")
-def root():
-    return RedirectResponse(url="/ui/dashboard.html")
 
-def register_routes():
-    for method, path, _ in legacy.ROUTE_SPECS:
-        if method == "GET":
-            async def handler(request: Request, _path=path):
-                status, out = _call_legacy("GET", _path, request.url.query, None, request)
-                return JSONResponse(out, status_code=status)
-            app.add_api_route(path, handler, methods=["GET"])
-        else:
-            async def handler(request: Request, _path=path, _method=method):
-                body = await request.json()
-                status, out = _call_legacy(_method, _path, request.url.query, body, request)
-                return JSONResponse(out, status_code=status)
-            app.add_api_route(path, handler, methods=[method])
+@app.post("/api/jobs/stop")
+def stop_job(name: str):
+    return api_stop_job(JOBS, name)
 
-register_routes()
+
+@app.get("/api/jobs/log")
+def job_log(name: str, tail: int = 200):
+    return api_get_job_log(JOBS, name, tail)
+
+
+@app.get("/api/jobs/history")
+def job_history(name: str, limit: int = 100):
+    return api_get_job_history(JOBS, name, limit)
+
+
+@app.get("/api/health")
+def health():
+    return api_get_health(JOBS)
+
+
+@app.post("/api/pipeline/run")
+def run_pipeline():
+    return api_run_pipeline(SUPERVISOR)
+
+
+@app.get("/api/model/diagnostics")
+def diagnostics():
+    return api_model_diagnostics()
+
+
+@app.get("/api/confidence_mass")
+def confidence_mass():
+    return api_confidence_mass()

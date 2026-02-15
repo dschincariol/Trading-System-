@@ -52,22 +52,6 @@ PREFLIGHT_ENABLE = os.environ.get("PREFLIGHT_ENABLE", "1") == "1"
 PREFLIGHT_BLOCK_JOBS = os.environ.get("PREFLIGHT_BLOCK_JOBS", "1") == "1"
 PREFLIGHT_PRICES_MAX_AGE_S = float(os.environ.get("PREFLIGHT_PRICES_MAX_AGE_S", "300"))
 
-PREFLIGHT_REQUIRED_TABLES = [
-    "prices",
-    "events",
-    "labels",
-    "alerts",
-    "job_history",
-    "portfolio_state",
-    "portfolio_orders",
-    "portfolio_bt_runs",
-    "portfolio_bt_points",
-    "broker_account",
-    "broker_positions",
-    "broker_fills",
-    "broker_meta",
-    "job_locks",
-]
 
 # ------------------------------
 # Equity drift thresholds

@@ -506,11 +506,8 @@ class JobManager:
                         "job": str(name),
                     }
             else:
-                gate = execution_gate_snapshot(
-                    get_jobs=lambda: self.list_jobs(),
-                    get_kill_switches=lambda: (self._get_kill_switches_fn() or {}),
-                    get_execution_mode=lambda: (self._get_execution_mode_fn() or {}),
-                )
+                gate = execution_gate_snapshot()
+
                 if not gate.get("ok"):
                     return {
                         "ok": False,
@@ -716,6 +713,27 @@ class JobManager:
 
                 if not job.started_at_ms:
                     continue
+
+                # --------------------------------------------------
+                # HARD EXECUTION GATE: never auto-restart execution jobs
+                # unless the execution gate is explicitly OK.
+                # Fail-closed by default.
+                # --------------------------------------------------
+                if getattr(job, "meta", {}).get("execution") is True:
+                    gate = execution_gate_snapshot()
+                    if not gate.get("ok"):
+                        job.append_log(
+                            f"[server] auto-restart blocked (execution gated): {gate.get('reason') or gate}"
+                        )
+                        _write_job_history(
+                            job.name,
+                            "autorestart_blocked_execution_gated",
+                            str(gate),
+                            job.exit_code,
+                        )
+                        # stop further restart attempts until an operator manually starts
+                        job.stop_requested = True
+                        continue
 
                 if job.next_restart_ms and now < job.next_restart_ms:
                     continue

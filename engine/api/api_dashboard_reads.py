@@ -35,6 +35,21 @@ def _qs(parsed):
     except Exception:
         return {}
 
+
+def _deny_if_shutdown():
+    try:
+        snap = lifecycle_snapshot() or {}
+        if str(snap.get("state") or "").upper() == "SHUTDOWN":
+            return {"ok": False, "error": "server_shutting_down"}
+    except Exception:
+        pass
+    return None
+    try:
+        q = parse_qs(parsed.query or "")
+        return {k: v[0] for k, v in q.items()}
+    except Exception:
+        return {}
+
 # ------------------------------
 # Handlers (HTTP signatures)
 # build_handler calls:
