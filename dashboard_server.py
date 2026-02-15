@@ -76,6 +76,10 @@ from engine.runtime.job_registry import ALLOWED_JOBS, PIPELINE_ORDER, JOB_ORDER
 from engine.runtime.supervisor import RuntimeSupervisor
 from engine.runtime.jobs_manager import JobManager
 from engine.runtime.orchestrator import RuntimeOrchestrator
+from engine.runtime.health import run_preflight
+
+from engine.dev_core.kill_switch import snapshot as kill_switch_snapshot
+from engine.dev_core.execution_mode import get_execution_mode as get_execution_mode_snapshot
 from engine.runtime.health import (
     get_health_snapshot,
     run_preflight,

@@ -29,6 +29,27 @@ import time
 import json
 from typing import Any, Dict, List, Optional
 
+# Execution gate (fail-closed)
+try:
+    from engine.runtime.gates import execution_gate_snapshot as _execution_gate_snapshot  # type: ignore
+except Exception:
+    _execution_gate_snapshot = None  # type: ignore
+
+try:
+    from engine.runtime.job_registry import ALLOWED_JOBS as _ALLOWED_JOBS  # type: ignore
+except Exception:
+    _ALLOWED_JOBS = {}  # type: ignore
+
+try:
+    from engine.dev_core.kill_switch import snapshot as _kill_switch_snapshot  # type: ignore
+except Exception:
+    _kill_switch_snapshot = None  # type: ignore
+
+try:
+    from engine.dev_core.execution_mode import get_execution_mode as _get_execution_mode  # type: ignore
+except Exception:
+    _get_execution_mode = None  # type: ignore
+
 # Best-effort DB access for realized slippage distribution
 try:
     from engine.dev_core.storage import connect  # type: ignore
@@ -71,6 +92,84 @@ except Exception:
 # ============================================================
 # Helpers
 # ============================================================
+
+def _jobs_from_db_snapshot() -> List[Dict[str, Any]]:
+    """
+    Minimal job list for compute_system_state() when routing execution outside JobManager.
+    Uses job_locks.heartbeat_ts_ms to infer running-ness.
+    """
+    if connect is None:
+        return []
+
+    try:
+        max_stale_s = float(os.environ.get("HEALTH_JOBS_MAX_STALE_S", "180"))
+    except Exception:
+        max_stale_s = 180.0
+
+    now_ms = int(time.time() * 1000)
+
+    try:
+        con = connect(readonly=True)
+        try:
+            rows = con.execute(
+                "SELECT job_name, heartbeat_ts_ms FROM job_locks"
+            ).fetchall()
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+    except Exception:
+        rows = []
+
+    out: List[Dict[str, Any]] = []
+    for r in rows or []:
+        try:
+            name = str(r[0] or "")
+            hb = int(r[1] or 0)
+            running = (now_ms - hb) <= int(max_stale_s * 1000.0)
+
+            mode = ""
+            try:
+                spec = _ALLOWED_JOBS.get(name)
+                if isinstance(spec, (list, tuple)) and len(spec) >= 2:
+                    mode = str(spec[1] or "")
+            except Exception:
+                mode = ""
+
+            out.append({"name": name, "running": bool(running), "mode": mode})
+        except Exception:
+            continue
+
+    return out
+
+
+def _execution_gate_or_block(dry_run: bool) -> Optional[Dict[str, Any]]:
+    """
+    Returns None if allowed, else a structured block response.
+    Fail-closed if providers missing.
+    """
+    if bool(dry_run):
+        return None
+
+    if _execution_gate_snapshot is None:
+        return {"ok": False, "status": "execution_blocked_gate_unavailable"}
+
+    if _kill_switch_snapshot is None or _get_execution_mode is None:
+        return {"ok": False, "status": "execution_blocked_gate_providers_missing"}
+
+    gate = _execution_gate_snapshot(
+        get_jobs=_jobs_from_db_snapshot,
+        get_kill_switches=lambda: (_kill_switch_snapshot() or {}),
+        get_execution_mode=lambda: (_get_execution_mode() or {}),
+    )
+
+    if not bool(gate.get("ok")):
+        return {"ok": False, "status": "execution_blocked", "gate": gate}
+
+    return None
+
+
 def _load_recent_slippage_bps(symbol: str, broker: str, n: int = 80) -> List[float]:
     """
     Loads recent realized slippage_bps for (symbol, broker) from execution_analytics.
@@ -440,6 +539,10 @@ def apply_new_portfolio_orders_router(
     override_order_id: Optional[int] = None,
     override_ts_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
+
+    blocked = _execution_gate_or_block(dry_run=bool(dry_run))
+    if blocked is not None:
+        return blocked
 
     chain = _parse_failover_chain()
     if not chain:

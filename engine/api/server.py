@@ -25,6 +25,10 @@ from engine.api.http_transport import build_handler, run_http_server
 from engine.runtime.supervisor import RuntimeSupervisor
 from engine.runtime.jobs_manager import JobManager
 from engine.runtime.orchestrator import RuntimeOrchestrator
+from engine.runtime.health import run_preflight
+
+from engine.dev_core.kill_switch import snapshot as kill_switch_snapshot
+from engine.dev_core.execution_mode import get_execution_mode as get_execution_mode_snapshot
 from engine.runtime.locks import (
     acquire_lock,
     release_lock,
@@ -82,7 +86,11 @@ AUTO_BOOT_TARGETS = [
 # ---------------------------------------------------
 # RUNTIME WIRES
 # ---------------------------------------------------
-JOBS = JobManager()
+JOBS = JobManager(
+    preflight_fn=run_preflight,
+    get_kill_switches_fn=kill_switch_snapshot,
+    get_execution_mode_fn=get_execution_mode_snapshot,
+)
 
 SUPERVISOR = RuntimeSupervisor(jobs=JOBS)
 

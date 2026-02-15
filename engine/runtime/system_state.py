@@ -80,6 +80,16 @@ def compute_system_state(
                 if isinstance(v, dict) and v.get("enabled") is True:
                     ks_enabled = True
                     break
+        # Support DB snapshot format from engine.dev_core.kill_switch.snapshot():
+        #   {"state":[{"enabled":0/1, ...}, ...]}
+        elif isinstance(kill_switches.get("state"), list):
+            for r in (kill_switches.get("state") or []):
+                try:
+                    if isinstance(r, dict) and int(r.get("enabled") or 0) == 1:
+                        ks_enabled = True
+                        break
+                except Exception:
+                    continue
     except Exception:
         pass
 

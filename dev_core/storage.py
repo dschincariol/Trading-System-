@@ -127,9 +127,11 @@ def _new_connection(*, readonly: bool) -> sqlite3.Connection:
     # Optional deep check at startup (expensive; off by default)
     if _INTEGRITY_CHECK_ON_START and not readonly:
         try:
-            con.execute("PRAGMA integrity_check;").fetchone()
+            row = con.execute("PRAGMA integrity_check;").fetchone()
+            if row and str(row[0]).lower() != "ok":
+                raise RuntimeError("SQLite integrity_check failed")
         except Exception:
-            pass
+            raisea
 
     return con
 
@@ -1670,8 +1672,16 @@ def init_db():
         except Exception:
             pass
 
+        try:
+            _maybe_wal_checkpoint(con, force=True)
+        except Exception:
+            pass
+
     finally:
-        con.close()
+        try:
+            con.close()
+        except Exception:
+            pass
 
 def put_event(ts_ms, source, title, body, url, event_key, meta_json=None):
 
@@ -1704,11 +1714,19 @@ def put_event(ts_ms, source, title, body, url, event_key, meta_json=None):
         return int(row[0])
     finally:
         try:
+            con.commit()
+        except Exception:
+            pass
+        try:
             _note_write(con)
         except Exception:
             pass
         try:
             _maybe_wal_checkpoint(con, force=True)
+        except Exception:
+            pass
+        try:
+            con.close()
         except Exception:
             pass
 
@@ -1733,7 +1751,15 @@ def put_price(ts_ms, symbol, price):
         )
     finally:
         try:
+            con.commit()
+        except Exception:
+            pass
+        try:
             _note_write(con)
+        except Exception:
+            pass
+        try:
+            con.close()
         except Exception:
             pass
 
@@ -1743,7 +1769,14 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> b
     Best-effort single-instance lock.
     Returns True if lock acquired/renewed, False otherwise.
     """
+    import os
     import time
+
+    # Enforce supervisor-only job starts by default.
+    # Override ONLY when intentionally running a job manually:
+    #   ALLOW_STANDALONE_JOBS=1 python <job>.py
+    if os.environ.get("ENGINE_LAUNCHED_BY_SUPERVISOR", "0") != "1" and os.environ.get("ALLOW_STANDALONE_JOBS", "0") != "1":
+        return False
 
     now_ms = int(time.time() * 1000)
     stale_ms = int(ttl_s) * 1000
@@ -1810,17 +1843,19 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> b
 def release_job_lock(job_name: str, owner: str, pid: int) -> None:
     con = connect(readonly=False)
     try:
-
         con.execute(
             "DELETE FROM job_locks WHERE job_name=? AND owner=? AND pid=?",
             (str(job_name), str(owner), int(pid)),
         )
-    finally:
         try:
             con.commit()
         except Exception:
             pass
-        _note_write(con)
+        try:
+            _note_write(con)
+        except Exception:
+            pass
+    finally:
         try:
             con.close()
         except Exception:
@@ -1841,13 +1876,20 @@ def touch_job_lock(job_name: str, owner: str, pid: int) -> None:
             """,
             (now_ms, str(job_name), str(owner), int(pid)),
         )
+
     finally:
+        try:
+            con.commit()
+        except Exception:
+            pass
         try:
             _note_write(con)
         except Exception:
             pass
-        con.close()
-
+        try:
+            con.close()
+        except Exception:
+            pass
 
 def put_job_heartbeat(job_name: str, owner: str, pid: int, extra_json: str = None) -> None:
     import time
@@ -1868,12 +1910,16 @@ def put_job_heartbeat(job_name: str, owner: str, pid: int, extra_json: str = Non
             """,
             (str(job_name), str(owner), int(pid), now_ms, extra_json),
         )
+
     finally:
         try:
             con.commit()
         except Exception:
             pass
-        _note_write(con)
+        try:
+            _note_write(con)
+        except Exception:
+            pass
         try:
             con.close()
         except Exception:
@@ -1913,7 +1959,12 @@ def put_job_checkpoint(job_name: str, last_event_id: int, last_event_ts_ms: int)
             """,
             (str(job_name), int(last_event_id), int(last_event_ts_ms), int(now_ms)),
         )
+
     finally:
+        try:
+            con.commit()
+        except Exception:
+            pass
         try:
             _note_write(con)
         except Exception:

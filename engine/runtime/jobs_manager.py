@@ -563,9 +563,14 @@ class JobManager:
             job.last_start_args = list(args)
             job.last_start_cwd = os.getcwd()
 
+            env = dict(os.environ)
+            env["ENGINE_LAUNCHED_BY_SUPERVISOR"] = "1"
+            env["ENGINE_JOB_NAME"] = str(job.name)
+
             job.proc = subprocess.Popen(
                 args,
                 cwd=os.getcwd(),
+                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
