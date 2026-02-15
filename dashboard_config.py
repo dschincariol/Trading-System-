@@ -8,12 +8,14 @@ from engine.runtime.job_registry import ALLOWED_JOBS, PIPELINE_ORDER, JOB_ORDER
 # Restart + scheduler controls
 # ------------------------------
 
-AUTO_RESTART_DAEMONS = os.environ.get("AUTO_RESTART_DAEMONS", "1") == "1"
-DAEMON_RESTART_BASE_DELAY_MS = int(os.environ.get("DAEMON_RESTART_BASE_DELAY_MS", "2000"))
-DAEMON_RESTART_MAX_DELAY_MS = int(os.environ.get("DAEMON_RESTART_MAX_DELAY_MS", "30000"))
-DAEMON_RESTART_WINDOW_S = int(os.environ.get("DAEMON_RESTART_WINDOW_S", "120"))
-DAEMON_RESTART_MAX_IN_WINDOW = int(os.environ.get("DAEMON_RESTART_MAX_IN_WINDOW", "5"))
-DAEMON_WATCHDOG_PERIOD_S = float(os.environ.get("DAEMON_WATCHDOG_PERIOD_S", "1.0"))
+from engine.runtime.config import (
+    AUTO_RESTART_DAEMONS,
+    DAEMON_RESTART_BASE_DELAY_MS,
+    DAEMON_RESTART_MAX_DELAY_MS,
+    DAEMON_RESTART_WINDOW_S,
+    DAEMON_RESTART_MAX_IN_WINDOW,
+    DAEMON_WATCHDOG_PERIOD_S,
+)
 
 AUTO_SIZE_POLICY = os.environ.get("AUTO_SIZE_POLICY", "0") == "1"
 AUTO_SIZE_POLICY_INTERVAL_S = float(os.environ.get("AUTO_SIZE_POLICY_INTERVAL_S", "86400"))

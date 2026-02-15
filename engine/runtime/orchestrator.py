@@ -1,4 +1,3 @@
-# engine/runtime/orchestrator.py
 """
 Runtime Orchestrator
 
@@ -16,15 +15,12 @@ Pure runtime orchestration.
 """
 
 import time
-import threading
-from typing import Dict
+from typing import Dict, Optional, Callable
 
 from engine.runtime.job_registry import PIPELINE_ORDER
 from engine.dev_core.storage import connect as _db_connect
 
-
 class RuntimeOrchestrator:
-
     def __init__(
         self,
         jobs,
@@ -41,6 +37,9 @@ class RuntimeOrchestrator:
         auto_size_policy_log: bool,
         auto_size_policy_interval_s: float,
         auto_size_policy_start_delay_s: float,
+        # injected (keeps orchestrator API-free)
+        get_kill_switches: Optional[Callable[[], dict]] = None,
+        get_execution_mode: Optional[Callable[[], dict]] = None,
     ):
         self.JOBS = jobs
         self._acquire_lock = acquire_lock
@@ -60,6 +59,9 @@ class RuntimeOrchestrator:
         self.AUTO_SIZE_POLICY_INTERVAL_S = auto_size_policy_interval_s
         self.AUTO_SIZE_POLICY_START_DELAY_S = auto_size_policy_start_delay_s
 
+        self._get_kill_switches = get_kill_switches or (lambda: {})
+        self._get_execution_mode = get_execution_mode or (lambda: {})
+
     # ---------------------------------------------------
     # Helpers
     # ---------------------------------------------------
@@ -68,7 +70,7 @@ class RuntimeOrchestrator:
         j = self.JOBS.get(name)
         if not j:
             return False
-        p = j.proc
+        p = getattr(j, "proc", None)
         if not p:
             return False
         try:
@@ -76,62 +78,120 @@ class RuntimeOrchestrator:
         except Exception:
             return False
 
+    def _wait_job_exit(self, name: str, poll_s: float = 0.25) -> Dict:
+        """
+        Wait for a one-shot job to exit.
+        Daemons are not waited on.
+        """
+        job = self.JOBS.get(name)
+        if not job:
+            return {"ok": False, "error": f"job_missing:{name}"}
+
+        # best-effort: if job exposes mode, don't wait on daemon
+        try:
+            if str(getattr(job, "mode", "") or "").lower() == "daemon":
+                return {"ok": True, "daemon": True}
+        except Exception:
+            pass
+
+        while True:
+            time.sleep(poll_s)
+            job = self.JOBS.get(name)
+            if not job:
+                break
+            p = getattr(job, "proc", None)
+            if not p:
+                break
+            try:
+                rc = p.poll()
+            except Exception:
+                rc = None
+            if rc is not None:
+                try:
+                    exit_code = getattr(job, "exit_code", rc)
+                except Exception:
+                    exit_code = rc
+                if exit_code not in (0, None):
+                    return {"ok": False, "error": f"{name} exited rc={exit_code}"}
+                return {"ok": True, "rc": exit_code}
+
     # ---------------------------------------------------
     # PIPELINE
     # ---------------------------------------------------
 
-    def run_pipeline(self, include_execution: bool | None = None) -> Dict:
+    def run_pipeline(self, *, include_execution: bool = False) -> Dict:
         """
-        Runs pipeline jobs in PIPELINE_ORDER.
-        include_execution:
-          - None  => uses AUTO_PIPELINE_INCLUDE_EXECUTION (default behavior)
-          - True  => include portfolio_rebalance + broker_apply_orders
-          - False => skip execution legs
+        Runs PIPELINE_ORDER in-order with orchestrator-level locking.
+
+        HARD RULE:
+          - Execution permission is enforced HERE (not dashboard).
+          - If include_execution=True, gate must pass (LIVE+ARMED etc).
         """
-        if not self._acquire_lock("pipeline", ttl_ms=20 * 60 * 1000):
+        # -------------------------
+        # HARD EXECUTION GATE
+        # -------------------------
+        if include_execution:
+            gate = execution_gate_snapshot(
+                get_jobs=lambda: (self.JOBS.list_jobs() or []),
+                get_kill_switches=lambda: (self._get_kill_switches() or {}),
+                get_execution_mode=lambda: (self._get_execution_mode() or {}),
+            )
+            if not gate.get("ok"):
+                return {
+                    "ok": False,
+                    "error": str(gate.get("error") or "execution_blocked"),
+                    "gate": gate,
+                }
+
+        # -------------------------
+        # PIPELINE LOCK
+        # -------------------------
+        if not self._acquire_lock("pipeline", ttl_ms=30 * 60 * 1000):
             return {"ok": False, "error": "pipeline locked (already running?)"}
 
-        include_exec = (
-            bool(self.AUTO_PIPELINE_INCLUDE_EXECUTION)
-            if include_execution is None
-            else bool(include_execution)
-        )
-
+        started = []
+        skipped = []
         try:
-            if not self._is_job_running("poll_prices"):
-                return {"ok": False, "error": "poll_prices must be running before pipeline"}
-
-            for name in PIPELINE_ORDER:
-
-                if name in ("portfolio_rebalance", "broker_apply_orders") and not include_exec:
+            for name in list(PIPELINE_ORDER or []):
+                # Never run execution jobs unless include_execution=True
+                if is_execution_job(name) and not include_execution:
+                    skipped.append(name)
                     continue
-
-                job = self.JOBS.get(name)
-                if not job or job.mode == "daemon":
-                    continue
-
-                if name == "broker_apply_orders":
-                    pr = self.JOBS.get("portfolio_rebalance")
-                    if not pr or not pr.exited_at_ms:
-                        return {"ok": False, "error": "broker_apply_orders requires portfolio_rebalance first"}
 
                 res = self.JOBS.start(name)
-                if not res.get("ok"):
-                    return {"ok": False, "error": f"{name}: {res.get('error')}"}
+                if not isinstance(res, dict) or not res.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": f"job_failed_to_start:{name}",
+                        "detail": res,
+                        "started": started,
+                        "skipped": skipped,
+                    }
 
-                while True:
-                    time.sleep(0.2)
-                    if not job.proc:
-                        break
-                    if job.proc.poll() is not None:
-                        if job.exit_code not in (0, None):
-                            return {"ok": False, "error": f"{name} exited rc={job.exit_code}"}
-                        break
+                started.append(name)
 
-            return {"ok": True}
+                # wait if one-shot; daemons return immediately
+                wait_res = self._wait_job_exit(name)
+                if not wait_res.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": f"job_failed:{name}",
+                        "detail": wait_res,
+                        "started": started,
+                        "skipped": skipped,
+                    }
 
+            return {
+                "ok": True,
+                "started": started,
+                "skipped": skipped,
+                "include_execution": bool(include_execution),
+            }
         finally:
-            self._release_lock("pipeline")
+            try:
+                self._release_lock("pipeline")
+            except Exception:
+                pass
 
     # ---------------------------------------------------
     # AUTO PIPELINE
@@ -142,12 +202,13 @@ class RuntimeOrchestrator:
 
         while True:
             try:
+                # safety: keep prices flowing
                 if not self._is_job_running("poll_prices"):
                     res = self.JOBS.start("poll_prices")
                     if self.AUTO_PIPELINE_LOG:
                         print("[auto_pipeline] poll_prices start:", res)
 
-                res = self.run_pipeline()
+                res = self.run_pipeline(include_execution=bool(self.AUTO_PIPELINE_INCLUDE_EXECUTION))
                 if self.AUTO_PIPELINE_LOG:
                     print("[auto_pipeline] run_pipeline:", res)
 
@@ -178,23 +239,20 @@ class RuntimeOrchestrator:
 
         try:
             res = self.JOBS.start("train_and_eval_challenger")
-            if not res.get("ok"):
-                return res
+            if not isinstance(res, dict) or not res.get("ok"):
+                return res if isinstance(res, dict) else {"ok": False, "error": "start_failed"}
 
-            job = self.JOBS.get("train_and_eval_challenger")
-
-            while True:
-                time.sleep(0.25)
-                if not job or not job.proc:
-                    break
-                if job.proc.poll() is not None:
-                    if job.exit_code not in (0, None):
-                        return {"ok": False, "error": f"train_and_eval_challenger exited rc={job.exit_code}"}
-                    break
+            # wait if one-shot
+            wait_res = self._wait_job_exit("train_and_eval_challenger")
+            if not wait_res.get("ok"):
+                return wait_res
 
             return {"ok": True}
         finally:
-            self._release_lock("challenger")
+            try:
+                self._release_lock("challenger")
+            except Exception:
+                pass
 
     def auto_challenger_loop(self):
         time.sleep(max(0.0, float(self.AUTO_CHALLENGER_START_DELAY_S)))
@@ -242,17 +300,15 @@ class RuntimeOrchestrator:
                         if self.AUTO_SIZE_POLICY_LOG:
                             print("[auto_size_policy] result:", res)
 
-                        # if it's a one-shot job, wait for completion so lock reflects actual run
-                        job = self.JOBS.get("train_size_policy")
-                        if job and getattr(job, "mode", "") != "daemon":
-                            while True:
-                                time.sleep(0.25)
-                                if not job.proc:
-                                    break
-                                if job.proc.poll() is not None:
-                                    break
+                        wait_res = self._wait_job_exit("train_size_policy")
+                        if self.AUTO_SIZE_POLICY_LOG and not wait_res.get("ok"):
+                            print("[auto_size_policy] wait ERROR:", wait_res)
+
                     finally:
-                        self._release_lock("train_size_policy")
+                        try:
+                            self._release_lock("train_size_policy")
+                        except Exception:
+                            pass
 
             except Exception as e:
                 if self.AUTO_SIZE_POLICY_LOG:

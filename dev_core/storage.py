@@ -713,7 +713,6 @@ def _ensure_trade_attribution_ledger_schema(con):
         """
     )
 
-
 def _ensure_shadow_capital_schema(con):
     # Additive, idempotent: shadow capital scoring snapshots (model-level governance)
     con.executescript(
@@ -760,39 +759,6 @@ def _ensure_shadow_capital_schema(con):
 
         CREATE INDEX IF NOT EXISTS idx_shadow_capital_scores_regime_score
           ON shadow_capital_scores(regime, score);
-        """
-    )
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          ts_ms INTEGER NOT NULL,
-
-          source_alert_id INTEGER,
-          symbol TEXT NOT NULL,
-
-          signal_json TEXT,
-          model_json TEXT,
-          regime_vector_json TEXT,
-
-          execution_policy_json TEXT,
-          suppression_reason TEXT,
-
-          pnl REAL,
-          fees REAL,
-          slippage_bps REAL,
-
-          decision_json TEXT,
-          created_ts_ms INTEGER NOT NULL,
-
-          UNIQUE(ts_ms, source_alert_id, symbol, suppression_reason)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_trade_attr_ts
-          ON trade_attribution_ledger(ts_ms);
-
-        CREATE INDEX IF NOT EXISTS idx_trade_attr_alert
-          ON trade_attribution_ledger(source_alert_id);
-
-        CREATE INDEX IF NOT EXISTS idx_trade_attr_symbol_ts
-          ON trade_attribution_ledger(symbol, ts_ms);
         """
     )
 

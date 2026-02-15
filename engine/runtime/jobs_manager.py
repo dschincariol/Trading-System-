@@ -10,7 +10,7 @@ from typing import Deque, Dict, Optional
 from engine.dev_core.storage import connect as _db_connect
 from engine.runtime.job_registry import ALLOWED_JOBS, JOB_ORDER
 
-from dashboard_config import (
+from engine.runtime.config import (
     AUTO_RESTART_DAEMONS,
     DAEMON_RESTART_BASE_DELAY_MS,
     DAEMON_RESTART_MAX_DELAY_MS,
@@ -20,6 +20,8 @@ from dashboard_config import (
     PREFLIGHT_ENABLE,
     PREFLIGHT_BLOCK_JOBS,
 )
+
+from engine.runtime.gates import execution_gate_snapshot
 
 # ------------------------------
 # SQLITE-BASED JOB LOCKS (cross-process safe)
@@ -391,13 +393,48 @@ _GLOBAL_JOB_MANAGER = _GlobalJobManager()
 
 class JobManager:
 
-    def __init__(self, preflight_fn=None):
-        self._jobs: Dict[str, JobState] = {
-            name: JobState(name, script, mode)
-            for name, (script, mode) in ALLOWED_JOBS.items()
-        }
+    def __init__(
+        self,
+        preflight_fn=None,
+        get_kill_switches_fn=None,
+        get_execution_mode_fn=None,
+    ):
+        self._jobs: Dict[str, JobState] = {}
+
+        for name, value in ALLOWED_JOBS.items():
+            # Supported formats:
+            # (script, mode)
+            # (script, mode, group)
+            # (script, mode, group, meta)
+
+            script = None
+            mode = None
+            group = None
+            meta = {}
+
+            if isinstance(value, (list, tuple)):
+                if len(value) == 2:
+                    script, mode = value
+                elif len(value) == 3:
+                    script, mode, group = value
+                elif len(value) >= 4:
+                    script, mode, group, meta = value[0], value[1], value[2], value[3]
+                else:
+                    continue
+            else:
+                continue
+
+            js = JobState(name, script, mode, group)
+            js.meta = dict(meta or {})
+            self._jobs[name] = js
+
         self._lock = threading.Lock()
         self._preflight_fn = preflight_fn
+
+        # Execution gating providers (injected by runtime / dashboard)
+        # If not provided, execution jobs fail-closed by default (safer).
+        self._get_kill_switches_fn = get_kill_switches_fn
+        self._get_execution_mode_fn = get_execution_mode_fn
 
         _GLOBAL_JOB_MANAGER.set(self)
 
@@ -453,6 +490,34 @@ class JobManager:
             p = self._preflight_fn()
             if not p.get("ok"):
                 return {"ok": False, "error": "preflight_failed", "notes": p.get("notes", [])}
+
+        # --------------------------------------------------
+        # HARD EXECUTION GATE (cannot be bypassed anywhere)
+        # --------------------------------------------------
+        if getattr(job, "meta", {}).get("execution") is True:
+
+            fail_open = os.environ.get("EXECUTION_GATE_FAIL_OPEN_IF_NO_PROVIDERS", "0") == "1"
+
+            if not self._get_kill_switches_fn or not self._get_execution_mode_fn:
+                if not fail_open:
+                    return {
+                        "ok": False,
+                        "error": "execution_blocked_gate_providers_missing",
+                        "job": str(name),
+                    }
+            else:
+                gate = execution_gate_snapshot(
+                    get_jobs=lambda: self.list_jobs(),
+                    get_kill_switches=lambda: (self._get_kill_switches_fn() or {}),
+                    get_execution_mode=lambda: (self._get_execution_mode_fn() or {}),
+                )
+                if not gate.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(gate.get("error") or "execution_blocked"),
+                        "job": str(name),
+                        "gate": gate,
+                    }
 
         with job._lock:
             job.stop_requested = False

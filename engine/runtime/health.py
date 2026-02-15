@@ -9,8 +9,7 @@ Pure health + startup validation.
 
 import os
 import time
-import subprocess
-from typing import Dict, Tuple
+from typing import Dict
 
 from engine.dev_core.storage import connect as _db_connect
 from engine.dev_core.training_guard import (
@@ -18,7 +17,10 @@ from engine.dev_core.training_guard import (
     set_training_mode,
 )
 
-# Health thresholds (env driven)
+# ---------------------------------------------------
+# ENV THRESHOLDS
+# ---------------------------------------------------
+
 HEALTH_PRICES_MAX_AGE_S = float(os.environ.get("HEALTH_PRICES_MAX_AGE_S", "120"))
 HEALTH_EVENTS_MAX_AGE_S = float(os.environ.get("HEALTH_EVENTS_MAX_AGE_S", "600"))
 HEALTH_PREDICTIONS_MAX_AGE_S = float(os.environ.get("HEALTH_PREDICTIONS_MAX_AGE_S", "600"))
@@ -30,11 +32,17 @@ HEALTH_MIN_MODEL_SUPPORT = int(os.environ.get("HEALTH_MIN_MODEL_SUPPORT", "10"))
 PREFLIGHT_ENABLE = os.environ.get("PREFLIGHT_ENABLE", "1") == "1"
 PREFLIGHT_PRICES_MAX_AGE_S = float(os.environ.get("PREFLIGHT_PRICES_MAX_AGE_S", "300"))
 
-_PREFLIGHT_CACHE = {"ok": True, "notes": [], "tables_ok": True, "health_ok": True, "ts_ms": 0}
+_PREFLIGHT_CACHE = {
+    "ok": True,
+    "notes": [],
+    "tables_ok": True,
+    "health_ok": True,
+    "ts_ms": 0,
+}
 
 
 # ---------------------------------------------------
-# SCHEMA AUDIT
+# INTERNAL HELPERS
 # ---------------------------------------------------
 
 def _get_table_cols(con, table: str):
@@ -45,12 +53,18 @@ def _get_table_cols(con, table: str):
     return [r[1] for r in rows] if rows else []
 
 
+# ---------------------------------------------------
+# SCHEMA AUDIT
+# ---------------------------------------------------
+
 def get_schema_audit():
     ts_ms = int(time.time() * 1000)
     con = _db_connect()
     try:
         try:
-            rows = con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            rows = con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
             have = {r[0] for r in rows}
         except Exception:
             have = set()
@@ -66,21 +80,15 @@ def get_schema_audit():
             "job_history": {"required": True, "cols": ["id", "ts_ms"]},
             "portfolio_state": {"required": True, "cols": ["ts_ms"]},
             "broker_account": {"required": True, "cols": ["ts_ms"]},
-            "job_locks": {"required": True, "cols": ["job_name", "owner", "heartbeat_ts_ms"]},
-
-            # shadow capital allocation scoring (optional but recommended)
+            "job_locks": {
+                "required": True,
+                "cols": ["job_name", "owner", "heartbeat_ts_ms"],
+            },
+            # Optional shadow scoring table
             "shadow_capital_scores": {
                 "required": False,
                 "cols": ["ts_ms", "window_s", "regime", "model_name", "score"],
             },
-        }
-            "events": {"required": True, "cols": ["id", "ts_ms"]},
-            "labels": {"required": True, "cols": ["event_id", "label", "ts_ms"]},
-            "alerts": {"required": True, "cols": ["id", "ts_ms"]},
-            "job_history": {"required": True, "cols": ["id", "ts_ms"]},
-            "portfolio_state": {"required": True, "cols": ["ts_ms"]},
-            "broker_account": {"required": True, "cols": ["ts_ms"]},
-            "job_locks": {"required": True, "cols": ["job_name", "owner", "heartbeat_ts_ms"]},
         }
 
         for t, spec in SCHEMA_EXPECTATIONS.items():
@@ -95,6 +103,7 @@ def get_schema_audit():
                 missing_cols[t] = miss
 
         ok = (not missing_tables) and (not missing_cols)
+
         return {
             "ok": bool(ok),
             "ts_ms": ts_ms,
@@ -102,6 +111,7 @@ def get_schema_audit():
             "missing_cols": missing_cols,
             "have_tables": sorted(list(have)),
         }
+
     finally:
         con.close()
 
@@ -111,13 +121,14 @@ def get_schema_audit():
 # ---------------------------------------------------
 
 def get_health_snapshot():
-
     con = _db_connect()
     try:
         out = {}
         now_ms = int(time.time() * 1000)
 
-        # prices freshness
+        # ---------------------------
+        # Prices freshness
+        # ---------------------------
         try:
             row = con.execute("SELECT MAX(ts_ms) FROM prices").fetchone()
         except Exception:
@@ -137,7 +148,9 @@ def get_health_snapshot():
                 "max_age_s": HEALTH_PRICES_MAX_AGE_S,
             }
 
-        # events freshness
+        # ---------------------------
+        # Events freshness
+        # ---------------------------
         try:
             row = con.execute("SELECT MAX(ts_ms) FROM events").fetchone()
         except Exception:
@@ -145,27 +158,57 @@ def get_health_snapshot():
 
         if row and row[0]:
             age_s = (now_ms - int(row[0])) / 1000.0
-            out["events"] = {"ok": age_s < HEALTH_EVENTS_MAX_AGE_S, "age_s": round(age_s, 1)}
+            out["events"] = {
+                "ok": age_s < HEALTH_EVENTS_MAX_AGE_S,
+                "age_s": round(age_s, 1),
+                "max_age_s": HEALTH_EVENTS_MAX_AGE_S,
+            }
         else:
-            out["events"] = {"ok": False, "age_s": None}
+            out["events"] = {
+                "ok": False,
+                "age_s": None,
+                "max_age_s": HEALTH_EVENTS_MAX_AGE_S,
+            }
 
-        # labels count
+        # ---------------------------
+        # Labels coverage
+        # ---------------------------
         try:
             row = con.execute("SELECT COUNT(*) FROM labels").fetchone()
             label_n = int(row[0] or 0)
-            out["labels"] = {"ok": label_n >= HEALTH_MIN_LABELS, "count": label_n}
+            out["labels"] = {
+                "ok": label_n >= HEALTH_MIN_LABELS,
+                "count": label_n,
+                "min_required": HEALTH_MIN_LABELS,
+            }
         except Exception:
-            out["labels"] = {"ok": False, "count": 0}
+            out["labels"] = {
+                "ok": False,
+                "count": 0,
+                "min_required": HEALTH_MIN_LABELS,
+            }
 
-        # model support
+        # ---------------------------
+        # Model support
+        # ---------------------------
         try:
             row = con.execute("SELECT SUM(n) FROM model_stats_regime").fetchone()
             model_n = int(row[0] or 0)
-            out["model"] = {"ok": model_n >= HEALTH_MIN_MODEL_SUPPORT, "support_n": model_n}
+            out["model"] = {
+                "ok": model_n >= HEALTH_MIN_MODEL_SUPPORT,
+                "support_n": model_n,
+                "min_required": HEALTH_MIN_MODEL_SUPPORT,
+            }
         except Exception:
-            out["model"] = {"ok": False, "support_n": 0}
+            out["model"] = {
+                "ok": False,
+                "support_n": 0,
+                "min_required": HEALTH_MIN_MODEL_SUPPORT,
+            }
 
-        # training guard visibility
+        # ---------------------------
+        # Training guard
+        # ---------------------------
         try:
             out["training"] = get_training_status()
         except Exception:
@@ -185,7 +228,13 @@ def run_preflight() -> Dict:
     global _PREFLIGHT_CACHE
 
     ts_ms = int(time.time() * 1000)
-    out = {"ok": True, "notes": [], "tables_ok": True, "health_ok": True, "ts_ms": ts_ms}
+    out = {
+        "ok": True,
+        "notes": [],
+        "tables_ok": True,
+        "health_ok": True,
+        "ts_ms": ts_ms,
+    }
 
     if not PREFLIGHT_ENABLE:
         out["notes"].append("preflight disabled")
@@ -193,16 +242,27 @@ def run_preflight() -> Dict:
         return out
 
     try:
-        # Structural schema validation
+        # ---------------------------
+        # Schema validation
+        # ---------------------------
         schema = get_schema_audit()
         if not schema.get("ok"):
             out["ok"] = False
             out["tables_ok"] = False
-            if schema.get("missing_tables"):
-                out["notes"].append(f"missing_tables={schema.get('missing_tables')}")
-            if schema.get("missing_cols"):
-                out["notes"].append(f"missing_cols={schema.get('missing_cols')}")
 
+            if schema.get("missing_tables"):
+                out["notes"].append(
+                    f"missing_tables={schema.get('missing_tables')}"
+                )
+
+            if schema.get("missing_cols"):
+                out["notes"].append(
+                    f"missing_cols={schema.get('missing_cols')}"
+                )
+
+        # ---------------------------
+        # Health validation
+        # ---------------------------
         h = get_health_snapshot()
 
         prices_ok = bool(h.get("prices", {}).get("ok"))
@@ -215,6 +275,7 @@ def run_preflight() -> Dict:
         if age_s > PREFLIGHT_PRICES_MAX_AGE_S:
             out["ok"] = False
             out["notes"].append(f"prices too stale: {age_s:.1f}s")
+
     except Exception as e:
         out["ok"] = False
         out["health_ok"] = False
@@ -222,6 +283,7 @@ def run_preflight() -> Dict:
 
     _PREFLIGHT_CACHE = out
     return out
+
 
 def preflight_cached(max_age_s: float = 30.0) -> Dict:
     """
