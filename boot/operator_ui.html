@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Trading Engine Operator</title>
+  <style>
+    :root{
+      --bg:#eef1f6;
+      --card:#ffffff;
+      --text:#0f172a;
+      --muted:#64748b;
+      --primary:#2563eb;
+      --primary2:#1d4ed8;
+      --danger:#dc2626;
+      --warn:#f59e0b;
+      --ok:#16a34a;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      --shadow: 0 10px 24px rgba(2,6,23,.10);
+      --radius: 14px;
+    }
+    body{
+      margin:0; padding:32px;
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+    }
+    .topbar{
+      display:flex; align-items:flex-end; justify-content:space-between;
+      gap:16px; flex-wrap:wrap;
+    }
+    h1{ margin:0; font-size:22px; letter-spacing:.2px;}
+    .sub{ color:var(--muted); font-size:13px; margin-top:4px;}
+    .grid{
+      display:grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap:18px;
+      margin-top:18px;
+    }
+    @media(max-width:1050px){
+      .grid{ grid-template-columns:1fr; }
+    }
+    .card{
+      background:var(--card);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:18px;
+    }
+    .row{ display:flex; gap:10px; flex-wrap:wrap; }
+    button{
+      border:0;
+      border-radius: 10px;
+      padding:10px 14px;
+      font-weight:600;
+      cursor:pointer;
+      background:var(--primary);
+      color:white;
+    }
+    button:hover{ background:var(--primary2); }
+    button.secondary{ background:#64748b; }
+    button.secondary:hover{ background:#475569; }
+    button.danger{ background:var(--danger); }
+    button.danger:hover{ filter:brightness(.95); }
+    button.ghost{
+      background:transparent; color:var(--primary);
+      border:1px solid rgba(37,99,235,.25);
+    }
+    button.ghost:hover{ background:rgba(37,99,235,.08); }
+    .pill{
+      display:inline-flex; align-items:center; gap:8px;
+      padding:7px 10px;
+      border-radius:999px;
+      background:#f1f5f9;
+      color:var(--muted);
+      font-size:12px;
+      font-weight:700;
+    }
+    .dot{ width:10px; height:10px; border-radius:999px; background:#94a3b8; }
+    .dot.ok{ background:var(--ok); }
+    .dot.warn{ background:var(--warn); }
+    .dot.fail{ background:var(--danger); }
+    textarea{
+      width:100%;
+      height:220px;
+      border-radius:12px;
+      border:1px solid rgba(2,6,23,.12);
+      padding:12px;
+      font-family: var(--mono);
+      font-size:12px;
+      box-sizing:border-box;
+      background:#fbfdff;
+    }
+    pre{
+      background:#0b1220;
+      color:#e5e7eb;
+      padding:12px;
+      border-radius:12px;
+      overflow:auto;
+      font-family: var(--mono);
+      font-size:12px;
+      line-height:1.35;
+      max-height:340px;
+    }
+    .kvs{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+    }
+    @media(max-width:650px){ .kvs{ grid-template-columns:1fr; } }
+    input{
+      width:100%;
+      border-radius:12px;
+      border:1px solid rgba(2,6,23,.12);
+      padding:10px 12px;
+      box-sizing:border-box;
+      font-size:13px;
+      background:#fbfdff;
+    }
+    .titleRow{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+    .muted{ color:var(--muted); font-size:12px; }
+    .issues{ margin-top:10px; }
+    .issue{
+      border-radius:12px;
+      padding:10px 12px;
+      margin-top:8px;
+      border:1px solid rgba(2,6,23,.12);
+      background:#ffffff;
+      display:flex; gap:10px; align-items:flex-start;
+    }
+    .badge{
+      font-size:11px;
+      font-weight:900;
+      padding:4px 8px;
+      border-radius:999px;
+      color:white;
+      line-height:1;
+      margin-top:1px;
+    }
+    .badge.err{ background:var(--danger); }
+    .badge.warn{ background:var(--warn); }
+    .badge.info{ background:#64748b; }
+    .issueText{ font-size:13px; }
+    .hr{ height:1px; background:rgba(2,6,23,.10); margin:14px 0; }
+  </style>
+</head>
+<body>
+
+  <div class="topbar">
+    <div>
+      <h1>Trading Engine Operator Panel</h1>
+      <div class="sub">Start/stop, configuration validation, readiness checks, AutoFix recovery, and logs.</div>
+    </div>
+    <div class="row">
+      <span class="pill" id="pillStatus"><span class="dot" id="dotStatus"></span><span id="txtStatus">Loading…</span></span>
+      <span class="pill"><span class="dot" id="dotHealth"></span><span id="txtHealth">Health: unknown</span></span>
+    </div>
+  </div>
+
+  <div class="grid">
+
+    <div>
+      <div class="card">
+        <div class="titleRow">
+          <div>
+            <div style="font-weight:900; font-size:14px;">Controls</div>
+            <div class="muted" id="metaLine">—</div>
+          </div>
+          <div class="row">
+            <button onclick="start()">Start</button>
+            <button class="secondary" onclick="stop()">Stop</button>
+            <button onclick="restart()">Restart</button>
+            <button class="ghost" onclick="autoFix()">AutoFix</button>
+            <button class="ghost" onclick="clearLastError()">Clear Error</button>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div style="font-weight:900; font-size:14px;">Readiness</div>
+        <div class="muted">This is a consolidated preflight check similar to the example operator panel.</div>
+        <div class="issues" id="readinessIssues"></div>
+      </div>
+
+      <div class="card" style="margin-top:18px;">
+        <div class="titleRow">
+          <div>
+            <div style="font-weight:900; font-size:14px;">Configuration (.env)</div>
+            <div class="muted">Edits are validated and normalized (typed ports/booleans).</div>
+          </div>
+          <div class="row">
+            <button class="ghost" onclick="validateConfig()">Validate</button>
+            <button onclick="saveConfig()">Save</button>
+            <button class="danger" onclick="factoryReset()">Factory Reset</button>
+          </div>
+        </div>
+        <textarea id="configArea" spellcheck="false"></textarea>
+        <div class="muted" id="configMsg" style="margin-top:10px;"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="titleRow">
+          <div>
+            <div style="font-weight:900; font-size:14px;">Bootstrap & State</div>
+            <div class="muted">Diagnostics + persistent error state.</div>
+          </div>
+          <button class="ghost" onclick="refreshAll()">Refresh</button>
+        </div>
+        <pre id="bootstrap">Loading…</pre>
+      </div>
+
+      <div class="card" style="margin-top:18px;">
+        <div class="titleRow">
+          <div>
+            <div style="font-weight:900; font-size:14px;">Runtime Logs (tail)</div>
+            <div class="muted">Last 200 lines of runtime.log</div>
+          </div>
+          <button class="ghost" onclick="loadLogs()">Reload</button>
+        </div>
+        <pre id="logs">Loading…</pre>
+      </div>
+
+      <div class="card" style="margin-top:18px;">
+        <div class="titleRow">
+          <div>
+            <div style="font-weight:900; font-size:14px;">Secrets</div>
+            <div class="muted">Stored encrypted at rest. Keys only shown.</div>
+          </div>
+          <button class="ghost" onclick="loadSecrets()">Reload</button>
+        </div>
+
+        <div class="kvs" style="margin-top:10px;">
+          <input id="secretKey" placeholder="Key (e.g. SMTP_PASS or POLYGON_API_KEY)"/>
+          <input id="secretValue" placeholder="Value" type="password"/>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <button onclick="saveSecret()">Save Secret</button>
+          <span class="muted" id="secretsMsg">—</span>
+        </div>
+        <div class="muted" style="margin-top:10px;">Stored keys: <span id="secretKeys">—</span></div>
+      </div>
+
+    </div>
+
+  </div>
+
+<script>
+async function jget(url){
+  const r = await fetch(url);
+  return await r.json();
+}
+async function jpost(url, body){
+  const r = await fetch(url, {
+    method:"POST",
+    headers: { "Content-Type":"application/json" },
+    body: body ? JSON.stringify(body) : "{}"
+  });
+  return await r.json();
+}
+
+function setPill(dotEl, textEl, state){
+  dotEl.className = "dot";
+  if(state === "ok") dotEl.classList.add("ok");
+  if(state === "warn") dotEl.classList.add("warn");
+  if(state === "fail") dotEl.classList.add("fail");
+}
+
+function renderIssues(container, issues){
+  container.innerHTML = "";
+  if(!issues || issues.length === 0){
+    const el = document.createElement("div");
+    el.className = "issue";
+    el.innerHTML = `<span class="badge info">OK</span><div class="issueText">No readiness issues detected.</div>`;
+    container.appendChild(el);
+    return;
+  }
+  for(const it of issues){
+    const el = document.createElement("div");
+    el.className = "issue";
+    const cls = it.level === "error" ? "err" : (it.level === "warn" ? "warn" : "info");
+    el.innerHTML = `<span class="badge ${cls}">${it.level.toUpperCase()}</span><div class="issueText">${it.code}: ${it.message}</div>`;
+    container.appendChild(el);
+  }
+}
+
+async function updateStatusAndReadiness(){
+  const st = await jget("/api/operator/status");
+  const rd = await jget("/api/operator/readiness");
+
+  document.getElementById("metaLine").innerText =
+    `Exit: ${st.lastExitCode ?? "N/A"} | Restarts: ${st.restartAttempts ?? 0} | Last Healthy: ${st.lastHealthyAt ?? "N/A"}`;
+
+  document.getElementById("txtStatus").innerText = `Engine: ${st.status}`;
+  const dotStatus = document.getElementById("dotStatus");
+  setPill(dotStatus, null, st.status === "RUNNING" ? "ok" : (st.status === "INSTALLING" ? "warn" : "fail"));
+
+  const dotHealth = document.getElementById("dotHealth");
+  const txtHealth = document.getElementById("txtHealth");
+
+  if(rd.health && rd.health.ok){
+    txtHealth.innerText = `Health: OK (${rd.health.status})`;
+    setPill(dotHealth, null, "ok");
+  } else if(st.status === "RUNNING"){
+    txtHealth.innerText = `Health: FAIL`;
+    setPill(dotHealth, null, "warn");
+  } else {
+    txtHealth.innerText = `Health: n/a`;
+    setPill(dotHealth, null, "fail");
+  }
+
+  renderIssues(document.getElementById("readinessIssues"), rd.issues || []);
+}
+
+async function loadBootstrap(){
+  const b = await jget("/api/operator/bootstrapStatus");
+  const s = await jget("/api/operator/status");
+  document.getElementById("bootstrap").innerText = JSON.stringify({ bootstrap:b, state:s }, null, 2);
+}
+
+async function loadConfig(){
+  const obj = await jget("/api/operator/config");
+  const text = Object.entries(obj).map(([k,v]) => `${k}=${v}`).join("\n");
+  document.getElementById("configArea").value = text;
+  document.getElementById("configMsg").innerText = "—";
+}
+
+async function validateConfig(){
+  const r = await jget("/api/operator/config/validate");
+  if(r.ok){
+    document.getElementById("configMsg").innerText = "Config OK (typed normalization available on Save).";
+  } else {
+    document.getElementById("configMsg").innerText = "Config has errors. Fix and Save again.";
+  }
+}
+
+async function saveConfig(){
+  const lines = document.getElementById("configArea").value.split("\n");
+  const obj = {};
+  for(const line of lines){
+    const trimmed = line.trim();
+    if(!trimmed || trimmed.startsWith("#")) continue;
+    const idx = trimmed.indexOf("=");
+    if(idx === -1) continue;
+    const k = trimmed.slice(0, idx).trim();
+    const v = trimmed.slice(idx + 1).trim();
+    if(k) obj[k] = v;
+  }
+  const r = await jpost("/api/operator/config", obj);
+  if(r.ok){
+    document.getElementById("configMsg").innerText = "Saved OK.";
+    await loadConfig();
+  } else {
+    document.getElementById("configMsg").innerText = "Save failed (validation errors). Check readiness list.";
+  }
+  await refreshAll();
+}
+
+async function loadLogs(){
+  const r = await fetch("/api/operator/logs");
+  const t = await r.text();
+  document.getElementById("logs").innerText = t || "(no logs yet)";
+}
+
+async function loadSecrets(){
+  const r = await jget("/api/operator/secrets");
+  document.getElementById("secretKeys").innerText = (r.keys || []).join(", ") || "—";
+}
+
+async function saveSecret(){
+  const key = document.getElementById("secretKey").value.trim();
+  const val = document.getElementById("secretValue").value;
+  if(!key || !val){
+    document.getElementById("secretsMsg").innerText = "Provide key + value.";
+    return;
+  }
+  const r = await jpost("/api/operator/secrets", { [key]: val });
+  document.getElementById("secretKey").value = "";
+  document.getElementById("secretValue").value = "";
+  document.getElementById("secretsMsg").innerText = r.ok ? "Saved." : "Failed.";
+  await loadSecrets();
+}
+
+async function start(){
+  await jpost("/api/operator/start");
+  await refreshAll();
+}
+
+async function stop(){
+  await jpost("/api/operator/stop");
+  await refreshAll();
+}
+
+async function restart(){
+  await jpost("/api/operator/restart");
+  await refreshAll();
+}
+
+async function autoFix(){
+  const r = await jpost("/api/operator/autofix");
+  if(r && r.ok){
+    alert("AutoFix: OK");
+  } else {
+    alert("AutoFix: FAILED");
+  }
+  await refreshAll();
+}
+
+async function clearLastError(){
+  await jpost("/api/operator/clearLastError");
+  await refreshAll();
+}
+
+async function factoryReset(){
+  if(!confirm("Factory reset deletes .env and secrets and clears operator state. Continue?")) return;
+  await jpost("/api/operator/factoryReset");
+  await refreshAll();
+  await loadConfig();
+  await loadSecrets();
+}
+
+async function refreshAll(){
+  await updateStatusAndReadiness();
+  await loadBootstrap();
+  await loadLogs();
+}
+
+setInterval(refreshAll, 3500);
+refreshAll();
+loadConfig();
+loadSecrets();
+</script>
+
+</body>
+</html>
