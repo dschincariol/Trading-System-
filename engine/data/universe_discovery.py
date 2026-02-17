@@ -33,9 +33,8 @@ import os
 import time
 from typing import Any, Dict, List, Tuple, Optional
 
-from engine.dev_core.storage import connect, init_db
-from engine.dev_core.regime import get_current_regime
-
+from engine.runtime.storage import connect, init_db
+from engine.strategy.model_v2 import get_current_regime
 
 def _now_ms() -> int:
     return int(time.time() * 1000)

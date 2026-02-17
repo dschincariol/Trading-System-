@@ -151,7 +151,7 @@ def load_strategy_module(name: str):
     """
     n = (name or "baseline").strip().lower()
     if n == "conservative":
-        from engine.dev_core.strategies import conservative as mod
+        from engine.strategy.models import conservative as mod
         return mod
-    from engine.dev_core.strategies import baseline as mod
+    from engine.strategy.models import baseline as mod
     return mod

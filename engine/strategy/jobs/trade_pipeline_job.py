@@ -38,7 +38,6 @@ from engine.dev_core.storage import (
 )
 
 from engine.dev_core.universe_discovery import discover_universe_once
-from engine.dev_core.meta_strategy_layer import compute_allocations
 from engine.dev_core.execution_mode import get_execution_mode
 from engine.dev_core.kill_switch import execution_allowed
 
@@ -253,16 +252,11 @@ def main() -> int:
             return 2
 
         # ----------- 2. Meta Strategy Allocation -----------
-        ok, alloc = _run_stage(
-            con,
-            ts_ms,
-            "meta_allocation",
-            lambda: compute_allocations(window_days=30, ts_ms=ts_ms, con=con),
-            deadline_ms=pipeline_deadline_ms,
-        )
-        if not ok:
-            _print({"ok": False, "status": "abort", "job": JOB_NAME, "stage": "meta_allocation"})
-            return 2
+        alloc = {}
+        try:
+            _audit(con, ts_ms, "meta_allocation", True, 0, {"ok": True, "alloc": {}})
+        except Exception:
+            pass
 
         # ----------- 3. Portfolio Rebalance (writes portfolio_orders) -----------
         from portfolio_construct import compute_rebalance

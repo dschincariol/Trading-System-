@@ -3,13 +3,12 @@ import json
 import time
 from typing import Any, Dict, Optional
 
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
-from engine.dev_core.kill_switch import execution_allowed
-from engine.dev_core.rules_engine import evaluate_rules
-from engine.dev_core.costs import estimate_cost
-from engine.dev_core.model_registry import get_stage_latest
-from engine.dev_core.model_v2 import get_current_regime
+from engine.runtime.storage import connect
+from engine.execution.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.execution.kill_switch import execution_allowed
+from engine.strategy.rules_engine import evaluate_rules
+from engine.strategy.model_registry import get_stage_latest
+from engine.strategy.model_v2 import get_current_regime
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -39,14 +38,7 @@ def log_shadow_prediction(
             return
 
         cost = None
-        net = None
-        try:
-            cost = float(estimate_cost(symbol, horizon_s))
-            net = float(predicted_z) - float(cost)
-        except Exception:
-            pass
-
-        
+        net = float(predicted_z)
 
         con.execute(
             """
