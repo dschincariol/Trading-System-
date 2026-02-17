@@ -823,9 +823,43 @@ tbody tr:hover td{
 <header>
   <h1>Market Impact System</h1>
 
-  <div style="display:flex; gap:8px; align-items:center;">
+  <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+
     <div id="healthBadge" class="pill ok">OK</div>
 
+    <!-- Structured Readiness -->
+    <div id="readinessBadge" class="pill dim">READINESS —</div>
+
+    <!-- Execution Mode -->
+    <div id="execModeBadge" class="pill dim">MODE —</div>
+
+    <!-- Hard Execution Barrier -->
+    <div>
+      <span id="execBarrierPill" class="pill dim">execution: —</span>
+    </div>
+    <pre id="execBarrierRaw" class="small mono" style="margin-top:4px; max-height:120px; overflow:auto;"></pre>
+
+    <!-- Training Mode -->
+    <div id="trainingModeBadge" class="pill dim">TRAIN —</div>
+
+    <!-- Telemetry -->
+    <div id="cpuBadge" class="pill dim">CPU —</div>
+    <div id="memBadge" class="pill dim">RAM —</div>
+    <div id="dbBadge" class="pill dim">DB —</div>
+
+    <!-- Market Stress -->
+    <div
+      id="marketStressHeader"
+      class="pill dim"
+      title="Unified market stress"
+    >
+      Stress: —
+    </div>
+
+  </div>
+</header>
+
+  <div style="display:flex; gap:8px; align-items:center;">
     <!-- Market Stress badge (read-only) -->
     <div
       id="marketStressHeader"
@@ -857,6 +891,10 @@ tbody tr:hover td{
     <span id="tCalmar">Calmar —</span>
     <span id="tStress">Stress —</span>
     <span id="tPromotion">Promo —</span>
+    <span id="tCpu">CPU —</span>
+    <span id="tRam">RAM —</span>
+    <span id="tDb">DB —</span>
+
   </div>
 
   <div class="row">

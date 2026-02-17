@@ -26,6 +26,19 @@ import sys
 import threading
 import time
 
+try:
+    import psutil
+except Exception:
+    psutil = None
+
+from engine.runtime.config_schema import load_runtime_config, ConfigError
+
+try:
+    CFG = load_runtime_config()
+except ConfigError as e:
+    print(f"[FATAL] config invalid: {e}")
+    raise
+
 from engine.runtime.logging import get_logger
 log = get_logger("dashboard")
 
@@ -282,6 +295,24 @@ SERVER_SHUTDOWN_TOKEN = os.environ.get("SERVER_SHUTDOWN_TOKEN", "").strip()
 DASHBOARD_API_TOKEN = os.environ.get("DASHBOARD_API_TOKEN", "").strip()
 
 SERVER_STARTED_AT_MS = int(time.time() * 1000)
+CRASH_LOG_PATH = os.environ.get("CRASH_LOG_PATH", os.path.join(_BASE_DIR, "logs", "crash_analytics.jsonl"))
+
+def _write_crash_analytics(exit_code):
+    try:
+        os.makedirs(os.path.dirname(CRASH_LOG_PATH), exist_ok=True)
+    except Exception:
+        pass
+
+    try:
+        payload = {
+            "ts_ms": int(time.time() * 1000),
+            "exit_code": int(exit_code),
+            "uptime_s": int((int(time.time() * 1000) - SERVER_STARTED_AT_MS) / 1000),
+        }
+        with open(CRASH_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
 
 
 # HTTP bind
@@ -299,14 +330,42 @@ AUTO_BOOT_TARGETS = [
 
 _HTTPD = None  # set in run_server()
 
+# ---------------------------------------------------
+# UI CONSOLE LIFECYCLE ENDPOINTS
+# ---------------------------------------------------
+
+def api_get_server_status(_parsed, _ctx=None):
+    now_ms = int(time.time() * 1000)
+    uptime_s = int((now_ms - SERVER_STARTED_AT_MS) / 1000)
+    return {
+        "ok": True,
+        "ts_ms": now_ms,
+        "uptime_s": uptime_s,
+        "host": host,
+        "port": port,
+    }
+
+
+def api_post_server_shutdown(_parsed, _body=None, _ctx=None):
+    # mark shutdown FIRST so mutating endpoints fail-closed (if your guards consult lifecycle)
+    try:
+        mark_shutdown()
+    except Exception:
+        pass
+
+    # stop HTTP loop
+    try:
+        if _HTTPD:
+            _HTTPD.shutdown()
+    except Exception:
+        pass
+
+    return {"ok": True}
+
 #------------            -- ------------------------------------------------------
 # DIAGNOSTICS / METRICS
 
 # -------------            -- ------------------------------------------------------
-
-def api_get_health(_parsed):
-    return get_health_snapshot()
-
 def _normalize_explain_json(val) -> str:
     """
     Ensure explain_json is always a JSON string.
@@ -385,13 +444,6 @@ def api_get_job_history(parsed):
 # ------------------------------
 # JOBS + PIPELINE (MISSING IN FILE)
 # ------------------------------
-from engine.api.api_jobs_handlers import (
-    api_get_jobs,
-    api_post_job_start,
-    api_post_job_stop,
-    api_post_pipeline_run,
-)
-
 from engine.api.api_ops_handlers import (
     api_get_alerts,
     api_get_validation,
@@ -416,6 +468,8 @@ from engine.api.api_ops_handlers import (
 from engine.api.api_system_handlers import (
     api_get_health,
     api_get_system_state,
+    api_get_readiness,
+    api_get_telemetry,
 )
 
 API_HANDLERS = {
@@ -423,6 +477,12 @@ API_HANDLERS = {
     "api_get_kill_switches": api_get_kill_switches,
     "api_get_health": api_get_health,
     "api_get_system_state": api_get_system_state,
+    "api_get_readiness": api_get_readiness,
+    "api_get_telemetry": api_get_telemetry,
+
+    # UI console lifecycle
+    "api_get_server_status": api_get_server_status,
+    "api_post_server_shutdown": api_post_server_shutdown,
 
     # JOBS
     "api_get_jobs": api_get_jobs,
@@ -606,9 +666,22 @@ def run_server():
         except Exception:
             pass
 
+def stop_server():
+    global _HTTPD
+    try:
+        mark_shutdown()
+    except Exception:
+        pass
+    try:
+        if _HTTPD:
+            _HTTPD.shutdown()
+    except Exception:
+        pass
+
 if __name__ == "__main__":
     try:
         run_server()
     except Exception:
+        _write_crash_analytics(exit_code=1)
         log.exception("dashboard_server crashed")
         raise

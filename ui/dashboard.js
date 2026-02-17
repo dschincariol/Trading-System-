@@ -2205,6 +2205,27 @@ async function loadJobHistory() {
   }
 }
 
+async function loadCrashAnalytics() {
+  const el = document.getElementById("jobHistory");
+  if (!el) return;
+
+  try {
+    const j = await fetchJSON("/api/crash_analytics?limit=50");
+    if (!j || !j.ok || !Array.isArray(j.rows)) return;
+
+    const lines = [];
+    lines.push("=== Crash Analytics ===");
+    for (const r of j.rows) {
+      lines.push(
+        `${fmtTime(r.ts_ms)} | ${r.job_name} | rc=${r.exit_code} | ${r.reason || ""}`
+      );
+    }
+
+    el.textContent += "\n\n" + lines.join("\n");
+
+  } catch (_) {}
+}
+
 async function loadConfidenceTrends() {
   const panel = document.getElementById("confidenceTrendPanel");
   const el = document.getElementById("confidenceTrends");
@@ -2383,7 +2404,7 @@ async function loadSystemState() {
   if (!el) return;
 
   try {
-    const state = await fetchJSON("/api/system_state");
+    const state = await fetchJSON("/api/system/state");
 
     let killSwitches = null;
     try {
@@ -2409,6 +2430,88 @@ if (typeof renderKillSwitchPills === "function") {
   }
 }
 
+async function loadSupervisorStatus() {
+  const pill = document.getElementById("supervisorPill");
+  const raw  = document.getElementById("supervisorRaw");
+  if (!pill || !raw) return;
+
+  try {
+    const j = await fetchJSON("/api/supervisor/status");
+    if (!j || !j.ok) throw new Error((j && j.error) || "supervisor unavailable");
+
+    pill.className = "pill " + (j.enabled ? "ok" : "dim");
+    pill.textContent = j.enabled ? "supervisor: ON" : "supervisor: OFF";
+    raw.textContent = JSON.stringify(j, null, 2);
+  } catch (e) {
+    pill.className = "pill bad";
+    pill.textContent = "supervisor: error";
+    raw.textContent = e.message || String(e);
+  }
+}
+
+// -----------------------------
+// Structured Readiness + Telemetry
+// -----------------------------
+async function loadStructuredReadiness() {
+  const el = document.getElementById("systemStateText");
+  if (!el) return;
+
+  try {
+    const state = await fetchJSON("/api/system/state");
+    if (!state) return;
+
+    const lines = [];
+    lines.push(`state: ${state.state}`);
+    lines.push(`ok: ${state.ok}`);
+    lines.push(`ts_ms: ${state.ts_ms}`);
+    lines.push("");
+
+    if (Array.isArray(state.reasons) && state.reasons.length) {
+      lines.push("reasons:");
+      for (const r of state.reasons) {
+        lines.push(`  - ${r}`);
+      }
+      lines.push("");
+    }
+
+    if (state.jobs) {
+      lines.push("running_daemons:");
+      for (const j of (state.jobs.running_daemons || [])) {
+        lines.push(`  - ${j}`);
+      }
+
+      lines.push("running_oneshots:");
+      for (const j of (state.jobs.running_oneshots || [])) {
+        lines.push(`  - ${j}`);
+      }
+    }
+
+    el.textContent = lines.join("\n");
+
+  } catch (e) {
+    el.textContent = `[readiness error] ${e.message || e}`;
+  }
+}
+
+async function loadTelemetry() {
+  const strip = document.getElementById("telemetryStrip");
+  if (!strip) return;
+
+  try {
+    const t = await fetchJSON("/api/telemetry");
+    if (!t || !t.ok) return;
+
+    const cpu = document.getElementById("tCpu");
+    const ram = document.getElementById("tRam");
+    const db  = document.getElementById("tDb");
+
+  if (cpu) cpu.textContent = `CPU ${Number(t.cpu_percent || 0).toFixed(1)}%`;
+  if (ram) ram.textContent = `RAM ${Number(t.process_rss_mb || 0).toFixed(0)}MB`;
+  if (db)  db.textContent  = `DB ${Number(t.db_size_mb || 0).toFixed(1)}MB`;
+
+  } catch (_) {}
+}
+
 async function jobAction(name, action) {
   setSelectedJob(name);
   if (action === "start") {
@@ -2418,6 +2521,25 @@ async function jobAction(name, action) {
   }
   await refresh();
 applyReadOnlyBanner();
+}
+
+async function loadExecutionBarrier() {
+  const pill = document.getElementById("execBarrierPill");
+  const raw  = document.getElementById("execBarrierRaw");
+  if (!pill || !raw) return;
+
+  try {
+    const j = await fetchJSON("/api/execution/barrier");
+    if (!j || !j.ok) throw new Error((j && j.error) || "barrier unavailable");
+
+    pill.className = "pill " + (j.allowed ? "ok" : "bad");
+    pill.textContent = j.allowed ? "execution: ALLOWED" : "execution: BLOCKED";
+    raw.textContent = JSON.stringify(j, null, 2);
+  } catch (e) {
+    pill.className = "pill bad";
+    pill.textContent = "execution: error";
+    raw.textContent = e.message || String(e);
+  }
 }
 
 async function refresh() {
@@ -2473,11 +2595,15 @@ try {
 
 await Promise.allSettled([
   loadHealth(),
+  loadStructuredReadiness(),
+  loadTelemetry(),
   loadTemporalEval(),
   loadTemporalShadowEval(),
   loadSocialPressure(),
   loadSocialRegimes(),
+  loadExecutionBarrier(),
   loadSocialBlocks(),
+  loadSupervisorStatus(),
   loadPromotionAudit(),
   refreshCalibCurves(),
   loadModelRegistry(),
@@ -2496,7 +2622,6 @@ await Promise.allSettled([
   loadConfidenceTrends(),
   loadRelevanceStats(),
   loadExecutionByConfidence(),
-  loadSystemState(),
   loadPromotionStatus(),
 
   // portfolio layer

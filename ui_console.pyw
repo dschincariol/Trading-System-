@@ -1,10 +1,19 @@
-"""ui_console.pyw
+"""
+ui_console.pyw
 
 Double-click launcher for the local dashboard server (Windows).
 
 - Starts/stops dashboard_server.py without opening a command prompt.
 - Shows server stdout in a small GUI console.
 - Opens the browser to /ui/dashboard.html
+
+PATCHED FOR (additive, no feature removals):
+- Structured readiness display + deterministic boot progress
+- Colored boot stage output
+- Crash auto-restart + cooldown + crash-window guard
+- Per-job grid indicators (green/red)
+- Execution mode banner (LIVE / SHADOW) + system state
+- Training-mode indicator (best-effort)
 """
 
 import os
@@ -18,10 +27,48 @@ import urllib.request
 from datetime import datetime
 
 
-PORT = 8000
+# ------------------------------------------------------------
+# Structured Boot Stages (NEW)
+# ------------------------------------------------------------
+BOOT_STAGES = [
+    "bootstrap_db",
+    "module_schema",
+    "backtest_schema",
+    "labels",
+    "size_policy",
+    "server_start",
+]
+
+BOOT_COLORS = {
+    "bootstrap_db": "#1f6f3b",
+    "module_schema": "#1f6f3b",
+    "backtest_schema": "#1f6f3b",
+    "labels": "#6b4f1f",
+    "size_policy": "#6b4f1f",
+    "server_start": "#1f6f3b",
+    "error": "#7a1f1f",
+}
+
+# Crash protection (NEW)
+AUTO_RESTART_ON_CRASH = True
+AUTO_RESTART_DELAY_MS = 3000
+MAX_CRASH_RESTARTS = 3
+
+# Crash-window guard (NEW)
+CRASH_WINDOW_S = 60
+MAX_CRASHES_IN_WINDOW = 3
+
+# Restart cooldown (NEW)
+RESTART_COOLDOWN_S = 8
+
+
+PORT = int(os.environ.get("DASHBOARD_PORT", "8000"))
 URL = f"http://localhost:{PORT}/ui/dashboard.html"
 STATUS_URL = f"http://localhost:{PORT}/api/server/status"
 SHUTDOWN_URL = f"http://localhost:{PORT}/api/server/shutdown"
+JOBS_URL = f"http://localhost:{PORT}/api/jobs"
+SYSTEM_STATE_URL = f"http://localhost:{PORT}/api/system/state"
+HEALTH_URL = f"http://localhost:{PORT}/api/health"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
@@ -32,9 +79,11 @@ except Exception:
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
+
 def _today_log_path() -> str:
     d = datetime.now().strftime("%Y%m%d")
     return os.path.join(LOG_DIR, f"server_console_{d}.log")
+
 
 def _prune_old_logs(keep_days: int = 14):
     try:
@@ -50,6 +99,7 @@ def _prune_old_logs(keep_days: int = 14):
                 pass
     except Exception:
         pass
+
 
 def _http_json(url: str, timeout_s: float = 1.2):
     try:
@@ -76,6 +126,7 @@ def find_venv_python() -> str:
         if os.path.exists(p):
             return p
     return sys.executable
+
 
 def _run_and_stream(app, args, cwd=None, env=None, label="[startup]"):
     """
@@ -115,24 +166,26 @@ def _startup_procedure(app):
     """
     py = find_venv_python()
 
-    # 1) Create core DB tables (dev_core/storage.py)
+    # 1) Create core DB tables
+    app.after(0, app._set_stage, "bootstrap_db")
     ok = _run_and_stream(
         app,
-        [py, "-u", "-c", "from engine.dev_core.storage import init_db; init_db(); print('[startup] init_db ok')"],
+        [py, "-u", "-c", "from engine.runtime.storage import init_db; init_db(); print('[startup] init_db ok')"],
         label="[startup]"
     )
     if not ok:
         return False
 
     # 2) Create module-owned schemas that preflight expects to exist
+    app.after(0, app._set_stage, "module_schema")
     ok = _run_and_stream(
         app,
         [py, "-u", "-c",
-         "from engine.dev_core.portfolio import init_portfolio_db; "
-         "from engine.dev_core.broker_sim import init_broker_db; "
-         "from engine.dev_core.alerts import init_alerts_db; "
-         "from engine.dev_core.validation import init_validation_db; "
-         "from engine.dev_core.model_v2 import init_model_db; "
+         "from engine.strategy.portfolio import init_portfolio_db; "
+         "from engine.execution.broker_sim import init_broker_db; "
+         "from engine.runtime.alerts import init_alerts_db; "
+         "from engine.strategy.validation import init_validation_db; "
+         "from engine.strategy.model_v2 import init_model_db; "
          "init_portfolio_db(); init_broker_db(); init_alerts_db(); init_validation_db(); init_model_db(); "
          "print('[startup] module db init ok')"],
         label="[startup]"
@@ -140,12 +193,13 @@ def _startup_procedure(app):
     if not ok:
         return False
 
-    # 3) Ensure backtest output tables exist (created from portfolio_backtest.SCHEMA)
+    # 3) Ensure backtest output tables exist
+    app.after(0, app._set_stage, "backtest_schema")
     ok = _run_and_stream(
         app,
         [py, "-u", "-c",
          "import portfolio_backtest as p; "
-         "from engine.dev_core.storage import connect; "
+         "from engine.runtime.storage import connect; "
          "con=connect(); con.executescript(p.SCHEMA); con.commit(); con.close(); "
          "print('[startup] portfolio_backtest schema ok')"],
         label="[startup]"
@@ -153,20 +207,29 @@ def _startup_procedure(app):
     if not ok:
         return False
 
-    # 4) Optional: bootstrap exec labels + size policy now (dashboard will also attempt on its own)
+    # 4) Optional: bootstrap exec labels + size policy now
+    app.after(0, app._set_stage, "labels")
     _run_and_stream(app, [py, "-u", "compute_exec_labels.py"], label="[startup]")
+
+    app.after(0, app._set_stage, "size_policy")
     _run_and_stream(app, [py, "-u", "train_size_policy.py"], label="[startup]")
 
     return True
+
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Market Impact — Dashboard Console")
-        self.geometry("900x560")
+        self.geometry("1100x680")
 
         self.proc = None
         self._pump_thread = None
+
+        # crash tracking (NEW)
+        self.crash_count = 0
+        self._crash_times = []  # epoch seconds
+        self._cooldown_until = 0
 
         top = tk.Frame(self)
         top.pack(fill="x", padx=10, pady=10)
@@ -174,11 +237,18 @@ class App(tk.Tk):
         self.lbl = tk.Label(top, text=URL, anchor="w")
         self.lbl.pack(side="left", fill="x", expand=True)
 
-        self.status_pill = tk.Label(top, text="OFFLINE", padx=10, pady=2)
+        self.status_pill = tk.Label(top, text="OFFLINE", padx=10, pady=2, bg="#7a1f1f", fg="white")
         self.status_pill.pack(side="left", padx=(10, 0))
 
         self.uptime_lbl = tk.Label(top, text="uptime: —", anchor="w")
         self.uptime_lbl.pack(side="left", padx=(10, 0))
+
+        # Execution mode + training indicator (NEW)
+        self.mode_lbl = tk.Label(top, text="mode: —", anchor="w")
+        self.mode_lbl.pack(side="left", padx=(10, 0))
+
+        self.train_lbl = tk.Label(top, text="training: —", anchor="w")
+        self.train_lbl.pack(side="left", padx=(10, 0))
 
         self.btn_open = tk.Button(top, text="Open Dashboard", command=self.open_browser)
         self.btn_open.pack(side="right", padx=(8, 0))
@@ -195,17 +265,70 @@ class App(tk.Tk):
         self.btn_clear = tk.Button(top, text="Clear Log", command=self.clear_console)
         self.btn_clear.pack(side="right", padx=(8, 0))
 
+        # Boot progress + readiness (NEW)
+        prog = tk.Frame(self)
+        prog.pack(fill="x", padx=10, pady=(0, 6))
+
+        self.progress = tk.DoubleVar()
+        self.progress_bar = tk.Scale(
+            prog,
+            variable=self.progress,
+            from_=0,
+            to=len(BOOT_STAGES),
+            orient="horizontal",
+            state="disabled",
+            length=420
+        )
+        self.progress_bar.pack(side="left")
+
+        self.stage_label = tk.Label(prog, text="Stage: idle", anchor="w")
+        self.stage_label.pack(side="left", padx=(10, 0))
+
+        # Jobs grid (NEW)
+        grid = tk.LabelFrame(self, text="Jobs (live)")
+        grid.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.jobs_frame = tk.Frame(grid)
+        self.jobs_frame.pack(fill="x", padx=6, pady=6)
+
+        self._job_rows = {}  # name -> (pill_label, text_label)
+
         self.txt = tk.Text(self, wrap="none")
         self.txt.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.txt.tag_config("error", foreground="#7a1f1f")
+        self.txt.tag_config("startup", foreground="#1f6f3b")
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self._log("Ready. Click 'Start Server'.\n")
         self._set_status(False, 0)
+
         self.after(300, self._poll_status_loop)
+        self.after(1200, self._poll_health_loop)
+        self.after(1500, self._poll_jobs_loop)
+        self.after(1500, self._poll_system_state_loop)
+        self.after(500, self._cooldown_tick)
+
+    def _now_s(self) -> int:
+        return int(time.time())
+
+    def _set_stage(self, stage_name: str):
+        if stage_name not in BOOT_STAGES:
+            return
+        idx = BOOT_STAGES.index(stage_name) + 1
+        self.progress.set(idx)
+        self.stage_label.configure(
+            text=f"Stage: {stage_name}",
+            fg=BOOT_COLORS.get(stage_name, "black")
+        )
 
     def _log(self, s: str):
-        self.txt.insert("end", s)
+        if "ERROR" in s or "FAILED" in s:
+            self.txt.insert("end", s, "error")
+        elif "[startup]" in s:
+            self.txt.insert("end", s, "startup")
+        else:
+            self.txt.insert("end", s)
         self.txt.see("end")
         try:
             _prune_old_logs(keep_days=14)
@@ -226,7 +349,6 @@ class App(tk.Tk):
     def restart_server(self):
         self._log("[ui] restarting...\n")
         self.stop_server(graceful=True)
-        # start after a short delay
         self.after(800, self.start_server)
 
     def _set_status(self, online: bool, uptime_s: int = 0):
@@ -236,9 +358,10 @@ class App(tk.Tk):
         else:
             self.status_pill.configure(text="OFFLINE", bg="#7a1f1f", fg="white")
             self.uptime_lbl.configure(text="uptime: —")
+            self.mode_lbl.configure(text="mode: —")
+            self.train_lbl.configure(text="training: —")
 
     def _poll_status_loop(self):
-        # runs forever while UI is open
         j = _http_json(STATUS_URL)
         if j and j.get("ok"):
             self._set_status(True, int(j.get("uptime_s") or 0))
@@ -246,7 +369,122 @@ class App(tk.Tk):
             self._set_status(False, 0)
         self.after(1000, self._poll_status_loop)
 
+    def _poll_health_loop(self):
+        try:
+            j = _http_json(HEALTH_URL)
+            if j and j.get("ok"):
+                prices_age = j.get("prices_age_s")
+                jobs = j.get("jobs") or []
+                self.stage_label.configure(
+                    text=f"HEALTH: prices_age={prices_age}s jobs={len(jobs)}",
+                    fg="#1f6f3b"
+                )
+            else:
+                self.stage_label.configure(text="HEALTH: degraded", fg="#7a1f1f")
+        except Exception:
+            pass
+        self.after(3000, self._poll_health_loop)
+
+    def _poll_system_state_loop(self):
+        try:
+            j = _http_json(SYSTEM_STATE_URL)
+            if j and j.get("ok"):
+                # best-effort fields
+                state = j.get("state") or j.get("system_state") or j.get("mode") or "—"
+                exec_mode = None
+                ks = j.get("kill_switches") or {}
+                # try common patterns
+                em = j.get("execution_mode") or j.get("execution") or {}
+                if isinstance(em, dict):
+                    exec_mode = em.get("mode") or em.get("state") or em.get("execution_mode")
+
+                if not exec_mode:
+                    exec_mode = "SHADOW" if ks.get("kill_switch") or ks.get("kill_switch_enabled") else "LIVE"
+
+                training = j.get("training") or j.get("is_training") or j.get("training_mode")
+                training_txt = "on" if training else ("off" if training is not None else "—")
+
+                self.mode_lbl.configure(text=f"state: {state} / exec: {exec_mode}")
+                self.train_lbl.configure(text=f"training: {training_txt}")
+        except Exception:
+            pass
+        self.after(2000, self._poll_system_state_loop)
+
+    def _ensure_job_row(self, name: str):
+        if name in self._job_rows:
+            return
+
+        row = tk.Frame(self.jobs_frame)
+        row.pack(fill="x", pady=1)
+
+        pill = tk.Label(row, text="—", width=9, padx=6, pady=1, bg="#7a1f1f", fg="white")
+        pill.pack(side="left")
+
+        lab = tk.Label(row, text=name, anchor="w")
+        lab.pack(side="left", padx=(8, 0), fill="x", expand=True)
+
+        self._job_rows[name] = (pill, lab)
+
+    def _poll_jobs_loop(self):
+        try:
+            j = _http_json(JOBS_URL)
+            if j and j.get("ok"):
+                jobs = j.get("jobs") or []
+                # Expect list of dicts; best-effort
+                for it in jobs:
+                    name = (it.get("name") or it.get("job") or "").strip()
+                    if not name:
+                        continue
+                    self._ensure_job_row(name)
+
+                    status = (it.get("status") or it.get("state") or "").lower()
+                    running = bool(it.get("running")) if "running" in it else (status in ("running", "live", "ok"))
+                    degraded = status in ("degraded", "stale", "error", "failed")
+
+                    pill, _lab = self._job_rows[name]
+                    if degraded:
+                        pill.configure(text="DEGRADED", bg="#7a1f1f")
+                    elif running:
+                        pill.configure(text="RUNNING", bg="#1f6f3b")
+                    else:
+                        pill.configure(text="STOPPED", bg="#6b4f1f")
+
+        except Exception:
+            pass
+        self.after(2000, self._poll_jobs_loop)
+
+    def _cooldown_tick(self):
+        now = self._now_s()
+        if self._cooldown_until > now:
+            remain = self._cooldown_until - now
+            try:
+                self.btn_start.configure(state="disabled")
+                self.btn_restart.configure(state="disabled")
+            except Exception:
+                pass
+            self.stage_label.configure(text=f"cooldown: {remain}s", fg="#6b4f1f")
+        else:
+            # allow UI controls based on proc state
+            if not (self.proc and self.proc.poll() is None):
+                try:
+                    self.btn_start.configure(state="normal")
+                    self.btn_restart.configure(state="disabled")
+                    self.btn_stop.configure(state="disabled")
+                except Exception:
+                    pass
+        self.after(500, self._cooldown_tick)
+
+    def _crash_window_allows_restart(self) -> bool:
+        now = self._now_s()
+        # prune
+        self._crash_times = [t for t in self._crash_times if (now - t) <= CRASH_WINDOW_S]
+        return len(self._crash_times) < MAX_CRASHES_IN_WINDOW
+
     def start_server(self):
+        if self._cooldown_until > self._now_s():
+            self._log("[ui] start blocked by cooldown\n")
+            return
+
         if self.proc and self.proc.poll() is None:
             self._log("[ui] server already running\n")
             return
@@ -271,6 +509,7 @@ class App(tk.Tk):
                 py = find_venv_python()
                 args = [py, "-u", "dashboard_server.py"]
 
+                self.after(0, self._set_stage, "server_start")
                 self.after(0, self._log, f"[ui] starting: {args}\n")
 
                 self.proc = subprocess.Popen(
@@ -308,12 +547,10 @@ class App(tk.Tk):
         self._log("[ui] stopping...\n")
 
         if graceful:
-            # ask the server to shutdown (stops child jobs too)
             j = _http_json(SHUTDOWN_URL)
             if j and j.get("ok"):
                 self._log("[ui] graceful shutdown requested\n")
 
-        # fallback: terminate the process if still alive shortly after
         def _terminate_later():
             try:
                 if self.proc and self.proc.poll() is None:
@@ -347,12 +584,31 @@ class App(tk.Tk):
             self.after(0, self.btn_stop.configure, {"state": "disabled"})
             self.after(0, self.btn_restart.configure, {"state": "disabled"})
 
+            # crash guard + auto-restart (NEW)
+            if AUTO_RESTART_ON_CRASH and rc not in (0, None):
+                now = self._now_s()
+                self._crash_times.append(now)
+
+                if not self._crash_window_allows_restart():
+                    self.after(0, self._log, "[ui] crash-window guard tripped; auto-restart disabled\n")
+                    return
+
+                self.crash_count += 1
+                if self.crash_count <= MAX_CRASH_RESTARTS:
+                    self._cooldown_until = self._now_s() + RESTART_COOLDOWN_S
+                    self.after(0, self._log, f"[ui] auto-restart attempt {self.crash_count} in {AUTO_RESTART_DELAY_MS}ms\n")
+                    self.after(AUTO_RESTART_DELAY_MS, self.start_server)
+                else:
+                    self.after(0, self._log, "[ui] max crash restarts reached\n")
+            else:
+                self.crash_count = 0
+                self._crash_times = []
+
     def on_close(self):
         try:
             self.stop_server()
         finally:
             self.after(250, self.destroy)
-
 
 if __name__ == "__main__":
     App().mainloop()
