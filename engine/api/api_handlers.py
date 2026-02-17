@@ -302,7 +302,7 @@ def api_get_alerts(_parsed, _ctx):
 
 def api_get_validation(_parsed, _ctx):
     try:
-        from dev_core.validation import get_validation
+        from engine.strategy.validation import get_validation
         return {"ok": True, "rows": get_validation()}
     except Exception as e:
         return {"ok": False, "error": str(e)}
