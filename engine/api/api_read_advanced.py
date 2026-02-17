@@ -540,7 +540,7 @@ def get_validation_rows():
 
 def get_shadow_capital_scores(limit: int = 50, regime: str = "global"):
     try:
-        from engine.dev_core.shadow_capital_allocator import (
+        from engine.runtime.shadow_capital_allocator import (
             get_shadow_capital_scores as _impl,
         )
         return _impl(limit=limit, regime=regime)
@@ -550,7 +550,7 @@ def get_shadow_capital_scores(limit: int = 50, regime: str = "global"):
 
 def run_shadow_capital_scores(window_s: int = 86400, regime: str = "global"):
     try:
-        from engine.dev_core.shadow_capital_allocator import (
+        from engine.runtime.shadow_capital_allocator import (
             compute_and_persist_shadow_capital_scores as _run,
         )
         return _run(window_s=window_s, regime=regime)
