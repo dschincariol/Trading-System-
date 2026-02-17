@@ -17,12 +17,19 @@ Env:
 """
 
 import os
+import sys
 import time
 import threading
+import asyncio
+import logging
 from typing import Dict
 from dotenv import load_dotenv
 load_dotenv()
 
+if os.environ.get("ENGINE_SUPERVISED") != "1":
+    print("stream_prices_ibkr must be launched by supervisor")
+    sys.exit(1)
+    
 from ibapi.client import EClient
 from ibapi.wrapper import EWrapper
 from ibapi.contract import Contract

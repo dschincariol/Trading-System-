@@ -1,9 +1,14 @@
 import time
 import os
+import sys
 import logging
 from dotenv import load_dotenv
 load_dotenv()
 
+if os.environ.get("ENGINE_SUPERVISED") != "1":
+    print("options_poll must be launched by supervisor")
+    sys.exit(1)
+    
 from engine.dev_core.storage import (
     connect,
     init_db,

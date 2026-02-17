@@ -30,6 +30,9 @@ ALLOWED_JOBS = {
     "stream_prices_polygon_ws": ("engine/data/stream_prices_polygon_ws.py", "daemon", "price_feed", {"execution": False}),
     "stream_prices_ibkr": ("engine/data/stream_prices_ibkr.py", "daemon", "price_feed", {"execution": False}),
 
+    # Options (oneshot)
+    "poll_options": ("engine/data/options_poll.py", "oneshot", None, {"execution": False}),
+
     # Provider monitor (daemon)
     "provider_monitor": ("engine/runtime/jobs/provider_monitor_job.py", "daemon", None, {"execution": False}),
 
@@ -85,6 +88,7 @@ JOB_ORDER = [
     "poll_prices",
     "stream_prices_polygon_ws",
     "stream_prices_ibkr",
+    "poll_options",
     "provider_monitor",
     "ingest_now",
     "process_events",

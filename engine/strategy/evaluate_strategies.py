@@ -17,7 +17,7 @@ from typing import List, Dict, Any
 
 from engine.dev_core.storage import connect, init_db
 
-import portfolio_backtest
+import engine.strategy.portfolio_backtest as portfolio_backtest
 
 
 # ----------------------------------------------------------------------

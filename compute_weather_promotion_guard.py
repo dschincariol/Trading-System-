@@ -25,7 +25,7 @@ from engine.dev_core.storage import (
     put_job_heartbeat,
 )
 
-from execution_policy_engine import apply_execution_policy
+from engine.execution.execution_policy_engine import apply_execution_policy
 
 LOG = logging.getLogger("compute_weather_promotion_guard")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))

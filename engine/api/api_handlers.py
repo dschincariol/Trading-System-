@@ -9,13 +9,13 @@ from dev_core.storage import connect as _db_connect
 from dev_core.learning import learn_relevance_stats
 
 from health_checks import get_health_snapshot
-from alerts_service import get_alerts
+from ops.alerts_service import get_alerts
 from execution_metrics import (
     get_execution_metrics,
     get_execution_metrics_rolling,
 )
 
-from pipeline_runner import (
+from engine.strategy.pipeline_runner import (
     LAST_AUTO_PIPELINE_TS,
     LAST_AUTO_CHALLENGER_TS,
     LAST_AUTO_SIZE_POLICY_TS,

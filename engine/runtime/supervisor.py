@@ -218,10 +218,14 @@ class RuntimeSupervisor:
             if state.process and state.process.poll() is None:
                 return {"ok": True, "already_running": True}
 
+            env = os.environ.copy()
+            env["ENGINE_SUPERVISED"] = "1"
+
             state.process = subprocess.Popen(
                 ["python", state.spec.script],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=env,
             )
 
             state.last_start_ts = _now()
@@ -482,10 +486,14 @@ class RuntimeSupervisor:
                             if st.process is not None:
                                 return
                             try:
+                                env = os.environ.copy()
+                                env["ENGINE_SUPERVISED"] = "1"
+
                                 st.process = subprocess.Popen(
                                     ["python", st.spec.script],
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL,
+                                    env=env,
                                 )
                                 st.last_start_ts = _now()
                                 st.last_exit_code = None

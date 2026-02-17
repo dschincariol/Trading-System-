@@ -45,7 +45,7 @@ try:
     from engine.dev_core.execution_policy_engine import apply_execution_policy  # type: ignore
 except Exception:
     try:
-        from execution_policy_engine import apply_execution_policy  # type: ignore
+        from engine.execution.execution_policy_engine import apply_execution_policy  # type: ignore
     except Exception as e:
         raise RuntimeError(f"apply_execution_policy import failed: {e}")
 

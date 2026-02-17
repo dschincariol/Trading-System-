@@ -23,7 +23,7 @@ from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attr
 
 # Optional: asset-class mapping if available (your repo has asset_map.py at project root)
 try:
-    from asset_map import asset_class_for_symbol  # type: ignore
+    from ops.asset_map import asset_class_for_symbol  # type: ignore
 except Exception:
     def asset_class_for_symbol(symbol: str) -> str:  # fallback
         s = str(symbol or "").upper().strip()

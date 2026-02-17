@@ -108,6 +108,7 @@ def _ensure_job_locks():
         con.close()
 
 def _acquire_lock(name: str, ttl_ms: int = 10_000) -> bool:
+    _ensure_job_locks()
     con = _db_connect()
     try:
         now = int(time.time() * 1000)
@@ -150,6 +151,7 @@ def _acquire_lock(name: str, ttl_ms: int = 10_000) -> bool:
         con.close()
 
 def _touch_lock(name: str, ttl_ms: int = 10_000) -> None:
+    _ensure_job_locks()
     con = _db_connect()
     try:
         now = int(time.time() * 1000)
@@ -168,9 +170,9 @@ def _touch_lock(name: str, ttl_ms: int = 10_000) -> None:
         con.close()
 
 def _heartbeat_lock(job_name: str, ttl_ms: int = 60_000) -> None:
+    _ensure_job_locks()
     _touch_lock(job_name, ttl_ms=ttl_ms)
 
-    _ensure_job_locks()
     now = int(time.time() * 1000)
     owner = f"{os.getpid()}:{threading.get_ident()}"
     pid = int(os.getpid())
@@ -562,26 +564,43 @@ class JobManager:
 
             env = dict(os.environ)
             env["ENGINE_LAUNCHED_BY_SUPERVISOR"] = "1"
+            env["ENGINE_SUPERVISED"] = "1"
             env["ENGINE_JOB_NAME"] = str(job.name)
 
-            job.proc = subprocess.Popen(
-                args,
-                cwd=os.getcwd(),
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0),
-            )
+            try:
+                job.proc = subprocess.Popen(
+                    args,
+                    cwd=os.getcwd(),
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0),
+                )
+            except Exception as e:
+                if job.mode == "oneshot":
+                    try:
+                        _release_lock(f"job:{job.name}")
+                    except Exception:
+                        pass
+                job.append_log(f"[server] spawn failed: {e}")
+                _write_job_history(job.name, "start_failed", f"spawn failed: {e}", None)
+                return {"ok": False, "error": f"spawn failed: {e}"}
 
             try:
                 con_hb = _db_connect()
-                con_hb.execute(
-                    "UPDATE job_locks SET heartbeat_ts_ms=? WHERE job_name=?",
-                    (int(time.time() * 1000), f"job:{job.name}"),
-                )
-                con_hb.commit()
+                try:
+                    con_hb.execute(
+                        "UPDATE job_locks SET heartbeat_ts_ms=? WHERE job_name=?",
+                        (int(time.time() * 1000), f"job:{job.name}"),
+                    )
+                    con_hb.commit()
+                except Exception:
+                    try:
+                        con_hb.rollback()
+                    except Exception:
+                        pass
             finally:
                 try:
                     con_hb.close()

@@ -67,7 +67,7 @@ def _ensure_schemas() -> List[str]:
     from engine.dev_core.storage import init_db, connect
     from engine.dev_core.alerts import init_alerts_db
     from engine.dev_core.execution_ledger import init_execution_ledger
-    import portfolio_backtest as pbt
+    import engine.strategy.portfolio_backtest as pbt
 
     init_db()
     notes.append("core db ok")

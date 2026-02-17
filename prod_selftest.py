@@ -40,7 +40,7 @@ def main() -> int:
     import dev_core.model_v2   # noqa: F401
     import dev_core.learning   # noqa: F401
     import dev_core.alerts     # noqa: F401
-    import dev_core.kill_switch  # noqa: F401
+    import engine.execution.kill_switch  # noqa: F401
     import dev_core.capital_guard  # noqa: F401
 
     # 3) Insert synthetic event (unique key)

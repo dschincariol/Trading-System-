@@ -25,9 +25,16 @@ Notes:
 
 import json
 import os
+import sys
 import threading
 import time
+import asyncio
+import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+if os.environ.get("ENGINE_SUPERVISED") != "1":
+    print("stream_prices_polygon_ws must be launched by supervisor")
+    sys.exit(1)
 
 try:
     import websocket  # websocket-client

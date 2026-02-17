@@ -10,6 +10,7 @@ Writes to SQLite prices table.
 """
 
 import os
+import sys
 import time
 import json
 import random
@@ -35,6 +36,9 @@ from engine.dev_core.symbol_blacklist import is_blacklisted
 from engine.dev_core.portfolio_risk_gate import apply_portfolio_risk_gate
 from engine.dev_core.alerts import emit_alert
 
+if os.environ.get("ENGINE_SUPERVISED") != "1":
+    print("poll_prices must be launched by supervisor")
+    sys.exit(1)
 # ------            -- ------------------------------------------------------
 # Runtime config
 # ------            -- ------------------------------------------------------
@@ -234,11 +238,11 @@ def _sleep_with_jitter(seconds: float) -> None:
 
 
 def _load_symbol_providers() -> Tuple[Dict[str, str], Dict[str, str]]:
+    con = None
     owns = False
-    if con is None:
+    try:
         con = connect()
         owns = True
-    try:
         rows = con.execute(
             """
             SELECT symbol, meta_json
@@ -248,7 +252,11 @@ def _load_symbol_providers() -> Tuple[Dict[str, str], Dict[str, str]]:
             """
         ).fetchall()
     finally:
-        con.close()
+        if owns and con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
 
     yf_map: Dict[str, str] = {}
     ccxt_map: Dict[str, str] = {}
@@ -354,11 +362,12 @@ def _put_bar(tf_s: int, ts_ms: int, symbol: str, o: float, h: float, l: float, c
 
 def _mark_stale(now_ts_ms: int) -> None:
     cutoff = now_ts_ms - PRICE_STALE_AFTER_S * 1000
+    con = None
     owns = False
-    if con is None:
+    try:
         con = connect()
         owns = True
-    try:
+
         rows = con.execute(
             "SELECT symbol, meta_json FROM symbols WHERE status IN ('ACTIVE','WATCH')"
         ).fetchall()
@@ -387,16 +396,18 @@ def _mark_stale(now_ts_ms: int) -> None:
                     },
                 )
 
-                pass
-
-        con.execute(
+                con.execute(
                     "UPDATE symbols SET meta_json=?, updated_ts_ms=? WHERE symbol=?",
-                    (json.dumps(meta, separators=(",", ":")), now_ts_ms, sym),
+                    (json.dumps(meta, separators=(",", ":")), int(now_ts_ms), str(sym)),
                 )
 
         con.commit()
     finally:
-        con.close()
+        if owns and con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
 
 # ------            -- ------------------------------------------------------
 # Main loop
