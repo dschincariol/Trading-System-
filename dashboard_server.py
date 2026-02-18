@@ -678,6 +678,14 @@ def stop_server():
     except Exception:
         pass
 
+from engine.runtime.config_schema import load_runtime_config, ConfigError
+
+try:
+    CFG = load_runtime_config()
+except ConfigError as e:
+    print(f"[FATAL CONFIG ERROR] {e}")
+    raise SystemExit(1)
+
 if __name__ == "__main__":
     try:
         run_server()

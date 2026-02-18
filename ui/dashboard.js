@@ -136,12 +136,19 @@ function setStatus(el, ok, text) {
 async function fetchJSON(path) {
   const res = await fetch(path, { cache: "no-store" });
   const txt = await res.text();
+
   let data = null;
-  try { data = txt ? JSON.parse(txt) : null; } catch {}
+  try {
+    data = txt ? JSON.parse(txt) : null;
+  } catch (e) {
+    throw new Error(`Invalid JSON from ${path}: ${e.message}`);
+  }
+
   if (!res.ok) {
     const msg = (data && data.error) ? data.error : txt;
     throw new Error(`${res.status} ${res.statusText}: ${msg}`);
   }
+
   return data;
 }
 
@@ -2454,6 +2461,7 @@ async function loadSupervisorStatus() {
 // -----------------------------
 async function loadStructuredReadiness() {
   const el = document.getElementById("systemStateText");
+  const banner = document.getElementById("systemStateBanner");
   if (!el) return;
 
   try {
@@ -2488,6 +2496,23 @@ async function loadStructuredReadiness() {
 
     el.textContent = lines.join("\n");
 
+    // ---------- Institutional Banner State ----------
+    if (banner) {
+      banner.textContent = state.state || "UNKNOWN";
+
+      banner.className = "pill ";
+
+      if (state.state === "LIVE") {
+        banner.className += "ok";
+      } else if (state.state === "DEGRADED") {
+        banner.className += "warn";
+      } else if (state.state === "KILL_SWITCH") {
+        banner.className += "crit";
+      } else {
+        banner.className += "dim";
+      }
+    }
+
   } catch (e) {
     el.textContent = `[readiness error] ${e.message || e}`;
   }
@@ -2499,17 +2524,25 @@ async function loadTelemetry() {
 
   try {
     const t = await fetchJSON("/api/telemetry");
-    if (!t || !t.ok) return;
+    if (!t || !t.ok) throw new Error("telemetry unavailable");
 
     const cpu = document.getElementById("tCpu");
     const ram = document.getElementById("tRam");
     const db  = document.getElementById("tDb");
 
-  if (cpu) cpu.textContent = `CPU ${Number(t.cpu_percent || 0).toFixed(1)}%`;
-  if (ram) ram.textContent = `RAM ${Number(t.process_rss_mb || 0).toFixed(0)}MB`;
-  if (db)  db.textContent  = `DB ${Number(t.db_size_mb || 0).toFixed(1)}MB`;
+    if (cpu) cpu.textContent = `CPU ${Number(t.cpu_percent || 0).toFixed(1)}%`;
+    if (ram) ram.textContent = `RAM ${Number(t.process_rss_mb || 0).toFixed(0)}MB`;
+    if (db)  db.textContent  = `DB ${Number(t.db_size_mb || 0).toFixed(1)}MB`;
 
-  } catch (_) {}
+  } catch (e) {
+    const cpu = document.getElementById("tCpu");
+    const ram = document.getElementById("tRam");
+    const db  = document.getElementById("tDb");
+
+    if (cpu) cpu.textContent = "CPU —";
+    if (ram) ram.textContent = "RAM —";
+    if (db)  db.textContent  = "DB —";
+  }
 }
 
 async function jobAction(name, action) {
@@ -2528,6 +2561,8 @@ async function loadExecutionBarrier() {
   const raw  = document.getElementById("execBarrierRaw");
   if (!pill || !raw) return;
 
+  const root = document.documentElement;
+
   try {
     const j = await fetchJSON("/api/execution/barrier");
     if (!j || !j.ok) throw new Error((j && j.error) || "barrier unavailable");
@@ -2535,10 +2570,14 @@ async function loadExecutionBarrier() {
     pill.className = "pill " + (j.allowed ? "ok" : "bad");
     pill.textContent = j.allowed ? "execution: ALLOWED" : "execution: BLOCKED";
     raw.textContent = JSON.stringify(j, null, 2);
+
+    root.style.setProperty("--exec-blocked", j.allowed ? "0" : "1");
+
   } catch (e) {
     pill.className = "pill bad";
     pill.textContent = "execution: error";
     raw.textContent = e.message || String(e);
+    root.style.setProperty("--exec-blocked", "1"); // fail closed
   }
 }
 
@@ -2559,13 +2598,28 @@ try {
     const hEl = document.getElementById("healthStatus");
     const hDet = document.getElementById("healthDetails");
 
+    let systemState = null;
+    try {
+      systemState = await fetchJSON("/api/system/state");
+    } catch {}
+
+    const degraded =
+      !systemState ||
+      systemState.state !== "LIVE" ||
+      _isExecutionDegraded();
+
     setStatus(
       hEl,
-      health.ok && !_isExecutionDegraded(),
-      _isExecutionDegraded()
-        ? "DEGRADED (execution)"
-        : (health.ok ? "OK" : "DEGRADED")
+      !degraded,
+      degraded ? "DEGRADED" : "LIVE"
     );
+
+    const root = document.documentElement;
+    if (degraded) {
+      root.classList.add("system-degraded");
+    } else {
+      root.classList.remove("system-degraded");
+    }
 
     hDet.textContent = JSON.stringify(health, null, 2);
 
@@ -2831,17 +2885,34 @@ function wireUI() {
 }
 
 function bootDashboard() {
-  // Core UI wiring
-if (typeof wireUI === "function") wireUI();
+  const bootStage = document.getElementById("bootStage");
+  const setStage = (s) => { if (bootStage) bootStage.textContent = s; };
 
-  // Voice UI (optional)
-  if (typeof wireVoiceUI === "function") wireVoiceUI();
+  setStage("BOOTING");
 
-  // Initial paint
+  if (typeof wireUI === "function") {
+    wireUI();
+    setStage("UI WIRED");
+  }
+
+  if (typeof wireVoiceUI === "function") {
+    wireVoiceUI();
+    setStage("VOICE READY");
+  }
+
   applyReadOnlyBanner();
-  refresh();
+  setStage("POLICY APPLIED");
 
-  // Auto voice summary on load (CRIT only, once per session)
+refresh().then(async () => {
+  try {
+    const st = await fetchJSON("/api/system/state");
+    setStage(st && st.state ? st.state : "UNKNOWN");
+  } catch {
+    setStage("ERROR");
+  }
+});
+
+  // Auto voice summary (CRIT alerts)
   setTimeout(() => {
     if (sessionStorage.getItem("voice_autosummary_done")) return;
 
@@ -2850,12 +2921,14 @@ if (typeof wireUI === "function") wireUI();
 
     if (crits.length > 0 && typeof _sayAndToast === "function") {
       _sayAndToast(
-        `Attention. ${crits.length} critical alert${crits.length > 1 ? "s" : ""} detected. Say “open latest critical” to review.`,
+        `Attention. ${crits.length} critical alert${crits.length > 1 ? "s" : ""} detected.`,
         "warn",
         6000
       );
     }
-  }, 600);
+
+    sessionStorage.setItem("voice_autosummary_done", "1");
+  }, 800);
 }
 
 if (document.readyState === "loading") {

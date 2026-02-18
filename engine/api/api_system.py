@@ -21,12 +21,22 @@ ROUTE_SPECS_SYSTEM = [
     ("POST", "/api/server/shutdown",      "api_post_server_shutdown"),
     ("GET", "/api/execution/barrier", "api_get_execution_barrier"),
     ("GET", "/api/supervisor/status", "api_get_supervisor_status"),
+    ("GET", "/api/system/config", "api_get_runtime_config"),
 ]
 
 
 # ----------------------------------------------------------------------
 # SYSTEM STATE
 # ----------------------------------------------------------------------
+from dataclasses import asdict
+from engine.runtime.config_schema import load_runtime_config, ConfigError
+
+def api_get_runtime_config(_parsed, ctx):
+    try:
+        cfg = load_runtime_config()
+        return {"ok": True, "config": asdict(cfg)}
+    except ConfigError as e:
+        return {"ok": False, "error": str(e)}
 
 def api_get_system_state(_parsed, ctx):
     JOBS = ctx["JOBS"]
