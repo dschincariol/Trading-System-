@@ -82,19 +82,14 @@ def build_temporal_embeddings(
         try:
             con.execute("SELECT 1 FROM labels LIMIT 1").fetchone()
         except Exception:
-            return 0
+            return {"ok": True, "trained": 0}
 
-        rows = con.execute(
-            "SELECT id, ts_ms FROM events ORDER BY ts_ms ASC"
-        ).fetchall()
-
+        rows = con.execute("SELECT id, ts_ms FROM events ORDER BY ts_ms ASC").fetchall()
         if not rows:
             return {"ok": True, "trained": 0}
 
         # infer base embedding dim
-        row = con.execute(
-            "SELECT vec FROM event_embeddings LIMIT 1"
-        ).fetchone()
+        row = con.execute("SELECT vec FROM event_embeddings LIMIT 1").fetchone()
         if not row:
             return {"ok": True, "trained": 0}
 
@@ -106,22 +101,20 @@ def build_temporal_embeddings(
         loss_fn = nn.MSELoss()
 
         samples = []
-
         for eid, ts in rows:
             seq = _load_recent_embeddings(con, int(ts), window)
             if len(seq) < window:
                 continue
             X = np.stack(seq).astype(np.float32)
             y = X[-1, :-1]  # predict current embedding
-            samples.append((X, y))
+            samples.append((int(eid), X, y))
 
         if not samples:
             return {"ok": True, "trained": 0}
 
         model.train()
         for _ in range(int(epochs)):
-            total = 0.0
-            for X, y in samples:
+            for _eid, X, y in samples:
                 xt = torch.from_numpy(X)
                 yt = torch.from_numpy(y)
                 opt.zero_grad(set_to_none=True)
@@ -129,11 +122,8 @@ def build_temporal_embeddings(
                 loss = loss_fn(pred, yt)
                 loss.backward()
                 opt.step()
-                total += float(loss)
 
         # persist embeddings
-        
-
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS event_embeddings_seq (
@@ -145,13 +135,12 @@ def build_temporal_embeddings(
         )
 
         trained = 0
-        for (eid, ts), (X, _) in zip(rows, samples):
+        for eid, X, _y in samples:
             xt = torch.from_numpy(X)
             with torch.no_grad():
                 out = model(xt[-1]).numpy().astype(np.float32)
-            pass
 
-        con.execute(
+            con.execute(
                 """
                 INSERT OR REPLACE INTO event_embeddings_seq(event_id, dim, vec)
                 VALUES (?,?,?)

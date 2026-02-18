@@ -130,9 +130,7 @@ def main():
                 "quote_meta": meta,
             }
 
-            pass
-
-        con.execute(
+            con.execute(
                 """
                 INSERT OR REPLACE INTO labels_exec(
                   event_id, symbol, horizon_s, ts_ms,

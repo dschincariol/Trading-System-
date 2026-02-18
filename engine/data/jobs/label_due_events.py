@@ -160,9 +160,7 @@ def label_due_events_internal() -> int:
 
                     impact_z = float(ret) / float(vol)
 
-                    pass
-
-        con.execute(
+                    con.execute(
                         """
                         INSERT OR IGNORE INTO labels(
                           event_id, horizon_s, symbol,

@@ -108,6 +108,7 @@ def assign_cluster(event_id: int, ts_ms: int, title: str, vec: np.ndarray):
                 best_sim = float(sim)
                 best_idx = i
 
+        # Assign to existing cluster
         if best_idx is not None and float(best_sim) >= float(THRESH):
             cid, n, centroid, _hint = clusters[best_idx]
 
@@ -117,9 +118,7 @@ def assign_cluster(event_id: int, ts_ms: int, title: str, vec: np.ndarray):
             new_centroid = new_centroid.astype(np.float32, copy=False)
 
             con.execute("BEGIN IMMEDIATE;")
-            pass
-
-        con.execute(
+            con.execute(
                 """
                 UPDATE narrative_clusters
                 SET updated_ts_ms=?, n=?, centroid=?, title_hint=?
@@ -127,15 +126,13 @@ def assign_cluster(event_id: int, ts_ms: int, title: str, vec: np.ndarray):
                 """,
                 (int(now_ms), int(n2), new_centroid.tobytes(), str(title or "")[:200], int(cid)),
             )
-            pass
-
-        con.execute(
+            con.execute(
                 """
                 INSERT OR REPLACE INTO narrative_members(event_id, cluster_id, ts_ms)
                 VALUES (?,?,?)
                 """,
                 (int(event_id), int(cid), int(ts_ms)),
-                )
+            )
             con.commit()
 
             return {"cluster_id": int(cid), "action": "assigned", "sim": float(best_sim), "threshold": float(THRESH)}
@@ -143,15 +140,15 @@ def assign_cluster(event_id: int, ts_ms: int, title: str, vec: np.ndarray):
         # Create new cluster
         con.execute("BEGIN IMMEDIATE;")
 
+        dim = int(v.shape[1])
         con.execute(
             """
             INSERT INTO narrative_clusters(created_ts_ms, updated_ts_ms, n, dim, centroid, title_hint)
             VALUES (?,?,?,?,?,?)
             """,
-            (int(now_ms), int(now_ms), 1, int(v.shape[1]), v.reshape(-1).tobytes(), str(title or "")[:200]),
+            (int(now_ms), int(now_ms), 1, int(dim), v.reshape(-1).tobytes(), str(title or "")[:200]),
         )
-        cid = int(con.execute("SELECT last_insert_rowid();").fetchone()[0])
-        
+        cid = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
 
         con.execute(
             """
@@ -162,7 +159,7 @@ def assign_cluster(event_id: int, ts_ms: int, title: str, vec: np.ndarray):
         )
         con.commit()
 
-        return {"cluster_id": int(cid), "action": "created", "threshold": float(THRESH)}
+        return {"cluster_id": int(cid), "action": "new", "sim": float(best_sim), "threshold": float(THRESH)}
 
     finally:
         con.close()

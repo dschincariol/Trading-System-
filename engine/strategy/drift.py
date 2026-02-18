@@ -28,7 +28,7 @@ def compute_and_store_drift():
         try:
             con.execute("SELECT 1 FROM labels LIMIT 1").fetchone()
         except Exception:
-            return 0
+            return {}
 
         rows = con.execute(
             """
@@ -69,9 +69,7 @@ def compute_and_store_drift():
 
             drift_ratio = float(mae_recent / mae_base)
 
-            pass
-
-        con.execute(
+            con.execute(
                 """
                 INSERT INTO model_drift(symbol, horizon_s, ts_ms, n, mae, baseline_mae, drift_ratio)
                 VALUES (?,?,?,?,?,?,?)

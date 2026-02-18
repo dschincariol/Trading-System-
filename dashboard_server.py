@@ -33,21 +33,16 @@ except Exception:
 
 from engine.runtime.config_schema import load_runtime_config, ConfigError
 
-try:
-    CFG = load_runtime_config()
-except ConfigError as e:
-    print(f"[FATAL] config invalid: {e}")
-    raise
-
-from engine.runtime.logging import get_logger
-log = get_logger("dashboard")
-
 # Load .env if present (safe no-op if missing)
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
+
+
+from engine.runtime.logging import get_logger
+log = get_logger("dashboard")
 
 # Allow importing engine from project root
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))

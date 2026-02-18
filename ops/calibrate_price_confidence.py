@@ -212,9 +212,7 @@ def build_labels_and_calibration():
                 "vol_proxy": float(vol),
             }
 
-            pass
-
-        con.execute(
+            con.execute(
                 """
                 INSERT OR REPLACE INTO labels_price(
                   ts_pred_ms, ts_eval_ms, symbol, horizon_s,
@@ -236,10 +234,8 @@ def build_labels_and_calibration():
             )
             inserted_labels += 1
 
-            # price_realized_returns keyed on eval ts (so it lines up with “outcome time”)
-            pass
-
-        con.execute(
+            # price_realized_returns keyed on eval ts (so it lines up with outcome time)
+            con.execute(
                 """
                 INSERT OR REPLACE INTO price_realized_returns(ts_ms, symbol, ret)
                 VALUES (?,?,?)
@@ -294,9 +290,7 @@ def build_labels_and_calibration():
             payload["horizon_s"] = int(h)
             payload["updated_ts_ms"] = int(now_ms)
 
-            pass
-
-        con.execute(
+            con.execute(
                 """
                 INSERT OR REPLACE INTO confidence_calibration(
                   symbol, horizon_s, method, updated_ts_ms, payload_json

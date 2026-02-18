@@ -7,28 +7,41 @@ VOICE_TIMEOUT_S = float(os.environ.get("VOICE_TIMEOUT_S", "6.0"))
 VOICE_MAX_PROMPT_CHARS = int(os.environ.get("VOICE_MAX_PROMPT_CHARS", "8000"))
 VOICE_MAX_RESPONSE_CHARS = int(os.environ.get("VOICE_MAX_RESPONSE_CHARS", "700"))
 
+
 def run_llm_explain_with_timeout(prompt: str, timeout_s: float) -> str:
+    """
+    Runs llmExplain(prompt) in a worker thread with a timeout.
+
+    If llmExplain is unavailable or times out, raises RuntimeError.
+    """
+    if not VOICE_ENABLED:
+        raise RuntimeError("llmExplain disabled by VOICE_ENABLED=0")
+
+    prompt = str(prompt or "")[:VOICE_MAX_PROMPT_CHARS]
+
     result = {}
     error = {}
 
     def _worker():
         try:
             try:
-    from llm import llmExplain
-except Exception:
-    raise RuntimeError("llmExplain unavailable")
-            result["text"] = llmExplain(prompt)
+                from llm import llmExplain
+            except Exception as e:
+                raise RuntimeError("llmExplain unavailable") from e
+
+            txt = llmExplain(prompt)
+            result["text"] = (str(txt) if txt is not None else "")[:VOICE_MAX_RESPONSE_CHARS]
         except Exception as e:
             error["error"] = str(e)
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
-    t.join(timeout_s)
+    t.join(timeout=float(timeout_s))
 
     if t.is_alive():
-        raise TimeoutError(f"LLM timeout after {timeout_s}s")
+        raise RuntimeError("llmExplain timeout")
 
-    if "error" in error:
+    if error.get("error"):
         raise RuntimeError(error["error"])
 
     return str(result.get("text") or "")

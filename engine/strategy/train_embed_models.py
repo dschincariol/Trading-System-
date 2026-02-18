@@ -114,9 +114,7 @@ def main() -> int:
                     f"min_new={MIN_NEW_LABELS}"
                 )
 
-                pass
-
-        con.execute(
+                con.execute(
                     """
                     INSERT INTO model_runs(key, last_count, last_max_created_at_ms, last_run_ms)
                     VALUES(?,?,?,?)
@@ -130,19 +128,19 @@ def main() -> int:
                 con.commit()
                 return 0
 
-            print(
-                f"embed_models: TRAIN cur_n={cur_n} last_n={last_n} new={new_labels} "
-                f"lookback_days={LOOKBACK_DAYS} min_samples={MIN_SAMPLES} "
-                f"alpha={ALPHA} kind={MODEL_KIND} "
-                f"conf_calib={os.environ.get('EMBED_CONF_CALIB','1')} "
-                f"conf_k={os.environ.get('EMBED_REGRESSOR_CONF_K','75.0')}"
-            )
-
         finally:
             con.close()
 
+        print(
+            f"embed_models: TRAIN cur_n={cur_n} last_n={last_n} new={new_labels} "
+            f"lookback_days={LOOKBACK_DAYS} min_samples={MIN_SAMPLES} "
+            f"alpha={ALPHA} kind={MODEL_KIND} "
+            f"conf_calib={os.environ.get('EMBED_CONF_CALIB','1')} "
+            f"conf_k={os.environ.get('EMBED_REGRESSOR_CONF_K','75.0')}"
+        )
+
         # Perform training (does its own DB writes)
-        out = train_embed_models(
+        _out = train_embed_models(
             symbols=SYMBOLS,
             horizons=HORIZONS,
             min_samples=MIN_SAMPLES,
@@ -156,7 +154,6 @@ def main() -> int:
         try:
             _ensure_meta(con2)
             cur_n2, cur_mx2 = _labels_stamp(con2)
-
             con2.execute(
                 """
                 INSERT INTO model_runs(key, last_count, last_max_created_at_ms, last_run_ms)
@@ -166,16 +163,12 @@ def main() -> int:
                   last_max_created_at_ms=excluded.last_max_created_at_ms,
                   last_run_ms=excluded.last_run_ms
                 """,
-                ("embed_models", cur_n2, cur_mx2, int(time.time() * 1000)),
+                ("embed_models", int(cur_n2), int(cur_mx2), int(time.time() * 1000)),
             )
             con2.commit()
         finally:
             con2.close()
 
-        print(
-            "embed_models: DONE trained =",
-            {f"{k[0]}:{k[1]}": v for k, v in out.items()},
-        )
         return 0
 
     finally:
@@ -184,6 +177,9 @@ def main() -> int:
         except Exception:
             pass
 
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 # ----------------------------
 # Entrypoint
