@@ -65,7 +65,7 @@ def start_lifecycle_monitor(
     """
 
     def _loop():
-        _set_state("WARMING")
+        _set_state("BOOTING")
 
         while True:
             try:

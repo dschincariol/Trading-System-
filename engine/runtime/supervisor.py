@@ -116,7 +116,7 @@ class RuntimeSupervisor:
 
         # monitor thread
         self._monitor_thread = None
-        if self._delegate is None or self._monitor_when_delegating:
+        if self._delegate is None:
             self._monitor_thread = threading.Thread(
                 target=self._monitor_loop,
                 daemon=True,

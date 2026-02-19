@@ -571,22 +571,27 @@ def run_server():
     if not v.get("ok"):
         raise RuntimeError(f"invalid_dependency_graph: {list(v.get('errors') or [])}")
 
-    # ---------------------------------------------------
-    # Deterministic Supervisor Boot (optional) - STRICT when enabled
-    # ---------------------------------------------------
-    if AUTO_BOOT_DAEMONS and AUTO_BOOT_TARGETS:
-        targets = list(AUTO_BOOT_TARGETS)
+    if not ALLOWED_JOBS:
+        raise RuntimeError("no_allowed_jobs_registered")
 
-        log.info("supervisor deterministic_start targets: %s", targets)
-        boot_res = SUPERVISOR.deterministic_start(
-            targets,
-            include_deps=True,
-            strict=True,
-        )
-        log.info("supervisor boot result: %s", boot_res)
+    # ---------------------------------------------------
+    # Deterministic Supervisor Boot (Console owns startup)
+    # ---------------------------------------------------
+    targets = list(AUTO_BOOT_TARGETS) if AUTO_BOOT_TARGETS else list(ALLOWED_JOBS.keys())
 
-        if not boot_res.get("ok"):
-            raise RuntimeError(f"auto_boot_failed: {boot_res}")
+    log.info("supervisor deterministic_start targets: %s", targets)
+
+    boot_res = SUPERVISOR.deterministic_start(
+        targets,
+        include_deps=True,
+        strict=True,
+    )
+
+    log.info("supervisor boot result: %s", boot_res)
+
+    if not boot_res.get("ok"):
+        raise RuntimeError(f"auto_boot_failed: {boot_res}")
+
 
     if AUTO_PIPELINE:
         log.info("auto_pipeline enabled interval_s=%s", AUTO_PIPELINE_INTERVAL_S)
@@ -651,10 +656,11 @@ def run_server():
             mark_shutdown()
         except Exception:
             pass
-        try:
-            runtime_shutdown(JOBS=JOBS, SUPERVISOR=SUPERVISOR)
-        except Exception:
-            pass
+    try:
+        runtime_shutdown(JOBS=JOBS, SUPERVISOR=SUPERVISOR)
+    except Exception as e:
+        log.error("runtime_shutdown error: %s", e)
+
         try:
             if _HTTPD:
                 _HTTPD.server_close()
@@ -672,14 +678,6 @@ def stop_server():
             _HTTPD.shutdown()
     except Exception:
         pass
-
-from engine.runtime.config_schema import load_runtime_config, ConfigError
-
-try:
-    CFG = load_runtime_config()
-except ConfigError as e:
-    print(f"[FATAL CONFIG ERROR] {e}")
-    raise SystemExit(1)
 
 if __name__ == "__main__":
     try:
