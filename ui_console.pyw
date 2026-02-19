@@ -20,12 +20,12 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 import json
 import urllib.request
 from datetime import datetime
-
 
 # ------------------------------------------------------------
 # Structured Boot Stages (NEW)
@@ -61,14 +61,15 @@ MAX_CRASHES_IN_WINDOW = 3
 # Restart cooldown (NEW)
 RESTART_COOLDOWN_S = 8
 
-
+HOST = os.environ.get("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = int(os.environ.get("DASHBOARD_PORT", "8000"))
-URL = f"http://localhost:{PORT}/ui/dashboard.html"
-STATUS_URL = f"http://localhost:{PORT}/api/server/status"
-SHUTDOWN_URL = f"http://localhost:{PORT}/api/server/shutdown"
-JOBS_URL = f"http://localhost:{PORT}/api/jobs"
-SYSTEM_STATE_URL = f"http://localhost:{PORT}/api/system/state"
-HEALTH_URL = f"http://localhost:{PORT}/api/health"
+
+URL = f"http://{HOST}:{PORT}/ui/dashboard.html"
+STATUS_URL = f"http://{HOST}:{PORT}/api/server/status"
+SHUTDOWN_URL = f"http://{HOST}:{PORT}/api/server/shutdown"
+JOBS_URL = f"http://{HOST}:{PORT}/api/jobs"
+SYSTEM_STATE_URL = f"http://{HOST}:{PORT}/api/system/state"
+HEALTH_URL = f"http://{HOST}:{PORT}/api/health"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
@@ -160,10 +161,17 @@ def _run_and_stream(app, args, cwd=None, env=None, label="[startup]"):
 
 def _startup_procedure(app):
     """
-    One-button bootstrap for non-technical startup:
-      - ensure DB schema exists (including module-owned schemas)
-      - (optionally) run size policy training + label exec (dashboard can still do it too)
+    One-button bootstrap for non-technical startup.
+
+    Default behavior:
+      - start the server only (fast)
+    Optional (ENV-gated):
+      - pre-create schemas / run heavyweight jobs
     """
+    if os.environ.get("UI_CONSOLE_BOOTSTRAP", "0") != "1":
+        app.after(0, app._log, "[startup] UI_CONSOLE_BOOTSTRAP=0 (skipping heavy bootstrap)\n")
+        return True
+
     py = find_venv_python()
 
     # 1) Create core DB tables
@@ -208,11 +216,13 @@ def _startup_procedure(app):
         return False
 
     # 4) Optional: bootstrap exec labels + size policy now
-    app.after(0, app._set_stage, "labels")
-    _run_and_stream(app, [py, "-u", "compute_exec_labels.py"], label="[startup]")
+    if os.environ.get("UI_CONSOLE_RUN_LABELS", "0") == "1":
+        app.after(0, app._set_stage, "labels")
+        _run_and_stream(app, [py, "-u", "compute_exec_labels.py"], label="[startup]")
 
-    app.after(0, app._set_stage, "size_policy")
-    _run_and_stream(app, [py, "-u", "train_size_policy.py"], label="[startup]")
+    if os.environ.get("UI_CONSOLE_RUN_SIZE_POLICY", "0") == "1":
+        app.after(0, app._set_stage, "size_policy")
+        _run_and_stream(app, [py, "-u", "train_size_policy.py"], label="[startup]")
 
     return True
 
@@ -221,7 +231,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Market Impact — Dashboard Console")
-        self.geometry("1100x680")
+        self.geometry("1200x720")
+        self.minsize(1000, 600)
 
         self.proc = None
         self._pump_thread = None
@@ -233,6 +244,8 @@ class App(tk.Tk):
 
         top = tk.Frame(self)
         top.pack(fill="x", padx=10, pady=10)
+        top.pack_propagate(False)
+        top.configure(height=70)
 
         self.lbl = tk.Label(top, text=URL, anchor="w")
         self.lbl.pack(side="left", fill="x", expand=True)
@@ -250,20 +263,23 @@ class App(tk.Tk):
         self.train_lbl = tk.Label(top, text="training: —", anchor="w")
         self.train_lbl.pack(side="left", padx=(10, 0))
 
-        self.btn_open = tk.Button(top, text="Open Dashboard", command=self.open_browser)
-        self.btn_open.pack(side="right", padx=(8, 0))
+        btn_frame = tk.Frame(top)
+        btn_frame.pack(side="right")
 
-        self.btn_restart = tk.Button(top, text="Restart", command=self.restart_server, state="disabled")
-        self.btn_restart.pack(side="right", padx=(8, 0))
+        self.btn_start = tk.Button(btn_frame, text="Start Server", width=14, command=self.start_server)
+        self.btn_start.pack(side="left", padx=4)
 
-        self.btn_stop = tk.Button(top, text="Stop Server", command=self.stop_server, state="disabled")
-        self.btn_stop.pack(side="right", padx=(8, 0))
+        self.btn_stop = tk.Button(btn_frame, text="Stop Server", width=14, command=self.stop_server, state="disabled")
+        self.btn_stop.pack(side="left", padx=4)
 
-        self.btn_start = tk.Button(top, text="Start Server", command=self.start_server)
-        self.btn_start.pack(side="right")
+        self.btn_restart = tk.Button(btn_frame, text="Restart", width=10, command=self.restart_server, state="disabled")
+        self.btn_restart.pack(side="left", padx=4)
 
-        self.btn_clear = tk.Button(top, text="Clear Log", command=self.clear_console)
-        self.btn_clear.pack(side="right", padx=(8, 0))
+        self.btn_open = tk.Button(btn_frame, text="Open Dashboard", width=16, command=self.open_browser)
+        self.btn_open.pack(side="left", padx=4)
+
+        self.btn_clear = tk.Button(btn_frame, text="Clear Log", width=10, command=self.clear_console)
+        self.btn_clear.pack(side="left", padx=4)
 
         # Boot progress + readiness (NEW)
         prog = tk.Frame(self)
@@ -337,8 +353,11 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    def open_browser(self):
+def open_browser(self):
+    try:
         webbrowser.open(URL)
+    except Exception:
+        pass
 
     def clear_console(self):
         try:
@@ -531,6 +550,15 @@ class App(tk.Tk):
                 self.after(250, self.open_browser)
 
             except Exception as e:
+                try:
+                    import traceback
+                    with open(os.path.join(LOG_DIR, "ui_console_crash.log"), "a", encoding="utf-8") as f:
+                        f.write("\n===== ui_console startup exception =====\n")
+                        f.write(traceback.format_exc())
+                        f.write("\n")
+                except Exception:
+                    pass
+
                 self.after(0, self._log, f"[ui] startup exception: {e}\n")
                 self.after(0, self.btn_start.configure, {"state": "normal"})
 
@@ -604,11 +632,17 @@ class App(tk.Tk):
                 self.crash_count = 0
                 self._crash_times = []
 
-    def on_close(self):
-        try:
-            self.stop_server()
-        finally:
-            self.after(250, self.destroy)
+def on_close(self):
+    try:
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+        self.destroy()
+        os._exit(0)
+    except Exception:
+        os._exit(0)
 
 if __name__ == "__main__":
     App().mainloop()
