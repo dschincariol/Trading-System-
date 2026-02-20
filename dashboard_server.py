@@ -26,12 +26,19 @@ import sys
 import threading
 import time
 
+# ------------------------------------------------------------------
+# Ensure imports work no matter what the working directory is.
+# Put repo root (this file's directory) at the front of sys.path
+# BEFORE any engine.* imports.
+# ------------------------------------------------------------------
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BASE_DIR not in sys.path:
+    sys.path.insert(0, _BASE_DIR)
+
 try:
     import psutil
 except Exception:
     psutil = None
-
-from engine.runtime.config_schema import load_runtime_config, ConfigError
 
 # Load .env if present (safe no-op if missing)
 try:
@@ -40,18 +47,15 @@ try:
 except Exception:
     pass
 
+from engine.runtime.config_schema import load_runtime_config, ConfigError
 
 from engine.runtime.logging import get_logger
 log = get_logger("dashboard")
-
-# Allow importing engine from project root
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from engine.api.http_transport import build_handler, run_http_server
 from engine.runtime.shutdown import runtime_shutdown
 
 # Ensure static UI paths resolve even when launched from another working directory
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
     os.chdir(_BASE_DIR)
 except Exception:
@@ -620,6 +624,7 @@ def run_server():
             "ALLOWED_JOBS": ALLOWED_JOBS,
             "API_HANDLERS": API_HANDLERS,
         },
+        static_dir=_BASE_DIR,
     )
 
     _HTTPD = run_http_server(host, port, HandlerCls)

@@ -10,18 +10,28 @@ Delegates to injected:
 """
 
 import json
+import os
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
 
-def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None):
+def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, static_dir=None):
 
     routes = {(m, p): h for (m, p, h) in ROUTE_SPECS}
+    _STATIC_DIR = static_dir or os.getcwd()
 
     class Handler(SimpleHTTPRequestHandler):
 
         ROUTES = routes
         CTX = ctx or {}
+
+        def __init__(self, *args, **kwargs):
+            # Pin static serving to repo root so /ui/* never 404s due to CWD drift
+            try:
+                super().__init__(*args, directory=_STATIC_DIR, **kwargs)
+            except TypeError:
+                # Older Python fallback: leave default behavior
+                super().__init__(*args, **kwargs)
 
 
         def _normalize_ui_legacy_path(self):

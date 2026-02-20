@@ -6,7 +6,7 @@ if [ -f .env ]; then
   export $(grep -v '^\s*#' .env | grep -v '^\s*$' | xargs)
 fi
 
-python -c "from dev_core.storage import init_db; init_db()"
+python -c "from engine.runtime.storage import init_db; init_db()"
 
 # Run dashboard in foreground
 python dashboard_server.py

@@ -226,7 +226,6 @@ def _startup_procedure(app):
 
     return True
 
-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
