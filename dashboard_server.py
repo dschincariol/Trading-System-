@@ -579,23 +579,37 @@ def run_server():
         raise RuntimeError("no_allowed_jobs_registered")
 
     # ---------------------------------------------------
-    # Deterministic Supervisor Boot (Console owns startup)
+    # Deterministic Supervisor Boot (ENV-gated)
+    # Production default: bring up UI first, then start jobs intentionally.
     # ---------------------------------------------------
-    targets = list(AUTO_BOOT_TARGETS) if AUTO_BOOT_TARGETS else list(ALLOWED_JOBS.keys())
+    def _default_daemon_targets() -> list:
+        out = []
+        for name, spec in (ALLOWED_JOBS or {}).items():
+            try:
+                mode = spec[1]
+            except Exception:
+                mode = None
+            if str(mode).strip().lower() == "daemon":
+                out.append(name)
+        return out
 
-    log.info("supervisor deterministic_start targets: %s", targets)
+    if not AUTO_BOOT_DAEMONS:
+        log.info("AUTO_BOOT_DAEMONS=0 -> skipping job auto-boot (UI only)")
+    else:
+        targets = list(AUTO_BOOT_TARGETS) if AUTO_BOOT_TARGETS else _default_daemon_targets()
 
-    boot_res = SUPERVISOR.deterministic_start(
-        targets,
-        include_deps=True,
-        strict=True,
-    )
+        log.info("supervisor deterministic_start targets: %s", targets)
 
-    log.info("supervisor boot result: %s", boot_res)
+        boot_res = SUPERVISOR.deterministic_start(
+            targets,
+            include_deps=True,
+            strict=True,
+        )
 
-    if not boot_res.get("ok"):
-        raise RuntimeError(f"auto_boot_failed: {boot_res}")
+        log.info("supervisor boot result: %s", boot_res)
 
+        if not boot_res.get("ok"):
+            raise RuntimeError(f"auto_boot_failed: {boot_res}")
 
     if AUTO_PIPELINE:
         log.info("auto_pipeline enabled interval_s=%s", AUTO_PIPELINE_INTERVAL_S)

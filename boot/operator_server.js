@@ -1,5 +1,13 @@
+// FILE: boot/operator_server.js
+// REPLACE THE ENTIRE FILE WITH THIS EXACT CONTENT:
+
 // boot/operator_server.js
-// Institutional Operator Control Server (Readiness + Typed Config + AutoFix + Persistent Errors)
+// Production Operator Control Center (Non-technical UI)
+// - Guided start (Safe / Shadow / Live)
+// - Preflight checks (python, port, db writable, entry exists)
+// - Readiness + health polling
+// - Start/Stop/Restart + Emergency Stop
+// - Log tail + snapshot export
 
 const express = require("express");
 const path = require("path");
@@ -9,27 +17,30 @@ const crypto = require("crypto");
 const http = require("http");
 const https = require("https");
 const net = require("net");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 const ROOT = path.join(__dirname, "..");
-const ENTRY = path.join(ROOT, "index.js");
+
+// Python dashboard entrypoint (this repo ships start_system.py)
+const ENTRY = path.join(ROOT, "start_system.py");
+
+// Files
 const ENV_PATH = path.join(ROOT, ".env");
 const LOG_DIR = path.join(ROOT, "logs");
 const RUNTIME_LOG = path.join(LOG_DIR, "runtime.log");
 const SECRETS_PATH = path.join(ROOT, "operator.secrets.json");
 const STATE_PATH = path.join(ROOT, "operator.state.json");
 
-const OPERATOR_PORT = 4000;
+// Operator server
+const OPERATOR_PORT = Number(process.env.OPERATOR_PORT || 4000);
+const OPERATOR_BIND_HOST = String(process.env.OPERATOR_BIND_HOST || "127.0.0.1");
 const PRODUCTION_MODE = process.env.NODE_ENV === "production";
 
 let child = null;
 let installing = false;
-
-// Persistent state (survives operator restart)
-let state = loadState();
 
 // --------------------------------------------------
 // Persistent State
@@ -39,14 +50,18 @@ function defaultState() {
   return {
     createdAt: new Date().toISOString(),
     lastExitCode: null,
-    lastError: null,            // { at, kind, message, details? }
+    lastError: null, // { at, kind, message, details? }
     restartAttempts: 0,
     lastStartAt: null,
     lastStopAt: null,
     lastHealthyAt: null,
-    lastAutoFix: null           // { at, steps: [...], ok, finalHealth }
+    lastMode: "safe", // safe | shadow | live
+    _restartWindowStart: null,
+    _restartCountWindow: 0
   };
 }
+
+let state = loadState();
 
 function loadState() {
   try {
@@ -62,8 +77,8 @@ function saveState() {
   try {
     fs.writeFileSync(STATE_PATH + ".tmp", JSON.stringify(state, null, 2));
     fs.renameSync(STATE_PATH + ".tmp", STATE_PATH);
-  } catch (e) {
-    // last resort: ignore
+  } catch {
+    // ignore
   }
 }
 
@@ -101,7 +116,7 @@ function sleep(ms) {
 
 function parseEnvText(text) {
   const out = {};
-  for (const line of text.split("\n")) {
+  for (const line of String(text || "").split("\n")) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const idx = trimmed.indexOf("=");
@@ -128,32 +143,43 @@ function readEnv() {
   return parseEnvText(readEnvFileRaw());
 }
 
-// --------------------------------------------------
-// Typed Config Validation + Sanitization
-// --------------------------------------------------
-
-const ENV_SPEC = [
-  { key: "PORT", type: "int", required: true, min: 1, max: 65535, default: 3000 },
-  { key: "DB_PATH", type: "string", required: true, default: "./dev.db" },
-  { key: "API_TOKEN", type: "string", required: true, default: "" },
-
-  // Optional but commonly required in your system
-  { key: "POLYGON_API_KEY", type: "string", required: false, default: "" },
-  { key: "IBKR_HOST", type: "string", required: false, default: "127.0.0.1" },
-  { key: "IBKR_PORT", type: "int", required: false, min: 1, max: 65535, default: 4002 },
-  { key: "IBKR_CLIENT_ID", type: "int", required: false, min: 0, max: 999999, default: 1 },
-
-  // Operator behavior toggles (optional)
-  { key: "OPERATOR_AUTORESTART", type: "bool", required: false, default: true },
-  { key: "OPERATOR_HEALTH_URL", type: "string", required: false, default: "" } // override health endpoint
-];
-
 function normalizeBool(v) {
   const s = String(v ?? "").trim().toLowerCase();
   if (s === "1" || s === "true" || s === "yes" || s === "y" || s === "on") return true;
   if (s === "0" || s === "false" || s === "no" || s === "n" || s === "off") return false;
   return null;
 }
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+// --------------------------------------------------
+// Typed Config Validation + Sanitization
+// --------------------------------------------------
+
+// Keep config aligned with python dashboard defaults.
+// NOTE: start_system.py / dashboard_server.py uses 8000 by default.
+const ENV_SPEC = [
+  { key: "DASHBOARD_HOST", type: "string", required: false, default: "127.0.0.1" },
+  { key: "DASHBOARD_PORT", type: "int", required: false, min: 1, max: 65535, default: 8000 },
+  { key: "DASHBOARD_API_TOKEN", type: "string", required: false, default: "" },
+
+  { key: "DB_PATH", type: "string", required: false, default: "./trading.db" },
+
+  { key: "POLYGON_API_KEY", type: "string", required: false, default: "" },
+  { key: "IBKR_HOST", type: "string", required: false, default: "127.0.0.1" },
+  { key: "IBKR_PORT", type: "int", required: false, min: 1, max: 65535, default: 7497 },
+  { key: "IBKR_CLIENT_ID", type: "int", required: false, min: 0, max: 999999, default: 101 },
+
+  // Boot behavior
+  { key: "AUTO_BOOT_DAEMONS", type: "bool", required: false, default: false },
+  { key: "AUTO_BOOT_TARGETS", type: "string", required: false, default: "" },
+
+  // Operator behavior
+  { key: "OPERATOR_AUTORESTART", type: "bool", required: false, default: true },
+  { key: "OPERATOR_HEALTH_URL", type: "string", required: false, default: "" }
+];
 
 function validateAndSanitizeEnv(envObj) {
   const sanitized = { ...envObj };
@@ -206,12 +232,6 @@ function validateAndSanitizeEnv(envObj) {
     }
   }
 
-  // Extra checks
-  const port = Number(sanitized.PORT);
-  if (Number.isFinite(port)) {
-    // nothing else here
-  }
-
   return { sanitized, issues };
 }
 
@@ -228,8 +248,7 @@ function ensureEnvFile() {
 function writeEnv(obj) {
   const { sanitized, issues } = validateAndSanitizeEnv(obj);
   if (issues.some((i) => i.level === "error")) {
-    const errMsg = "Config validation failed";
-    setLastError("CONFIG_VALIDATION", errMsg, issues);
+    setLastError("CONFIG_VALIDATION", "Config validation failed", issues);
     return { ok: false, issues, sanitized };
   }
   atomicWrite(ENV_PATH, serializeEnv(sanitized));
@@ -274,36 +293,6 @@ function saveSecrets(obj) {
 }
 
 // --------------------------------------------------
-// Dependency Installation (disabled in production)
-// --------------------------------------------------
-
-function ensureDependencies(callback) {
-  if (PRODUCTION_MODE) return callback();
-
-  if (fs.existsSync(path.join(ROOT, "node_modules"))) {
-    return callback();
-  }
-
-  if (installing) return;
-
-  installing = true;
-
-  const install = spawn("npm", ["install"], {
-    cwd: ROOT,
-    stdio: "inherit"
-  });
-
-  install.on("exit", (code) => {
-    installing = false;
-    if (code !== 0) {
-      setLastError("NPM_INSTALL_FAILED", "npm install failed", { code });
-      return;
-    }
-    callback();
-  });
-}
-
-// --------------------------------------------------
 // Engine lifecycle
 // --------------------------------------------------
 
@@ -313,7 +302,19 @@ function status() {
   return "STOPPED";
 }
 
-function startEngine() {
+function pickPythonCmd() {
+  // On Windows, "py" is common. Keep "python" first for consistency.
+  const candidates = [process.env.OPERATOR_PYTHON || "python", "py"];
+  for (const c of candidates) {
+    try {
+      const r = spawnSync(c, ["--version"], { stdio: "pipe" });
+      if (r && (r.status === 0 || r.status === null)) return c;
+    } catch {}
+  }
+  return candidates[0];
+}
+
+function startEngine(mode = "safe") {
   if (child) return { ok: true, status: "RUNNING" };
 
   ensureEnvFile();
@@ -327,70 +328,80 @@ function startEngine() {
     return { ok: false, status: "STOPPED", issues };
   }
 
-  // Write back sanitized values (typed normalization)
+  // Apply boot mode overrides (non-technical toggle)
+  const m = String(mode || "safe").toLowerCase().trim();
+  const finalMode = (m === "live" || m === "shadow") ? m : "safe";
+
+  // safe: UI only, no jobs
+  // shadow/live: auto boot daemons
+  sanitized.AUTO_BOOT_DAEMONS = (finalMode === "safe") ? "false" : "true";
+  sanitized.EXECUTION_MODE = finalMode; // if your backend/UI uses it
+  sanitized.OPERATOR_MODE = finalMode;  // reserved
+
   atomicWrite(ENV_PATH, serializeEnv(sanitized));
 
-  ensureDependencies(() => {
-    const logStream = fs.createWriteStream(RUNTIME_LOG, { flags: "a" });
+  const python = pickPythonCmd();
 
-    child = spawn("node", [ENTRY], { env: process.env });
+  const logStream = fs.createWriteStream(RUNTIME_LOG, { flags: "a" });
+  logStream.write(`\n[${nowIso()}] OPERATOR start mode=${finalMode} python=${python}\n`);
 
-    state.lastStartAt = new Date().toISOString();
-    saveState();
+  child = spawn(python, [ENTRY], { env: { ...process.env, ...sanitized }, cwd: ROOT });
 
-    child.stdout.pipe(logStream);
-    child.stderr.pipe(logStream);
-
-child.on("exit", (code) => {
-  state.lastExitCode = code;
+  state.lastStartAt = nowIso();
+  state.lastMode = finalMode;
   saveState();
-  child = null;
 
-  const envNow = readEnv();
-  const ar = normalizeBool(envNow.OPERATOR_AUTORESTART);
-  const autoRestartEnabled = ar === null ? true : ar;
+  if (child.stdout) child.stdout.pipe(logStream);
+  if (child.stderr) child.stderr.pipe(logStream);
 
-  const now = Date.now();
-  if (!state._restartWindowStart) {
-    state._restartWindowStart = now;
-    state._restartCountWindow = 0;
-  }
+  child.on("exit", (code) => {
+    state.lastExitCode = code;
+    saveState();
+    child = null;
 
-  // Reset window if older than 10 minutes
-  if (now - state._restartWindowStart > 10 * 60 * 1000) {
-    state._restartWindowStart = now;
-    state._restartCountWindow = 0;
-  }
+    const envNow = readEnv();
+    const ar = normalizeBool(envNow.OPERATOR_AUTORESTART);
+    const autoRestartEnabled = ar === null ? true : ar;
 
-  if (autoRestartEnabled && code !== 0) {
-    state._restartCountWindow += 1;
-    state.restartAttempts = (state.restartAttempts || 0) + 1;
-
-    if (state._restartCountWindow > 5) {
-      setLastError(
-        "CRASH_LOOP_DETECTED",
-        "Engine crashed too many times within 10 minutes. Auto-restart disabled."
-      );
-      saveState();
-      return;
+    const now = Date.now();
+    if (!state._restartWindowStart) {
+      state._restartWindowStart = now;
+      state._restartCountWindow = 0;
     }
 
-    setLastError("ENGINE_CRASH", "Engine exited unexpectedly", { code });
-    saveState();
+    // Reset window if older than 10 minutes
+    if (now - state._restartWindowStart > 10 * 60 * 1000) {
+      state._restartWindowStart = now;
+      state._restartCountWindow = 0;
+    }
 
-    setTimeout(() => startEngine(), 3000);
-  }
-});
+    if (autoRestartEnabled && code !== 0) {
+      state._restartCountWindow += 1;
+      state.restartAttempts = (state.restartAttempts || 0) + 1;
 
+      if (state._restartCountWindow > 5) {
+        setLastError(
+          "CRASH_LOOP_DETECTED",
+          "Engine crashed too many times within 10 minutes. Auto-restart disabled."
+        );
+        saveState();
+        return;
+      }
+
+      setLastError("ENGINE_CRASH", "Engine exited unexpectedly", { code });
+      saveState();
+
+      setTimeout(() => startEngine(state.lastMode || "safe"), 3000);
+    }
   });
 
   clearLastError();
-  return { ok: true, status: "STARTING" };
+  return { ok: true, status: "STARTING", mode: finalMode };
 }
 
 function stopEngine() {
   if (!child) {
-    state.lastStopAt = new Date().toISOString();
+    state.lastStopAt = nowIso();
     saveState();
     return { ok: true, status: "STOPPED" };
   }
@@ -402,13 +413,30 @@ function stopEngine() {
     return { ok: false };
   }
 
-  state.lastStopAt = new Date().toISOString();
+  state.lastStopAt = nowIso();
+  saveState();
+  return { ok: true, status: "STOPPING" };
+}
+
+function emergencyStop() {
+  // Strong stop: SIGKILL if still alive after grace period
+  if (!child) return { ok: true, status: "STOPPED" };
+  try {
+    child.kill("SIGTERM");
+  } catch {}
+  const pid = child.pid;
+  setTimeout(() => {
+    try {
+      if (child && child.pid === pid) child.kill("SIGKILL");
+    } catch {}
+  }, 2500);
+  state.lastStopAt = nowIso();
   saveState();
   return { ok: true, status: "STOPPING" };
 }
 
 // --------------------------------------------------
-// Health verification (backend integration)
+// Health + Readiness (backend integration)
 // --------------------------------------------------
 
 function httpGetJson(url) {
@@ -440,16 +468,16 @@ function httpGetJson(url) {
 
 async function verifyHealth() {
   const env = readEnv();
-  const port = Number(env.PORT || 3000);
+  const port = Number(env.DASHBOARD_PORT || 8000);
+  const host = String(env.DASHBOARD_HOST || "127.0.0.1");
   const override = String(env.OPERATOR_HEALTH_URL || "").trim();
 
-  // Default: your backend should expose /api/health
-  const url = override || `http://localhost:${port}/api/health`;
+  const url = override || `http://${host}:${port}/api/health`;
 
   const r = await httpGetJson(url);
 
   if (r.ok) {
-    state.lastHealthyAt = new Date().toISOString();
+    state.lastHealthyAt = nowIso();
     saveState();
     return { ok: true, url, status: r.status, body: r.json };
   }
@@ -457,28 +485,146 @@ async function verifyHealth() {
   return { ok: false, url, status: r.status, body: r.json };
 }
 
-// --------------------------------------------------
-// Structured readiness engine
-// --------------------------------------------------
-
-async function checkPortAvailable(port) {
+async function checkPortAvailable(port, host = "127.0.0.1") {
   return new Promise((resolve) => {
     const srv = net.createServer();
     srv.once("error", () => resolve(false));
     srv.once("listening", () => srv.close(() => resolve(true)));
-    srv.listen(port, "127.0.0.1");
+    srv.listen(port, host);
   });
+}
+
+function isPathWritable(p) {
+  try {
+    const dir = fs.statSync(p).isDirectory() ? p : path.dirname(p);
+    fs.accessSync(dir, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pythonAvailable() {
+  const python = pickPythonCmd();
+  try {
+    const r = spawnSync(python, ["--version"], { stdio: "pipe" });
+    const out = (r.stdout ? String(r.stdout) : "") + (r.stderr ? String(r.stderr) : "");
+    const ok = r.status === 0 || r.status === null;
+    return { ok, python, version: out.trim() };
+  } catch (e) {
+    return { ok: false, python, version: "", error: String(e) };
+  }
+}
+
+async function getPreflight(mode = "safe") {
+  ensureEnvFile();
+
+  const envObj = readEnv();
+  const { sanitized, issues: cfgIssues } = validateAndSanitizeEnv(envObj);
+
+  // Persist normalized env (only if no errors)
+  if (!cfgIssues.some((i) => i.level === "error")) {
+    atomicWrite(ENV_PATH, serializeEnv(sanitized));
+  }
+
+  const checks = [];
+
+  // Entry exists
+  checks.push({
+    id: "entry",
+    label: "Backend entrypoint exists",
+    ok: fs.existsSync(ENTRY),
+    details: ENTRY
+  });
+
+  // Python exists
+  const py = pythonAvailable();
+  checks.push({
+    id: "python",
+    label: "Python available",
+    ok: !!py.ok,
+    details: py.ok ? `${py.python} (${py.version || "ok"})` : (py.error || "not found")
+  });
+
+  // Dashboard port available (if not running)
+  const dashPort = Number(sanitized.DASHBOARD_PORT || 8000);
+  const dashHost = String(sanitized.DASHBOARD_HOST || "127.0.0.1");
+  if (Number.isFinite(dashPort) && dashPort > 0 && dashPort <= 65535) {
+    const portOk = await checkPortAvailable(dashPort, dashHost);
+    checks.push({
+      id: "port",
+      label: `Dashboard port available (${dashHost}:${dashPort})`,
+      ok: portOk || status() === "RUNNING",
+      details: portOk ? "free" : (status() === "RUNNING" ? "engine running" : "in use")
+    });
+  } else {
+    checks.push({
+      id: "port",
+      label: "Dashboard port configured",
+      ok: false,
+      details: "invalid DASHBOARD_PORT"
+    });
+  }
+
+  // DB path writable
+  const dbPath = String(sanitized.DB_PATH || "./trading.db");
+  const resolvedDb = path.isAbsolute(dbPath) ? dbPath : path.join(ROOT, dbPath);
+  checks.push({
+    id: "db",
+    label: "DB path writable",
+    ok: isPathWritable(resolvedDb),
+    details: dbPath
+  });
+
+  // Config validity
+  const cfgOk = !cfgIssues.some((i) => i.level === "error");
+  checks.push({
+    id: "config",
+    label: ".env config valid",
+    ok: cfgOk,
+    details: cfgOk ? "ok" : cfgIssues.map((x) => `${x.key}: ${x.message}`).join("; ")
+  });
+
+  // Live/shadow key requirements (soft check)
+  const m = String(mode || "safe").toLowerCase().trim();
+  const wantData = (m === "shadow" || m === "live");
+  if (wantData) {
+    checks.push({
+      id: "polygon_key",
+      label: "POLYGON_API_KEY present (data feed)",
+      ok: !!String(sanitized.POLYGON_API_KEY || "").trim(),
+      details: String(sanitized.POLYGON_API_KEY || "").trim() ? "set" : "missing"
+    });
+  }
+
+  // IBKR fields (soft check)
+  if (m === "live") {
+    checks.push({
+      id: "ibkr_host",
+      label: "IBKR_HOST configured",
+      ok: !!String(sanitized.IBKR_HOST || "").trim(),
+      details: String(sanitized.IBKR_HOST || "").trim() || "missing"
+    });
+  }
+
+  const ok = checks.every((c) => !!c.ok);
+
+  return {
+    ok,
+    mode: m,
+    status: status(),
+    productionMode: PRODUCTION_MODE,
+    checks,
+    configIssues: cfgIssues
+  };
 }
 
 async function getReadiness() {
   const issues = [];
 
-  // Files / deps
-  if (!fs.existsSync(ENTRY)) issues.push({ level: "error", code: "ENTRY_MISSING", message: "Backend entrypoint missing (index.js)" });
+  // Files
+  if (!fs.existsSync(ENTRY)) issues.push({ level: "error", code: "ENTRY_MISSING", message: `Backend entrypoint missing (${path.basename(ENTRY)})` });
   if (!fs.existsSync(ENV_PATH)) issues.push({ level: "error", code: "ENV_MISSING", message: ".env missing" });
-  if (!PRODUCTION_MODE && !fs.existsSync(path.join(ROOT, "node_modules"))) {
-    issues.push({ level: "warn", code: "DEPS_MISSING", message: "Dependencies not installed yet (node_modules missing)" });
-  }
   if (!fs.existsSync(LOG_DIR)) issues.push({ level: "warn", code: "LOGDIR_MISSING", message: "logs/ folder missing (will be created on start)" });
 
   // Config validity
@@ -492,12 +638,12 @@ async function getReadiness() {
     });
   }
 
-  // Port availability (only if config has a PORT that parses)
-  const port = Number(envObj.PORT || "");
-  if (Number.isFinite(port) && port > 0 && port <= 65535) {
-    const ok = await checkPortAvailable(port);
-    if (!ok && status() !== "RUNNING") {
-      issues.push({ level: "error", code: "PORT_IN_USE", message: `PORT ${port} appears to be in use` });
+  // Health (if running)
+  let health = null;
+  if (status() === "RUNNING") {
+    health = await verifyHealth();
+    if (!health.ok) {
+      issues.push({ level: "warn", code: "HEALTH_FAIL", message: "Backend health check failed" });
     }
   }
 
@@ -510,110 +656,34 @@ async function getReadiness() {
     });
   }
 
-  // Health (if running)
-  let health = null;
-  if (status() === "RUNNING") {
-    health = await verifyHealth();
-    if (!health.ok) {
-      issues.push({ level: "warn", code: "HEALTH_FAIL", message: "Backend health check failed" });
-    }
-  }
-
   const hasError = issues.some((i) => i.level === "error");
-  const ready = !hasError;
-
   return {
-    ready,
+    ready: !hasError,
     status: status(),
     productionMode: PRODUCTION_MODE,
+    mode: state.lastMode || "safe",
     issues,
     health
   };
 }
 
 // --------------------------------------------------
-// Multi-step AutoFix with verification + persistent transcript
-// --------------------------------------------------
-
-async function autoFix() {
-  const steps = [];
-  const startedAt = new Date().toISOString();
-
-  // Step 0: readiness snapshot before
-  steps.push({ at: new Date().toISOString(), step: "readiness_before", data: await getReadiness() });
-
-  // Step 1: stop if running
-  if (status() === "RUNNING") {
-    stopEngine();
-    steps.push({ at: new Date().toISOString(), step: "stop_requested" });
-    await sleep(1500);
-  }
-
-  // Step 2: sanitize config (write back normalized env if valid)
-  ensureEnvFile();
-  const envObj = readEnv();
-  const { sanitized, issues } = validateAndSanitizeEnv(envObj);
-  if (issues.some((i) => i.level === "error")) {
-    setLastError("AUTOFIX_CONFIG_INVALID", "AutoFix aborted: invalid config", issues);
-    steps.push({ at: new Date().toISOString(), step: "config_invalid", data: issues });
-    state.lastAutoFix = { at: startedAt, steps, ok: false, finalHealth: null };
-    saveState();
-    return { ok: false, steps, reason: "config_invalid" };
-  }
-  atomicWrite(ENV_PATH, serializeEnv(sanitized));
-  steps.push({ at: new Date().toISOString(), step: "config_sanitized" });
-
-  // Step 3: install deps (dev only)
-  if (!PRODUCTION_MODE && !fs.existsSync(path.join(ROOT, "node_modules"))) {
-    steps.push({ at: new Date().toISOString(), step: "deps_install_start" });
-    await new Promise((resolve) => {
-      ensureDependencies(() => resolve());
-      // if ensureDependencies fails, it sets lastError and just returns; detect with timeout
-      setTimeout(() => resolve(), 60000);
-    });
-    steps.push({ at: new Date().toISOString(), step: "deps_install_done" });
-  }
-
-  // Step 4: start
-  steps.push({ at: new Date().toISOString(), step: "start_requested" });
-  const startRes = startEngine();
-  if (!startRes.ok) {
-    steps.push({ at: new Date().toISOString(), step: "start_failed", data: startRes });
-    state.lastAutoFix = { at: startedAt, steps, ok: false, finalHealth: null };
-    saveState();
-    return { ok: false, steps, reason: "start_failed" };
-  }
-
-  // Step 5: wait + verify health (retry loop)
-  let finalHealth = null;
-  for (let i = 0; i < 8; i++) {
-    await sleep(1500);
-    finalHealth = await verifyHealth();
-    steps.push({ at: new Date().toISOString(), step: "health_check", attempt: i + 1, data: finalHealth });
-    if (finalHealth.ok) break;
-  }
-
-  const ok = !!(finalHealth && finalHealth.ok);
-  if (!ok) {
-    setLastError("AUTOFIX_HEALTH_FAIL", "AutoFix completed but health still failing", finalHealth);
-  } else {
-    clearLastError();
-  }
-
-  state.lastAutoFix = { at: startedAt, steps, ok, finalHealth };
-  saveState();
-
-  return { ok, steps, finalHealth };
-}
-
-// --------------------------------------------------
-// Logs
+// Logs + Snapshot
 // --------------------------------------------------
 
 function tailLog(lines = 200) {
   if (!fs.existsSync(RUNTIME_LOG)) return "";
   const content = fs.readFileSync(RUNTIME_LOG, "utf-8").split("\n");
   return content.slice(-lines).join("\n");
+}
+
+function safeEnvForSnapshot(envObj) {
+  const out = { ...envObj };
+  const redact = ["POLYGON_API_KEY", "DASHBOARD_API_TOKEN", "API_TOKEN", "IBKR_PASSWORD", "IBKR_TOKEN"];
+  for (const k of redact) {
+    if (out[k]) out[k] = "***REDACTED***";
+  }
+  return out;
 }
 
 // --------------------------------------------------
@@ -630,19 +700,20 @@ app.get("/api/operator/status", (req, res) => {
     lastStartAt: state.lastStartAt,
     lastStopAt: state.lastStopAt,
     lastHealthyAt: state.lastHealthyAt,
+    lastMode: state.lastMode || "safe",
     lastError: state.lastError
   });
 });
 
-app.get("/api/operator/bootstrapStatus", (req, res) => {
+app.get("/api/operator/bootstrap", (req, res) => {
   res.json({
     nodeVersion: process.version,
     platform: os.platform(),
     productionMode: PRODUCTION_MODE,
     envExists: fs.existsSync(ENV_PATH),
-    depsInstalled: fs.existsSync(path.join(ROOT, "node_modules")),
     entryExists: fs.existsSync(ENTRY),
-    logDirExists: fs.existsSync(LOG_DIR)
+    logDirExists: fs.existsSync(LOG_DIR),
+    operator: { host: OPERATOR_BIND_HOST, port: OPERATOR_PORT }
   });
 });
 
@@ -671,13 +742,13 @@ app.post("/api/operator/secrets", (req, res) => {
 });
 
 app.get("/api/operator/secrets", (req, res) => {
-  // Return keys only (do not decrypt)
   const secrets = loadSecrets();
   res.json({ keys: Object.keys(secrets) });
 });
 
 app.get("/api/operator/logs", (req, res) => {
-  res.type("text/plain").send(tailLog(200));
+  const n = Math.max(50, Math.min(2000, Number(req.query.lines || 400)));
+  res.type("text/plain").send(tailLog(n));
 });
 
 app.get("/api/operator/verifyHealth", async (req, res) => {
@@ -690,9 +761,48 @@ app.get("/api/operator/readiness", async (req, res) => {
   res.json(r);
 });
 
-app.post("/api/operator/start", (req, res) => {
-  const r = startEngine();
+app.get("/api/operator/preflight", async (req, res) => {
+  const mode = String(req.query.mode || state.lastMode || "safe");
+  const r = await getPreflight(mode);
   res.json(r);
+});
+
+app.post("/api/operator/start", async (req, res) => {
+  const mode = String((req.body && req.body.mode) || "safe");
+
+  const pre = await getPreflight(mode);
+  if (!pre.ok) {
+    setLastError("PREFLIGHT_FAIL", "Preflight checks failed; cannot start", pre.checks);
+    return res.json({ ok: false, status: "STOPPED", preflight: pre });
+  }
+
+  const r = startEngine(mode);
+
+  // Wait for health
+  let healthy = false;
+  for (let i = 0; i < 10; i++) {
+    await new Promise(s => setTimeout(s, 1000));
+    const h = await verifyHealth();
+    if (h.ok) {
+      healthy = true;
+      break;
+    }
+  }
+
+  if (!healthy) {
+    setLastError("BOOT_HEALTH_FAIL", "Backend did not become healthy");
+    return res.json({ ok: false, status: "UNHEALTHY" });
+  }
+
+  // Data verification: check row count increases
+  const dbCheck = await httpGetJson(`http://127.0.0.1:8000/api/telemetry`);
+
+  if (!dbCheck.ok) {
+    setLastError("DATA_API_FAIL", "Telemetry API not responding");
+    return res.json({ ok: false, status: "NO_DATA_API" });
+  }
+
+  return res.json({ ok: true, status: "RUNNING", mode });
 });
 
 app.post("/api/operator/stop", (req, res) => {
@@ -703,17 +813,14 @@ app.post("/api/operator/stop", (req, res) => {
 app.post("/api/operator/restart", async (req, res) => {
   stopEngine();
   await sleep(1000);
-  const r = startEngine();
+  const mode = String((req.body && req.body.mode) || state.lastMode || "safe");
+  const r = startEngine(mode);
   res.json({ ok: true, status: "RESTARTING", start: r });
 });
 
-app.post("/api/operator/autofix", async (req, res) => {
-  const r = await autoFix();
+app.post("/api/operator/emergencyStop", (req, res) => {
+  const r = emergencyStop();
   res.json(r);
-});
-
-app.get("/api/operator/autofix/last", (req, res) => {
-  res.json(state.lastAutoFix || null);
 });
 
 app.post("/api/operator/clearLastError", (req, res) => {
@@ -721,28 +828,57 @@ app.post("/api/operator/clearLastError", (req, res) => {
   res.json({ ok: true });
 });
 
+app.get("/api/operator/snapshot", async (req, res) => {
+  const envObj = readEnv();
+  const readiness = await getReadiness();
+  const preflight = await getPreflight(state.lastMode || "safe");
+
+  const snap = {
+    at: nowIso(),
+    operator: {
+      host: OPERATOR_BIND_HOST,
+      port: OPERATOR_PORT,
+      node: process.version,
+      platform: os.platform(),
+      productionMode: PRODUCTION_MODE
+    },
+    engine: {
+      status: status(),
+      entry: ENTRY,
+      lastMode: state.lastMode || "safe",
+      lastStartAt: state.lastStartAt,
+      lastStopAt: state.lastStopAt,
+      lastHealthyAt: state.lastHealthyAt,
+      lastExitCode: state.lastExitCode,
+      lastError: state.lastError,
+      restartAttempts: state.restartAttempts
+    },
+    readiness,
+    preflight,
+    env: safeEnvForSnapshot(envObj),
+    logsTail: tailLog(250)
+  };
+
+  res.setHeader("Content-Type", "application/json");
+  res.setHeader("Content-Disposition", `attachment; filename="operator_snapshot_${Date.now()}.json"`);
+  res.send(JSON.stringify(snap, null, 2));
+});
+
 app.post("/api/operator/factoryReset", (req, res) => {
-  stopEngine();
-  try {
-    if (fs.existsSync(SECRETS_PATH)) fs.unlinkSync(SECRETS_PATH);
-  } catch {}
-  try {
-    if (fs.existsSync(ENV_PATH)) fs.unlinkSync(ENV_PATH);
-  } catch {}
-  try {
-    state = defaultState();
-    saveState();
-  } catch {}
+  emergencyStop();
+  try { if (fs.existsSync(SECRETS_PATH)) fs.unlinkSync(SECRETS_PATH); } catch {}
+  try { if (fs.existsSync(ENV_PATH)) fs.unlinkSync(ENV_PATH); } catch {}
+  try { state = defaultState(); saveState(); } catch {}
   res.json({ ok: true });
 });
 
+// UI
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "operator_ui.html"));
 });
 
-const OPERATOR_BIND_HOST = "127.0.0.1";
 
 app.listen(OPERATOR_PORT, OPERATOR_BIND_HOST, () => {
   ensureLogDir();
-  console.log(`Operator panel running at http://${OPERATOR_BIND_HOST}:${OPERATOR_PORT}`);
+  console.log(`Operator Control Center: http://${OPERATOR_BIND_HOST}:${OPERATOR_PORT}`);
 });
