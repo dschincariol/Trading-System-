@@ -30,9 +30,9 @@ import os
 import time
 from typing import Optional, Tuple, Dict, Any
 
-from engine.dev_core.storage import connect
-from engine.dev_core.risk_state import get_state
-from engine.dev_core.regime_compat import regime_compat_multiplier
+from engine.storage import connect
+from engine.risk_state import get_state
+from engine.regime_compat import regime_compat_multiplier
 
 MAX_POS = float(os.environ.get("MAX_POSITION_FRACTION", "0.20"))  # 20% notional
 Z_REF = float(os.environ.get("POSITION_Z_REF", "2.0"))            # z=2 => full scale (before conf)
@@ -218,7 +218,7 @@ def position_from_signal(
     # Regime compatibility (model × regime) sizing + suppression (fail-open)
     # Use model_registry if available; fallback to MODEL_NAME env.
     try:
-        from engine.dev_core.model_registry import get_active_model_name  # type: ignore
+        from engine.model_registry import get_active_model_name  # type: ignore
         model_name = str(get_active_model_name() or "").strip() or ""
     except Exception:
         model_name = ""

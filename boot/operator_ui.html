@@ -161,6 +161,33 @@
     .hr{ height:1px; background:rgba(2,6,23,.10); margin:14px 0; }
     a.link{ color:var(--primary); font-weight:900; text-decoration:none; }
     a.link:hover{ text-decoration:underline; }
+
+    /* Wizard */
+    .bar{
+      width:100%;
+      height:10px;
+      background:#e2e8f0;
+      border-radius:999px;
+      overflow:hidden;
+    }
+    .bar > div{
+      height:100%;
+      width:0%;
+      background:var(--primary);
+      transition: width .25s ease;
+    }
+    .stepLine{
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px solid rgba(2,6,23,.12);
+      background:#ffffff;
+      margin-top:8px;
+    }
+    .stepLine b{ font-size:13px; }
+    .stepDetail{ color:var(--muted); font-size:12px; margin-top:3px; white-space:pre-wrap; }
   </style>
 </head>
 <body>
@@ -188,9 +215,9 @@
             <div class="muted" id="metaLine">—</div>
           </div>
           <div class="row">
-            <button class="mode active" id="modeSafe" onclick="setMode('safe')">SAFE</button>
-            <button class="mode" id="modeShadow" onclick="setMode('shadow')">SHADOW</button>
-            <button class="mode" id="modeLive" onclick="setMode('live')">LIVE</button>
+            <button class="mode active" id="modeSafe" onclick="setMode('safe')">REVIEW</button>
+            <button class="mode" id="modeShadow" onclick="setMode('shadow')">DATA</button>
+            <button class="mode" id="modeLive" onclick="setMode('live')">TRADING</button>
           </div>
         </div>
 
@@ -199,15 +226,22 @@
           <button class="secondary" onclick="stop()">Stop</button>
           <button onclick="restart()">Restart</button>
           <button class="ghost" onclick="runInstitutional()">Institutional Check</button>
-          <button class="ghost" onclick="autoFix()">AutoFix</button>
+          <button class="ghost" onclick="repairSystem()">Repair System</button>
           <button class="ghost" onclick="clearLastError()">Clear Error</button>
           <a class="link" id="dashLink" href="#" target="_blank" rel="noopener">Open Dashboard</a>
         </div>
 
         <div class="hr"></div>
 
+        <div style="font-weight:900; font-size:14px;">Startup Wizard</div>
+        <div class="muted" id="wizardMsg">Click Start to begin. This shows progress in operator language.</div>
+        <div class="bar" style="margin-top:10px;"><div id="wizardBar"></div></div>
+        <div id="wizardSteps" style="margin-top:10px;"></div>
+
+        <div class="hr"></div>
+
         <div style="font-weight:900; font-size:14px;">Readiness</div>
-        <div class="muted">Consolidated preflight. Fix ERR items before running LIVE.</div>
+        <div class="muted">Consolidated preflight. Fix ERR items before running TRADING.</div>
         <div class="issues" id="readinessIssues"></div>
 
         <div class="hr"></div>
@@ -238,51 +272,69 @@
       <div class="card">
         <div class="titleRow">
           <div>
-            <div style="font-weight:900; font-size:14px;">Bootstrap & State</div>
-            <div class="muted">Diagnostics + persistent error state.</div>
+            <div style="font-weight:900; font-size:14px;">Logs</div>
+            <div class="muted">Tail of runtime.log (auto-refreshed).</div>
           </div>
-          <button class="ghost" onclick="refreshAll()">Refresh</button>
+          <div class="row">
+            <button class="ghost" onclick="loadLogs()">Refresh</button>
+          </div>
         </div>
-        <pre id="bootstrap">Loading…</pre>
+        <pre id="logs">(loading…)</pre>
       </div>
 
       <div class="card" style="margin-top:18px;">
         <div class="titleRow">
           <div>
-            <div style="font-weight:900; font-size:14px;">Runtime Logs (tail)</div>
-            <div class="muted">Last 200 lines of runtime.log</div>
+            <div style="font-weight:900; font-size:14px;">Secrets (encrypted at rest)</div>
+            <div class="muted">Keys are stored AES-256-GCM (host-derived key). Values are never shown.</div>
           </div>
-          <button class="ghost" onclick="loadLogs()">Reload</button>
-        </div>
-        <pre id="logs">Loading…</pre>
-      </div>
-
-      <div class="card" style="margin-top:18px;">
-        <div class="titleRow">
-          <div>
-            <div style="font-weight:900; font-size:14px;">Secrets</div>
-            <div class="muted">Stored encrypted at rest. Keys only shown.</div>
+          <div class="row">
+            <button class="ghost" onclick="loadSecrets()">Refresh</button>
           </div>
-          <button class="ghost" onclick="loadSecrets()">Reload</button>
         </div>
 
         <div class="kvs" style="margin-top:10px;">
-          <input id="secretKey" placeholder="Key (e.g. POLYGON_API_KEY)"/>
-          <input id="secretValue" placeholder="Value" type="password"/>
+          <div>
+            <div class="muted">Existing Keys</div>
+            <div style="font-weight:900; margin-top:6px;" id="secretKeys">—</div>
+          </div>
+          <div>
+            <div class="muted">Add/Update Secret</div>
+            <input id="secretKey" placeholder="Key (e.g. IBKR_PASSWORD)"/>
+            <input id="secretValue" placeholder="Value" style="margin-top:8px;"/>
+            <div class="row" style="margin-top:10px;">
+              <button onclick="saveSecret()">Save Secret</button>
+            </div>
+            <div class="muted" id="secretsMsg" style="margin-top:10px;"></div>
+          </div>
         </div>
-        <div class="row" style="margin-top:10px;">
-          <button onclick="saveSecret()">Save Secret</button>
-          <span class="muted" id="secretsMsg">—</span>
-        </div>
-        <div class="muted" style="margin-top:10px;">Stored keys: <span id="secretKeys">—</span></div>
       </div>
 
+      <div class="card" style="margin-top:18px;">
+        <div class="titleRow">
+          <div>
+            <div style="font-weight:900; font-size:14px;">Bootstrap Snapshot</div>
+            <div class="muted">Operator + engine bootstrap diagnostic.</div>
+          </div>
+          <div class="row">
+            <button class="ghost" onclick="loadBootstrap()">Refresh</button>
+          </div>
+        </div>
+        <pre id="bootstrap">(loading…)</pre>
+      </div>
     </div>
 
   </div>
 
 <script>
-let selectedMode = "safe";
+let selectedMode = "safe"; // safe | shadow | live
+
+function esc(s){
+  return String(s ?? "")
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;");
+}
 
 async function jget(url){
   const r = await fetch(url, { cache: "no-store" });
@@ -291,9 +343,8 @@ async function jget(url){
 async function jpost(url, body){
   const r = await fetch(url, {
     method:"POST",
-    headers: { "Content-Type":"application/json" },
-    body: body ? JSON.stringify(body) : "{}",
-    cache: "no-store"
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify(body || {})
   });
   return await r.json();
 }
@@ -320,7 +371,7 @@ function renderIssues(container, issues){
     const cls = it.level === "error" ? "err" : (it.level === "warn" ? "warn" : "info");
     const code = it.code ? String(it.code) : "issue";
     const msg = it.message ? String(it.message) : "";
-    el.innerHTML = `<span class="badge ${cls}">${it.level.toUpperCase()}</span><div class="issueText"><b>${code}</b>: ${msg}</div>`;
+    el.innerHTML = `<span class="badge ${cls}">${it.level.toUpperCase()}</span><div class="issueText"><b>${esc(code)}</b>: ${esc(msg)}</div>`;
     container.appendChild(el);
   }
 }
@@ -340,6 +391,42 @@ async function updateDashboardLink(){
     document.getElementById("dashLink").href = `http://${host}:${port}/ui/dashboard.html`;
   } catch {
     document.getElementById("dashLink").href = "#";
+  }
+}
+
+function renderWizard(steps, ok){
+  const box = document.getElementById("wizardSteps");
+  box.innerHTML = "";
+
+  if(!steps || steps.length === 0){
+    document.getElementById("wizardBar").style.width = "0%";
+    document.getElementById("wizardMsg").innerText = "Click Start to begin.";
+    return;
+  }
+
+  let done = 0;
+  for(const s of steps){
+    if(s && s.ok) done += 1;
+  }
+  const pct = Math.round((done / steps.length) * 100);
+  document.getElementById("wizardBar").style.width = `${pct}%`;
+  document.getElementById("wizardMsg").innerText = ok ? "Startup complete." : "Startup blocked. Read the step that failed.";
+
+  for(const s of steps){
+    const el = document.createElement("div");
+    el.className = "stepLine";
+    const dot = s.ok ? "ok" : "fail";
+    const title = s.label || s.id || "step";
+    let detail = s.detail;
+    if(typeof detail === "object") detail = JSON.stringify(detail, null, 2);
+    el.innerHTML = `
+      <span class="dot ${dot}"></span>
+      <div>
+        <b>${esc(title)}</b>
+        <div class="stepDetail">${esc(detail || "")}</div>
+      </div>
+    `;
+    box.appendChild(el);
   }
 }
 
@@ -366,7 +453,6 @@ async function updateStatusAndReadiness(){
 
   renderIssues(document.getElementById("readinessIssues"), rd.issues || []);
 
-  // data pill: if running + health ok => warn until institutional confirms
   if(st.status !== "RUNNING"){
     document.getElementById("txtData").innerText = "Data: n/a";
     setPill(document.getElementById("dotData"), "fail");
@@ -389,7 +475,6 @@ async function runInstitutional(){
   if(!j.healthOk) issues.push({ level:"error", code:"HEALTH_FAIL", message:"Backend not healthy (/api/health)" });
   if(!j.dataFlowing) issues.push({ level:"error", code:"DATA_NOT_FLOWING", message:"Telemetry did not change (data not flowing)" });
   for(const e of (j.errors || [])){
-    // already included above; keep as info
     issues.push({ level:"info", code:"DETAIL", message:String(e) });
   }
 
@@ -476,29 +561,47 @@ async function saveSecret(){
 
 async function start(){
   if(selectedMode === "live"){
-    const c = prompt("LIVE mode enables real execution.\nType LIVE to confirm:");
-    if(c !== "LIVE") return;
+    const c = prompt("TRADING mode enables real execution.\nType TRADE to confirm:");
+    if(c !== "TRADE") return;
   }
-  await jpost("/api/operator/start", { mode: selectedMode });
+
+  renderWizard([{ ok:false, label:"Starting…", detail:"sending start request" }], false);
+
+  const r = await jpost("/api/operator/start", { mode: selectedMode });
+
+  if(r && r.steps){
+    renderWizard(r.steps, !!r.ok);
+  } else {
+    renderWizard([{ ok:false, label:"Start failed", detail: JSON.stringify(r || {}, null, 2) }], false);
+  }
+
   await refreshAll();
 }
 
 async function stop(){
   await jpost("/api/operator/stop");
+  renderWizard([], false);
   await refreshAll();
 }
 
 async function restart(){
   await jpost("/api/operator/restart", { mode: selectedMode });
+  renderWizard([{ ok:false, label:"Restarting…", detail:"backend restarting" }], false);
   await refreshAll();
 }
 
-async function autoFix(){
+async function repairSystem(){
   const r = await jpost("/api/operator/autofix");
-  if(r && r.ok){
-    alert("AutoFix: OK");
+  if(r && r.steps){
+    const steps = (r.steps || []).map((s) => ({
+      ok: !!s.ok,
+      label: s.message || s.kind || "step",
+      detail: (typeof s.details === "string") ? s.details : JSON.stringify(s.details || "", null, 2)
+    }));
+    renderWizard(steps, !!r.ok);
+    alert(r.ok ? "Repair: OK" : "Repair: PARTIAL/FAILED (see wizard steps)");
   } else {
-    alert("AutoFix: FAILED");
+    alert("Repair: FAILED");
   }
   await refreshAll();
 }
@@ -532,6 +635,7 @@ setInterval(async () => {
   await loadConfig();
   await loadSecrets();
   setMode(selectedMode);
+  renderWizard([], false);
 })();
 </script>
 

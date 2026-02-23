@@ -25,7 +25,7 @@ from typing import Dict, Any, Tuple, Optional, List
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-from engine.dev_core.storage import connect, init_db
+from engine.storage import connect, init_db
 
 SYMBOLS = ["SPY", "BTC", "OIL"]
 HORIZONS = [300, 3600]

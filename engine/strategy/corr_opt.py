@@ -149,7 +149,7 @@ def _build_covariance(con, syms: List[str], lookback: int) -> Tuple[List[List[fl
     Σ_ij = corr(i,j) * vol_i * vol_j
     Returns (Sigma, vols)
     """
-    from engine.dev_core.risk import realized_vol_from_prices, corr_from_prices
+    from engine.risk import realized_vol_from_prices, corr_from_prices
 
     n = len(syms)
     vols = []
@@ -241,7 +241,7 @@ def corr_aware_optimize_desired(
     Sigma, vols = _build_covariance(con, syms, lookback=int(lookback))
 
     # if corr exceeds corr_max, inflate covariance magnitude for that pair (soft constraint)
-    from engine.dev_core.risk import corr_from_prices
+    from engine.risk import corr_from_prices
     cm = float(max(0.0, min(0.999, float(corr_max))))
     for i in range(n):
         for j in range(i + 1, n):

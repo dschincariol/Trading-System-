@@ -12,7 +12,7 @@ import os
 import logging
 from typing import Tuple, List, Dict, Any
 
-from engine.dev_core.storage import (
+from engine.storage import (
     connect,
     init_db,
     acquire_job_lock,
@@ -22,27 +22,27 @@ from engine.dev_core.storage import (
     put_event,
 )
 
-from engine.dev_core.portfolio import compute_rebalance, get_portfolio_snapshot
+from engine.portfolio import compute_rebalance, get_portfolio_snapshot
 
 try:
-    from engine.dev_core.portfolio import build_portfolio_intents, place_order
+    from engine.portfolio import build_portfolio_intents, place_order
 except Exception as e:
     raise RuntimeError(
         "portfolio_rebalance requires build_portfolio_intents() and place_order() "
         "to exist in dev_core.portfolio"
     ) from e
 
-from engine.dev_core.kill_switch import execution_allowed, activate
-from engine.dev_core.model_v2 import get_current_regime
-from engine.dev_core.rules_engine import evaluate_rules
-from engine.dev_core.regime_size import regime_capital_scale
-from engine.dev_core.opportunity_allocation import opportunity_weight
+from engine.kill_switch import execution_allowed, activate
+from engine.model_v2 import get_current_regime
+from engine.rules_engine import evaluate_rules
+from engine.regime_size import regime_capital_scale
+from engine.opportunity_allocation import opportunity_weight
 
 # ------            -- ------------------------------------------------------
 # Optional health gate (fail-closed if present)
 # ------            -- ------------------------------------------------------
 try:
-    from engine.dev_core.health import get_health_snapshot
+    from engine.health import get_health_snapshot
 except Exception:
     def get_health_snapshot() -> Dict[str, Any]:
         return {"ok": True}

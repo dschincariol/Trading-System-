@@ -9,8 +9,8 @@ import math
 import os
 import logging
 
-from engine.dev_core.storage import connect, init_db
-from engine.dev_core.factor_universe import put_factor_feature
+from engine.storage import connect, init_db
+from engine.factor_universe import put_factor_feature
 
 LOG = logging.getLogger("compute_earnings_proximity")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))

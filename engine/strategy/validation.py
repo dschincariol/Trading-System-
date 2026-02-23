@@ -1,8 +1,8 @@
 # dev_core/validation.py
 import json
 import time
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS predictions (

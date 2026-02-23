@@ -12,7 +12,7 @@ Interface:
 import os
 from typing import Dict, List
 
-from engine.dev_core import portfolio as P
+from engine import portfolio as P
 
 NAME = "conservative"
 

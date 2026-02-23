@@ -3,8 +3,8 @@ import os
 import time
 from typing import Any, Dict, Optional, Tuple
 
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 SCOPES = {"global", "symbol", "regime"}
 
@@ -183,7 +183,7 @@ def set_kill_switch(
 
     owns = False
     if con is None:
-        from engine.dev_core.storage import init_db
+        from engine.storage import init_db
         init_db()
         con = connect()
         owns = True
@@ -315,14 +315,14 @@ def execution_allowed(
 
     try:
         try:
-            from engine.dev_core.storage import init_db
+            from engine.storage import init_db
             init_db()
         except Exception:
             pass
 
         # Capital guard
         try:
-            from engine.dev_core.capital_guard import trading_allowed as _capital_trading_allowed
+            from engine.capital_guard import trading_allowed as _capital_trading_allowed
             if not _capital_trading_allowed(con=con):
                 return False, "capital_guard_block", {"scope": "global", "key": "global"}
         except Exception:

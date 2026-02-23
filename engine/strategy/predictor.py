@@ -9,21 +9,21 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
-from engine.dev_core.learning import (
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.learning import (
     confidence_from_weight,
     confidence_from_n,
     get_global_prior,
     learn_relevance_stats,
 )
-from engine.dev_core.model_v2 import get_regime_prior, get_spillover_betas, get_current_regime
+from engine.model_v2 import get_regime_prior, get_spillover_betas, get_current_regime
 
 # ------            -- ------------------------------------------------------
 # Option A: supervised embedding regressor (OPT-IN)
 # ------            -- ------------------------------------------------------
-from engine.dev_core.embed_regressor import predict_with_embed_model
-from engine.dev_core.feature_expansion import build_feature_vector
+from engine.embed_regressor import predict_with_embed_model
+from engine.feature_expansion import build_feature_vector
 
 _USE_EMBED_REGRESSOR = os.environ.get("USE_EMBED_REGRESSOR", "0") == "1"
 MODEL_NAME = os.environ.get("MODEL_NAME", "embed_regressor").strip() or "embed_regressor"

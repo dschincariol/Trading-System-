@@ -9,7 +9,7 @@ Pure read-only DB queries.
 
 import json
 import time
-from engine.dev_core.storage import connect as _db_connect
+from engine.runtime.storage import connect as _db_connect
 
 
 def _table_exists(con, name: str) -> bool:

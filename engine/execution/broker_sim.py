@@ -27,8 +27,8 @@ import math
 import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 # -----------------------------
 # Small numeric guards
@@ -432,7 +432,7 @@ def _write_fill(
 
     # --- execution ledger mirror (for slippage + pnl attribution parity) ---
     try:
-        from engine.dev_core.execution_ledger import log_fill
+        from engine.execution_ledger import log_fill
 
         log_fill(
             client_order_id=f"sim_{int(source_order_id) if source_order_id is not None else 'override'}_{symbol}",
@@ -505,7 +505,7 @@ def apply_new_portfolio_orders(
             orders = list(override_orders or [])
         else:
             # Read the latest *row-per-order* portfolio_orders batch (no orders_json dependency)
-            from engine.dev_core.portfolio_execution_intents import load_latest_execution_intents
+            from engine.portfolio_execution_intents import load_latest_execution_intents
 
             batch = load_latest_execution_intents(con)
             orders = list(batch.get("intents") or [])
@@ -643,7 +643,7 @@ def apply_new_portfolio_orders(
 
             # Kill switch (global/symbol) is enforced here as a last line of defense
             try:
-                from engine.dev_core.kill_switch import execution_allowed
+                from engine.kill_switch import execution_allowed
 
                 allow, _, _ = execution_allowed(con=con, symbol=symbol, regime=None)
                 if not allow:
@@ -768,7 +768,7 @@ def apply_new_portfolio_orders(
             # --- execution ledger mirror (ensure metrics + attribution work in sim) ---
             # Create/refresh execution_orders row keyed by the same client_order_id used by _write_fill.
             try:
-                from engine.dev_core.execution_ledger import log_submit
+                from engine.execution_ledger import log_submit
 
                 _extra = dict(o or {})
                 try:

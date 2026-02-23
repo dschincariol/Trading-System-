@@ -22,14 +22,14 @@ import time
 import math
 from typing import Dict, List, Optional, Tuple
 
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
-from engine.dev_core.strategy_selector import choose_strategy_name, load_strategy_module
-from engine.dev_core.universe import get_active_symbols
-from engine.dev_core.symbol_blacklist import is_blacklisted
-from engine.dev_core.portfolio_risk_gate import apply_portfolio_risk_gate
-from engine.dev_core.risk_state import get_state
-from engine.dev_core.factor_universe import _get_feature_asof as _get_factor_feature_asof
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.strategy_selector import choose_strategy_name, load_strategy_module
+from engine.universe import get_active_symbols
+from engine.symbol_blacklist import is_blacklisted
+from engine.portfolio_risk_gate import apply_portfolio_risk_gate
+from engine.risk_state import get_state
+from engine.factor_universe import _get_feature_asof as _get_factor_feature_asof
 
 # -----------------------------
 # Strategy controls (env)
@@ -465,7 +465,7 @@ def _exec_realism_factor(con, symbol: str, now_ms: int) -> Tuple[float, Dict[str
 
     # global stress (read-only)
     try:
-        from engine.dev_core.market_stress import get_market_stress_snapshot
+        from engine.market_stress import get_market_stress_snapshot
 
         ms = get_market_stress_snapshot(con=con, ts_ms=int(now_ms)) or {}
         stress = float(ms.get("stress_score", 0.0))
@@ -514,7 +514,7 @@ def _execution_realism_factor(con, symbol: str, now_ms: int) -> Tuple[float, Dic
 
     # 2) Optional market stress + volatility proxies via tech_indicators (price-only)
     try:
-        from engine.dev_core.tech_indicators import compute_tech_features
+        from engine.tech_indicators import compute_tech_features
 
         tf = compute_tech_features(str(symbol), int(now_ms)) or {}
     except Exception:
@@ -1284,7 +1284,7 @@ def compute_rebalance() -> Dict:
 
         # capital guard (hard stop) — portfolio is intent-only, but still should not churn state when halted
         try:
-            from engine.dev_core.capital_guard import trading_allowed
+            from engine.capital_guard import trading_allowed
 
             if not trading_allowed(con):
                 return {"ok": False, "error": "trading halted by capital guard"}
@@ -1498,7 +1498,7 @@ def compute_rebalance() -> Dict:
 
                 # --- Regime Vector Injection ---
                 try:
-                    from engine.dev_core.regime_stack import compute_regime_vector, regime_compatibility
+                    from engine.regime_stack import compute_regime_vector, regime_compatibility
 
                     regime_vector = compute_regime_vector(s)
 
@@ -1610,7 +1610,7 @@ def compute_rebalance() -> Dict:
                 regime_name = "MID"
 
                 try:
-                    from engine.dev_core.regime_size import regime_capital_scale
+                    from engine.regime_size import regime_capital_scale
 
                     _rs = regime_capital_scale(con=con, anchor=str(PORTFOLIO_REGIME_ANCHOR))
                     regime_name = str((_rs or {}).get("regime") or "MID").upper()
@@ -1624,7 +1624,7 @@ def compute_rebalance() -> Dict:
                 else:
                     gamma_eff *= float(PORTFOLIO_CORR_OPT_GAMMA_MID)
 
-                from engine.dev_core.corr_opt import corr_aware_optimize_desired
+                from engine.corr_opt import corr_aware_optimize_desired
 
                 desired = corr_aware_optimize_desired(
                     con,
@@ -1648,7 +1648,7 @@ def compute_rebalance() -> Dict:
 
         elif PORTFOLIO_CORR_PRUNE and len(desired) > 1:
             try:
-                from engine.dev_core.risk import corr_from_prices
+                from engine.risk import corr_from_prices
 
                 kept = []
                 items = sorted(
@@ -1684,7 +1684,7 @@ def compute_rebalance() -> Dict:
         # A) VOL TARGETING (opt-in): scale weights by realized vol
         # ---            -- ------------------------------------------------------
         try:
-            from engine.dev_core.risk import PORTFOLIO_USE_VOL_TARGET, realized_vol_from_prices, vol_scale_weight
+            from engine.risk import PORTFOLIO_USE_VOL_TARGET, realized_vol_from_prices, vol_scale_weight
 
             if PORTFOLIO_USE_VOL_TARGET:
                 for sym in list(desired.keys()):
@@ -1795,7 +1795,7 @@ def compute_rebalance() -> Dict:
         # ---            -- ------------------------------------------------------
         try:
             if PORTFOLIO_USE_SOCIAL_GATE and desired:
-                from engine.dev_core.social_risk import social_gate_for_symbol
+                from engine.social_risk import social_gate_for_symbol
 
                 for sym in list(desired.keys()):
                     g = social_gate_for_symbol(
@@ -1840,12 +1840,12 @@ def compute_rebalance() -> Dict:
 
         # ---            -- ------------------------------------------------------
         # C) VOL-OF-VOL GATE (opt-in): per-symbol compression in unstable regimes
-        # Uses price-only proxy from engine.dev_core.tech_indicators (if present).
+        # Uses price-only proxy from engine.tech_indicators (if present).
         # ---            -- ------------------------------------------------------
         try:
             if PORTFOLIO_USE_VOV_GATE and desired:
                 try:
-                    from engine.dev_core.tech_indicators import compute_tech_features
+                    from engine.tech_indicators import compute_tech_features
                 except Exception:
                     compute_tech_features = None
 
@@ -1889,8 +1889,8 @@ def compute_rebalance() -> Dict:
         # (must happen BEFORE orders are emitted)
         # ---            -- ------------------------------------------------------
         try:
-            from engine.dev_core.size_policy import load_latest_size_policy, size_factor
-            from engine.dev_core.drawdown_state import get_current_drawdown
+            from engine.size_policy import load_latest_size_policy, size_factor
+            from engine.drawdown_state import get_current_drawdown
 
             pol = load_latest_size_policy(con)
             if pol:
@@ -1968,8 +1968,8 @@ def compute_rebalance() -> Dict:
         # Phase 6: REGIME-ADAPTIVE CAPITAL SCALING (base * confidence * VIX * drawdown)
         # ---            -- ------------------------------------------------------
         try:
-            from engine.dev_core.regime_size import regime_capital_scale
-            from engine.dev_core.opportunity_allocation import opportunity_weight  # imported in original; preserved
+            from engine.regime_size import regime_capital_scale
+            from engine.opportunity_allocation import opportunity_weight  # imported in original; preserved
 
             _rs = regime_capital_scale(con=con, anchor=str(PORTFOLIO_REGIME_ANCHOR))
             mult = float((_rs or {}).get("final_mult", 1.0))
@@ -2192,7 +2192,7 @@ def compute_rebalance() -> Dict:
 
         # update live drawdown meta (from broker if available)
         try:
-            from engine.dev_core.broker_sim import broker_snapshot
+            from engine.broker_sim import broker_snapshot
 
             snap = broker_snapshot(limit_fills=0)
             if snap and snap.get("ok"):

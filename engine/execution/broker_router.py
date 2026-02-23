@@ -41,24 +41,24 @@ except Exception:
     _ALLOWED_JOBS = {}  # type: ignore
 
 try:
-    from engine.dev_core.kill_switch import snapshot as _kill_switch_snapshot  # type: ignore
+    from engine.kill_switch import snapshot as _kill_switch_snapshot  # type: ignore
 except Exception:
     _kill_switch_snapshot = None  # type: ignore
 
 try:
-    from engine.dev_core.execution_mode import get_execution_mode as _get_execution_mode  # type: ignore
+    from engine.execution_mode import get_execution_mode as _get_execution_mode  # type: ignore
 except Exception:
     _get_execution_mode = None  # type: ignore
 
 # Best-effort DB access for realized slippage distribution
 try:
-    from engine.dev_core.storage import connect  # type: ignore
+    from engine.storage import connect  # type: ignore
 except Exception:
     connect = None  # type: ignore
 
 # Adaptive slicing (best-effort; router remains loadable)
 try:
-    from engine.dev_core.adaptive_order_slicer import AdaptiveOrderSlicer  # type: ignore
+    from engine.adaptive_order_slicer import AdaptiveOrderSlicer  # type: ignore
 except Exception:
     AdaptiveOrderSlicer = None  # type: ignore
 
@@ -68,23 +68,23 @@ except Exception:
 # ============================================================
 
 try:
-    from engine.dev_core.broker_sim import apply_new_portfolio_orders as _sim_apply
+    from engine.broker_sim import apply_new_portfolio_orders as _sim_apply
 except Exception:
     _sim_apply = None
 
 try:
-    from engine.dev_core.broker_alpaca_rest import apply_latest_portfolio_orders_live as _alpaca_apply
+    from engine.broker_alpaca_rest import apply_latest_portfolio_orders_live as _alpaca_apply
 except Exception:
     _alpaca_apply = None
 
 try:
-    from engine.dev_core.broker_ibkr_gateway import apply_latest_portfolio_orders_live as _ibkr_apply
+    from engine.broker_ibkr_gateway import apply_latest_portfolio_orders_live as _ibkr_apply
 except Exception:
     _ibkr_apply = None
 
 # Pre-live reconciliation gate (hard block on mismatch)
 try:
-    from engine.dev_core.position_reconcile import pre_live_position_reconcile as _prelive_reconcile
+    from engine.position_reconcile import pre_live_position_reconcile as _prelive_reconcile
 except Exception:
     _prelive_reconcile = None
 

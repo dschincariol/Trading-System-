@@ -528,7 +528,7 @@ def get_social_blocks(limit: int = 200):
 
 def get_validation_rows():
     try:
-        from engine.dev_core.validation import get_validation as _get_validation
+        from engine.validation import get_validation as _get_validation
         return {"ok": True, "rows": _get_validation()}
     except Exception as e:
         return {"ok": False, "error": str(e)}

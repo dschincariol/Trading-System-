@@ -42,9 +42,9 @@ from sklearn.isotonic import IsotonicRegression
 import torch
 import torch.nn as nn
 
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
-from engine.dev_core.feature_expansion import build_feature_vector, feature_set_tag
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.feature_expansion import build_feature_vector, feature_set_tag
 from ops.asset_map import asset_class_for_symbol
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS embed_models2 (

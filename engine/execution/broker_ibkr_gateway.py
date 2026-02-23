@@ -32,12 +32,12 @@ import json
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
-from engine.dev_core.kill_switch import execution_allowed
-from engine.dev_core.risk_state import get_state, set_state
-from engine.dev_core.execution_ledger import log_submit, log_fill
-from engine.dev_core.alpha_lifecycle_engine import apply_alpha_lifecycle
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.kill_switch import execution_allowed
+from engine.risk_state import get_state, set_state
+from engine.execution_ledger import log_submit, log_fill
+from engine.alpha_lifecycle_engine import apply_alpha_lifecycle
 
 # Execution gate (fail-closed)
 try:
@@ -51,12 +51,12 @@ except Exception:
     _ALLOWED_JOBS = {}  # type: ignore
 
 try:
-    from engine.dev_core.kill_switch import snapshot as _kill_switch_snapshot  # type: ignore
+    from engine.kill_switch import snapshot as _kill_switch_snapshot  # type: ignore
 except Exception:
     _kill_switch_snapshot = None  # type: ignore
 
 try:
-    from engine.dev_core.execution_mode import get_execution_mode as _get_execution_mode  # type: ignore
+    from engine.execution_mode import get_execution_mode as _get_execution_mode  # type: ignore
 except Exception:
     _get_execution_mode = None  # type: ignore
 
@@ -75,7 +75,7 @@ SLEEP_BETWEEN_ORDERS_S = float(os.environ.get("IBKR_SLEEP_BETWEEN_ORDERS_S", "0.
 # ============================================================
 
 def _latest_order_row(con) -> Optional[Tuple[int, int, list]]:
-    from engine.dev_core.portfolio_execution_intents import load_latest_execution_intents
+    from engine.portfolio_execution_intents import load_latest_execution_intents
     b = load_latest_execution_intents(con)
     orders = list(b.get("intents") or [])
     if not orders:

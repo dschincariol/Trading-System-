@@ -13,7 +13,7 @@ import json
 import sys
 import time
 
-from engine.dev_core.storage import connect, init_db
+from engine.storage import connect, init_db
 
 def main():
     con = connect()

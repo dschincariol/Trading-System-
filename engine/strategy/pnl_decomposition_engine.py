@@ -4,7 +4,7 @@ import json
 import time
 from typing import Any, Dict, Optional, Tuple
 
-from engine.dev_core.storage import connect
+from engine.storage import connect
 
 
 def _now_ms() -> int:

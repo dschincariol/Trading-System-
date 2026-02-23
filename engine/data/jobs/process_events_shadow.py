@@ -55,7 +55,7 @@ if torch.cuda.is_available():
 # -----------------------------------------------------------------------------
 # Project imports
 # -----------------------------------------------------------------------------
-from engine.dev_core.storage import (
+from engine.storage import (
     connect,
     connect_ro,
     init_db,
@@ -65,18 +65,18 @@ from engine.dev_core.storage import (
     put_job_heartbeat,
 )
 
-from engine.dev_core.universe import get_active_symbols
-from engine.dev_core.rules_engine import evaluate_rules
-from engine.dev_core.kill_switch import execution_allowed
+from engine.universe import get_active_symbols
+from engine.rules_engine import evaluate_rules
+from engine.kill_switch import execution_allowed
 
 # Optional heavy subsystems
 try:
-    from engine.dev_core.temporal_predictor import predict_temporal_shadow_for_event
+    from engine.temporal_predictor import predict_temporal_shadow_for_event
 except Exception:
     predict_temporal_shadow_for_event = None
 
 try:
-    from engine.dev_core.clustering import assign_cluster
+    from engine.clustering import assign_cluster
 except Exception:
     assign_cluster = None
 

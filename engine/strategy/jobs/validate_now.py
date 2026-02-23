@@ -1,5 +1,5 @@
 # validate_now.py
-from engine.dev_core.validation import (
+from engine.validation import (
     init_validation_db,
     compute_validation_scores,
     compute_model_metrics,

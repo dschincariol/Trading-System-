@@ -13,7 +13,7 @@ This enables testing storage + inference + shadow logging end-to-end.
 """
 
 import numpy as np
-from engine.dev_core.rl_strategy_policy import init_rl_policy_db, upsert_policy
+from engine.rl_strategy_policy import init_rl_policy_db, upsert_policy
 
 FEATURES = ["prev_drawdown", "avg_conf", "avg_abs_z", "n_candidates"]
 

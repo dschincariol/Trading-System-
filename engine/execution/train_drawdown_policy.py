@@ -18,9 +18,9 @@ import time
 import math
 from typing import List, Tuple, Optional
 
-from engine.dev_core.storage import connect, init_db
+from engine.storage import connect, init_db
 
-from engine.dev_core.training_guard import training_allowed
+from engine.training_guard import training_allowed
 
 if not training_allowed():
     print("[training_guard] training disabled")

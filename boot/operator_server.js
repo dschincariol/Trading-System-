@@ -8,6 +8,8 @@
 // - Readiness + health polling
 // - Start/Stop/Restart + Emergency Stop
 // - Log tail + snapshot export
+// - AutoFix/Repair (pip install, DB touch, quick self-heal)
+// - Institutional Check (health + telemetry changes)
 
 const express = require("express");
 const path = require("path");
@@ -152,6 +154,12 @@ function normalizeBool(v) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function dashBaseUrlFromEnv(envObj) {
+  const host = String(envObj.DASHBOARD_HOST || "127.0.0.1");
+  const port = Number(envObj.DASHBOARD_PORT || 8000);
+  return `http://${host}:${port}`;
 }
 
 // --------------------------------------------------
@@ -496,8 +504,17 @@ async function checkPortAvailable(port, host = "127.0.0.1") {
 
 function isPathWritable(p) {
   try {
-    const dir = fs.statSync(p).isDirectory() ? p : path.dirname(p);
-    fs.accessSync(dir, fs.constants.W_OK);
+    // If p is a file path that doesn't exist yet, check its parent directory.
+    let target = p;
+
+    try {
+      const st = fs.statSync(p);
+      if (!st.isDirectory()) target = path.dirname(p);
+    } catch {
+      target = path.dirname(p);
+    }
+
+    fs.accessSync(target, fs.constants.W_OK);
     return true;
   } catch {
     return false;
@@ -514,6 +531,12 @@ function pythonAvailable() {
   } catch (e) {
     return { ok: false, python, version: "", error: String(e) };
   }
+}
+
+function resolveDbPathFromSanitized(sanitized) {
+  const dbPath = String(sanitized.DB_PATH || "./trading.db");
+  const resolvedDb = path.isAbsolute(dbPath) ? dbPath : path.join(ROOT, dbPath);
+  return { dbPath, resolvedDb };
 }
 
 async function getPreflight(mode = "safe") {
@@ -567,13 +590,12 @@ async function getPreflight(mode = "safe") {
   }
 
   // DB path writable
-  const dbPath = String(sanitized.DB_PATH || "./trading.db");
-  const resolvedDb = path.isAbsolute(dbPath) ? dbPath : path.join(ROOT, dbPath);
+  const { dbPath, resolvedDb } = resolveDbPathFromSanitized(sanitized);
   checks.push({
     id: "db",
     label: "DB path writable",
     ok: isPathWritable(resolvedDb),
-    details: dbPath
+    details: resolvedDb
   });
 
   // Config validity
@@ -687,6 +709,64 @@ function safeEnvForSnapshot(envObj) {
 }
 
 // --------------------------------------------------
+// AutoFix / Repair
+// --------------------------------------------------
+
+function runPipInstallRequirements() {
+  const python = pickPythonCmd();
+  const reqPath = path.join(ROOT, "requirements.txt");
+  if (!fs.existsSync(reqPath)) {
+    return { ok: false, kind: "REQ_MISSING", message: "requirements.txt missing", details: reqPath };
+  }
+
+  const r = spawnSync(python, ["-m", "pip", "install", "-r", reqPath], {
+    cwd: ROOT,
+    stdio: "pipe",
+    env: process.env
+  });
+
+  const out = (r.stdout ? String(r.stdout) : "") + (r.stderr ? String(r.stderr) : "");
+  const ok = r.status === 0;
+
+  return { ok, kind: ok ? "PIP_OK" : "PIP_FAIL", message: ok ? "pip install -r requirements.txt ok" : "pip install failed", details: out.trim() };
+}
+
+function touchDbFile(resolvedDb) {
+  try {
+    const dir = path.dirname(resolvedDb);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(resolvedDb)) fs.writeFileSync(resolvedDb, "");
+    return { ok: true, kind: "DB_OK", message: "DB file present", details: resolvedDb };
+  } catch (e) {
+    return { ok: false, kind: "DB_FAIL", message: "Could not create DB file", details: String(e) };
+  }
+}
+
+// --------------------------------------------------
+// Institutional Check (health + telemetry changes)
+// --------------------------------------------------
+
+async function checkTelemetryFlow() {
+  const envObj = readEnv();
+  const base = dashBaseUrlFromEnv(envObj);
+  const url = `${base}/api/telemetry`;
+
+  const a = await httpGetJson(url);
+  if (!a.ok) return { ok: false, url, detail: "telemetry not responding" };
+
+  await sleep(1200);
+
+  const b = await httpGetJson(url);
+  if (!b.ok) return { ok: false, url, detail: "telemetry not responding (second sample)" };
+
+  const sa = JSON.stringify(a.json || {});
+  const sb = JSON.stringify(b.json || {});
+  const changed = sa !== sb;
+
+  return { ok: changed, url, detail: changed ? "telemetry changed" : "telemetry unchanged" };
+}
+
+// --------------------------------------------------
 // API
 // --------------------------------------------------
 
@@ -714,6 +794,40 @@ app.get("/api/operator/bootstrap", (req, res) => {
     entryExists: fs.existsSync(ENTRY),
     logDirExists: fs.existsSync(LOG_DIR),
     operator: { host: OPERATOR_BIND_HOST, port: OPERATOR_PORT }
+  });
+});
+
+// UI expects this endpoint
+app.get("/api/operator/bootstrapStatus", async (req, res) => {
+  const envObj = readEnv();
+  const readiness = await getReadiness();
+  const preflight = await getPreflight(state.lastMode || "safe");
+  const health = (status() === "RUNNING") ? await verifyHealth() : null;
+
+  res.json({
+    at: nowIso(),
+    operator: {
+      host: OPERATOR_BIND_HOST,
+      port: OPERATOR_PORT,
+      node: process.version,
+      platform: os.platform(),
+      productionMode: PRODUCTION_MODE
+    },
+    engine: {
+      status: status(),
+      entry: ENTRY,
+      lastMode: state.lastMode || "safe",
+      lastStartAt: state.lastStartAt,
+      lastStopAt: state.lastStopAt,
+      lastHealthyAt: state.lastHealthyAt,
+      lastExitCode: state.lastExitCode,
+      lastError: state.lastError,
+      restartAttempts: state.restartAttempts
+    },
+    dashboard: { baseUrl: dashBaseUrlFromEnv(envObj) },
+    readiness,
+    preflight,
+    health
   });
 });
 
@@ -767,42 +881,142 @@ app.get("/api/operator/preflight", async (req, res) => {
   res.json(r);
 });
 
+// UI expects this endpoint
+app.get("/api/operator/institutionalCheck", async (req, res) => {
+  ensureEnvFile();
+  const envObj = readEnv();
+  const { sanitized, issues } = validateAndSanitizeEnv(envObj);
+
+  const entryExists = fs.existsSync(ENTRY);
+  const configValid = !issues.some((i) => i.level === "error");
+
+  const { resolvedDb } = resolveDbPathFromSanitized(sanitized);
+  const dbPathWritable = isPathWritable(resolvedDb);
+
+  const health = (status() === "RUNNING") ? await verifyHealth() : { ok: false };
+  const healthOk = !!(health && health.ok);
+
+  const telemetry = (status() === "RUNNING") ? await checkTelemetryFlow() : { ok: false, detail: "engine not running" };
+  const dataFlowing = !!(telemetry && telemetry.ok);
+
+  const errors = [];
+  if (!configValid) errors.push("config invalid");
+  if (!entryExists) errors.push("entry missing");
+  if (!dbPathWritable) errors.push("db not writable");
+  if (!healthOk) errors.push("health not ok");
+  if (!dataFlowing) errors.push("telemetry not changing");
+
+  res.json({
+    ok: configValid && entryExists && healthOk && dataFlowing,
+    configValid,
+    entryExists,
+    dbPathWritable,
+    healthOk,
+    dataFlowing,
+    details: {
+      dashboardBase: dashBaseUrlFromEnv(sanitized),
+      telemetry: telemetry || null,
+      health: health || null,
+      resolvedDb
+    },
+    errors
+  });
+});
+
+// UI calls this (AutoFix/Repair)
+app.post("/api/operator/autofix", async (req, res) => {
+  const steps = [];
+  try {
+    ensureEnvFile();
+    ensureLogDir();
+
+    // Normalize env first
+    const envObj = readEnv();
+    const { sanitized, issues } = validateAndSanitizeEnv(envObj);
+    if (!issues.some((i) => i.level === "error")) {
+      atomicWrite(ENV_PATH, serializeEnv(sanitized));
+      steps.push({ ok: true, kind: "ENV_OK", message: "Normalized .env", details: ENV_PATH });
+    } else {
+      steps.push({ ok: false, kind: "ENV_INVALID", message: "Config has validation errors", details: issues });
+    }
+
+    // pip install
+    steps.push(runPipInstallRequirements());
+
+    // touch DB
+    const { resolvedDb } = resolveDbPathFromSanitized(sanitized || envObj || {});
+    steps.push(touchDbFile(resolvedDb));
+
+    // clear last error
+    clearLastError();
+    steps.push({ ok: true, kind: "CLEAR_ERROR", message: "Cleared last error", details: null });
+
+    const ok = steps.every((s) => !!s.ok);
+    if (!ok) setLastError("AUTOFIX_PARTIAL", "AutoFix could not complete all steps", steps);
+
+    return res.json({ ok, steps });
+  } catch (e) {
+    setLastError("AUTOFIX_FAIL", "AutoFix failed", { message: String(e) });
+    return res.json({ ok: false, steps, error: String(e) });
+  }
+});
+
 app.post("/api/operator/start", async (req, res) => {
   const mode = String((req.body && req.body.mode) || "safe");
+  const steps = [];
 
+  steps.push({ id: "preflight", ok: true, label: "Preflight checks", detail: "running" });
   const pre = await getPreflight(mode);
   if (!pre.ok) {
+    steps[steps.length - 1] = { id: "preflight", ok: false, label: "Preflight checks", detail: pre.checks };
     setLastError("PREFLIGHT_FAIL", "Preflight checks failed; cannot start", pre.checks);
-    return res.json({ ok: false, status: "STOPPED", preflight: pre });
+    return res.json({ ok: false, status: "STOPPED", steps, preflight: pre });
   }
+  steps[steps.length - 1] = { id: "preflight", ok: true, label: "Preflight checks", detail: "ok" };
 
+  steps.push({ id: "spawn", ok: true, label: "Launching backend", detail: "starting python" });
   const r = startEngine(mode);
+  if (!r.ok) {
+    steps[steps.length - 1] = { id: "spawn", ok: false, label: "Launching backend", detail: r };
+    setLastError("START_FAIL", "Could not start backend", r);
+    return res.json({ ok: false, status: "STOPPED", steps });
+  }
+  steps[steps.length - 1] = { id: "spawn", ok: true, label: "Launching backend", detail: `started (${mode})` };
 
   // Wait for health
+  steps.push({ id: "health", ok: false, label: "Waiting for health", detail: "polling /api/health" });
   let healthy = false;
+  let lastHealth = null;
   for (let i = 0; i < 10; i++) {
-    await new Promise(s => setTimeout(s, 1000));
-    const h = await verifyHealth();
-    if (h.ok) {
+    await sleep(1000);
+    lastHealth = await verifyHealth();
+    if (lastHealth.ok) {
       healthy = true;
       break;
     }
   }
 
   if (!healthy) {
+    steps[steps.length - 1] = { id: "health", ok: false, label: "Waiting for health", detail: lastHealth || "not healthy" };
     setLastError("BOOT_HEALTH_FAIL", "Backend did not become healthy");
-    return res.json({ ok: false, status: "UNHEALTHY" });
+    return res.json({ ok: false, status: "UNHEALTHY", steps });
   }
+  steps[steps.length - 1] = { id: "health", ok: true, label: "Waiting for health", detail: "healthy" };
 
-  // Data verification: check row count increases
-  const dbCheck = await httpGetJson(`http://127.0.0.1:8000/api/telemetry`);
+  // Data verification: telemetry responds
+  steps.push({ id: "telemetry", ok: false, label: "Checking telemetry", detail: "polling /api/telemetry" });
+  const envObj = readEnv();
+  const base = dashBaseUrlFromEnv(envObj);
+  const dbCheck = await httpGetJson(`${base}/api/telemetry`);
 
   if (!dbCheck.ok) {
+    steps[steps.length - 1] = { id: "telemetry", ok: false, label: "Checking telemetry", detail: "telemetry not responding" };
     setLastError("DATA_API_FAIL", "Telemetry API not responding");
-    return res.json({ ok: false, status: "NO_DATA_API" });
+    return res.json({ ok: false, status: "NO_DATA_API", steps });
   }
+  steps[steps.length - 1] = { id: "telemetry", ok: true, label: "Checking telemetry", detail: "telemetry responding" };
 
-  return res.json({ ok: true, status: "RUNNING", mode });
+  return res.json({ ok: true, status: "RUNNING", mode, steps });
 });
 
 app.post("/api/operator/stop", (req, res) => {
@@ -876,7 +1090,6 @@ app.post("/api/operator/factoryReset", (req, res) => {
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "operator_ui.html"));
 });
-
 
 app.listen(OPERATOR_PORT, OPERATOR_BIND_HOST, () => {
   ensureLogDir();

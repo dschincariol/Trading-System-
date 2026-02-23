@@ -64,9 +64,9 @@ def _compile_files(files: List[str]) -> List[str]:
 
 def _ensure_schemas() -> List[str]:
     notes: List[str] = []
-    from engine.dev_core.storage import init_db, connect
-    from engine.dev_core.alerts import init_alerts_db
-    from engine.dev_core.execution_ledger import init_execution_ledger
+    from engine.storage import init_db, connect
+    from engine.alerts import init_alerts_db
+    from engine.execution_ledger import init_execution_ledger
     import engine.strategy.portfolio_backtest as pbt
 
     init_db()
@@ -104,7 +104,7 @@ def _verify_required_tables() -> Tuple[List[str], List[str]]:
         "execution_orders", "execution_fills", "execution_metrics", "pnl_attribution",
         "labels_exec",
     ]
-    from engine.dev_core.storage import connect
+    from engine.storage import connect
     con = connect()
     missing: List[str] = []
     try:
@@ -147,8 +147,8 @@ def _exec_cost_gate_sanity() -> Tuple[List[str], List[str]]:
         return notes, warnings
 
     try:
-        from engine.dev_core.storage import connect
-        from engine.dev_core.edge_filter import adjust_expected_z_for_costs
+        from engine.storage import connect
+        from engine.edge_filter import adjust_expected_z_for_costs
 
         con = connect()
         try:

@@ -16,8 +16,8 @@ import time
 import math
 from typing import Dict, Any, Optional
 
-from engine.dev_core.storage import connect
-from engine.dev_core.model_v2 import get_current_regime
+from engine.storage import connect
+from engine.model_v2 import get_current_regime
 
 ENABLE = os.environ.get("REGIME_COMPAT_ENABLE", "1") == "1"
 

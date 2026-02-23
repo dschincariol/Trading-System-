@@ -2,8 +2,8 @@ import time
 import json
 from urllib.parse import urlparse
 
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 
 def extract_domain(url: str, meta_json: str = None) -> str:

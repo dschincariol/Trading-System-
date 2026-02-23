@@ -8,8 +8,8 @@ Runtime Guards:
 import os
 import time
 
-from engine.dev_core.storage import connect as _db_connect
-from engine.dev_core.model_registry import get_stage_latest
+from engine.runtime.storage import connect as _db_connect
+from engine.model_registry import get_stage_latest
 
 
 MODEL_NAME = "embed_regressor"

@@ -5,7 +5,7 @@ import time
 import json
 import logging
 
-from engine.dev_core.storage import (
+from engine.storage import (
     init_db,
     connect,
     acquire_job_lock,
@@ -13,7 +13,7 @@ from engine.dev_core.storage import (
     touch_job_lock,
     put_job_heartbeat,
 )
-from engine.dev_core.social_regime import classify_regime_from_features
+from engine.social_regime import classify_regime_from_features
 
 JOB_NAME = "compute_social_regime"
 OWNER = os.environ.get("JOB_OWNER", os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")))

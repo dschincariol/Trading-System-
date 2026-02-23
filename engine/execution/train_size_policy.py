@@ -16,9 +16,9 @@ import time
 import math
 from typing import List, Tuple
 
-from engine.dev_core.storage import connect, init_db
+from engine.storage import connect, init_db
 
-from engine.dev_core.training_guard import training_allowed
+from engine.training_guard import training_allowed
 
 # ------            -- ------------------------------------------------------
 # Schema (owned by this module)

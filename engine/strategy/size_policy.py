@@ -2,7 +2,7 @@
 import json
 from typing import Optional, Dict, Any, List
 
-from engine.dev_core.storage import connect, init_db
+from engine.storage import connect, init_db
 
 
 def load_latest_size_policy(con=None) -> Optional[Dict[str, Any]]:

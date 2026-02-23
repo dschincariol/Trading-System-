@@ -8,7 +8,7 @@ Pure DB mutations.
 """
 
 import time
-from engine.dev_core.storage import connect as _db_connect
+from engine.runtime.storage import connect as _db_connect
 
 
 # ============================================================
@@ -79,7 +79,7 @@ def write_job_event(job_name: str, event: str, detail: dict | None = None):
 # ============================================================
 
 def set_promotion_enabled(value: str):
-    from engine.dev_core.promotion_guard import set_guard
+    from engine.promotion_guard import set_guard
 
     v = "1" if str(value) == "1" else "0"
     set_guard("promotion_enabled", v)

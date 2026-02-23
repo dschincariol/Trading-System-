@@ -1,5 +1,5 @@
 # predict.py
-from engine.dev_core.learning import (
+from engine.learning import (
     learn_relevance_stats as train_stats_from_labels,
     get_model_stats,
     confidence_from_n,

@@ -6,12 +6,12 @@ import time
 import logging
 from typing import Dict, List, Optional, Tuple
 
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
-from engine.dev_core.model_v2 import get_current_regime, get_regime_prior
-from engine.dev_core.learning import get_global_prior
-from engine.dev_core.position_sizing import position_from_signal
-from engine.dev_core.edge_filter import adjust_expected_z_for_costs
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.model_v2 import get_current_regime, get_regime_prior
+from engine.learning import get_global_prior
+from engine.position_sizing import position_from_signal
+from engine.edge_filter import adjust_expected_z_for_costs
 
 # ------            -- ------------------------------------------------------
 # Schema
@@ -349,7 +349,7 @@ def emit_alert(
     # Informational: market stress context (read-only)
     # ------------------------------------------------------------
     try:
-        from engine.dev_core.market_stress import get_market_stress_snapshot
+        from engine.market_stress import get_market_stress_snapshot
         ms = get_market_stress_snapshot(ts_ms=now_ms) or {}
         explain["market_stress"] = {
             "score": float(ms.get("stress_score", 0.0)),

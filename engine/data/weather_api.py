@@ -12,7 +12,7 @@ This file is framework-agnostic:
 
 from typing import Dict, Any, Optional
 
-from engine.dev_core.dashboard_weather_widgets import (
+from engine.dashboard_weather_widgets import (
     get_weather_snapshot_for_symbol,
     get_weather_alert_summary,
     get_weather_effect_summary,

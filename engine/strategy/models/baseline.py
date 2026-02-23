@@ -1,6 +1,6 @@
 # dev_core/strategies/baseline.py
 """
-Baseline strategy extracted from engine.dev_core.portfolio compute_rebalance() logic.
+Baseline strategy extracted from engine.portfolio compute_rebalance() logic.
 
 Interface:
   build_desired(alerts, now_ms) -> dict desired[sym] = {...}
@@ -8,7 +8,7 @@ Interface:
 
 from typing import Dict, List
 
-from engine.dev_core import portfolio as P
+from engine import portfolio as P
 
 NAME = "baseline"
 

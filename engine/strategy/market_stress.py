@@ -5,8 +5,8 @@ from typing import Dict, Optional, Tuple, List
 
 import numpy as np
 
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 
 _LOOKBACK = 240   # samples
@@ -208,7 +208,7 @@ def get_market_stress_snapshot(con=None, ts_ms: Optional[int] = None) -> Dict[st
 
         # Optional: macro narrative stress from GDELT (best-effort, no failures)
         try:
-            from engine.dev_core.gdelt_macro import get_gdelt_macro_snapshot
+            from engine.gdelt_macro import get_gdelt_macro_snapshot
             gm = get_gdelt_macro_snapshot(ts_ms=int(ts_ms or int(time.time() * 1000))) or {}
             if gm:
                 out["z_gdelt_doc"] = float(gm.get("z_doc_count", 0.0))

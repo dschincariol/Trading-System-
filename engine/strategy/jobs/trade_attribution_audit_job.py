@@ -1,6 +1,6 @@
 import json
 import os
-from engine.dev_core.storage import connect, init_db
+from engine.storage import connect, init_db
 
 RESIDUAL_ABS_PNL_MAX = float(os.environ.get("RESIDUAL_ABS_PNL_MAX", "50.0"))
 RESIDUAL_ABS_RATIO_MAX = float(os.environ.get("RESIDUAL_ABS_RATIO_MAX", "0.25"))

@@ -20,8 +20,8 @@ import time
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 THRESH = float(os.environ.get("CLUSTER_SIM_THRESHOLD", "0.82"))
 MAX_RECENT = int(os.environ.get("CLUSTER_MAX_RECENT", "500"))

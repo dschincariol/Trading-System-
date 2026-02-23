@@ -3,15 +3,15 @@ import time
 import json
 import logging
 
-from engine.dev_core.storage import (
+from engine.storage import (
     connect,
     init_db,
     acquire_job_lock,
     release_job_lock,
 )
 
-from engine.dev_core.universe import get_active_symbols
-from engine.dev_core.sec.edgar_live import fetch_recent_filings
+from engine.universe import get_active_symbols
+from engine.sec.edgar_live import fetch_recent_filings
 
 JOB_NAME = "poll_sec_filings"
 OWNER = os.environ.get("JOB_OWNER", "system")

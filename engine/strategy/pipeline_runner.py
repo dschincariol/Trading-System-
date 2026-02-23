@@ -14,7 +14,7 @@ LAST_AUTO_CHALLENGER_HEARTBEAT_TS = None
 LAST_AUTO_SIZE_POLICY_TS = None
 LAST_AUTO_SIZE_POLICY_HEARTBEAT_TS = None
 
-from engine.dev_core.storage import connect as _db_connect
+from engine.runtime.storage import connect as _db_connect
 
 from dashboard_config import (
     PIPELINE_ORDER,

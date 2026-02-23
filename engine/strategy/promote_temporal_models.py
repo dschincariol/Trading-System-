@@ -19,13 +19,13 @@ import json
 import time
 import socket
 
-from engine.dev_core.storage import (
+from engine.storage import (
     connect,
     init_db,
     acquire_job_lock,
     release_job_lock,
 )
-from engine.dev_core.promotion_audit import audit
+from engine.promotion_audit import audit
 
 # ------            -- ------------------------------------------------------
 # Flags

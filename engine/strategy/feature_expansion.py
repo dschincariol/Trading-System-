@@ -15,7 +15,7 @@ import time
 import os
 from typing import Dict
 
-from engine.dev_core.asset_map import asset_class_for_symbol
+from engine.asset_map import asset_class_for_symbol
 
 # ------------            -- ------------------------------------------------------
 # BASE FEATURE LAYOUT (KEEP ORDER STABLE)
@@ -143,7 +143,7 @@ def build_feature_vector(*, event: Dict, symbol: str) -> list:
     # --------            -- ------------------------------------------------------
     if USE_TECH_FEATURES:
         try:
-            from engine.dev_core.tech_indicators import compute_tech_features
+            from engine.tech_indicators import compute_tech_features
             tf = compute_tech_features(str(symbol), ts_ms) or {}
         except Exception:
             tf = {}
@@ -163,7 +163,7 @@ def build_feature_vector(*, event: Dict, symbol: str) -> list:
     # --------            -- ------------------------------------------------------
     if USE_STRESS_FEATURES:
         try:
-            from engine.dev_core.market_stress import get_market_stress_snapshot
+            from engine.market_stress import get_market_stress_snapshot
             ms = get_market_stress_snapshot(ts_ms=ts_ms) or {}
         except Exception:
             ms = {}
@@ -182,7 +182,7 @@ def build_feature_vector(*, event: Dict, symbol: str) -> list:
     # --------            -- ------------------------------------------------------
     if USE_FACTOR_UNIVERSE:
         try:
-            from engine.dev_core.factor_universe import FACTOR_FEATURE_DIM, get_factor_universe_vector
+            from engine.factor_universe import FACTOR_FEATURE_DIM, get_factor_universe_vector
             fv = get_factor_universe_vector(ts_ms=ts_ms) or []
             if len(fv) != int(FACTOR_FEATURE_DIM):
                 fv = [0.0] * int(FACTOR_FEATURE_DIM)
@@ -196,7 +196,7 @@ def build_feature_vector(*, event: Dict, symbol: str) -> list:
     # --------            -- ------------------------------------------------------
     if USE_SOCIAL_FEATURES:
         try:
-            from engine.dev_core.social_context import get_social_feature_vector
+            from engine.social_context import get_social_feature_vector
             sf = get_social_feature_vector(symbol=str(symbol), ts_ms=int(ts_ms)) or {}
         except Exception:
             sf = {}
@@ -219,7 +219,7 @@ def build_feature_vector(*, event: Dict, symbol: str) -> list:
     # --------            -- ------------------------------------------------------
     if USE_WEATHER_FEATURES:
         try:
-            from engine.dev_core.weather_features import get_weather_feature_snapshot
+            from engine.weather_features import get_weather_feature_snapshot
             wx = get_weather_feature_snapshot(symbol=str(symbol), ts_ms=ts_ms) or {}
         except Exception:
             wx = {}
@@ -241,7 +241,7 @@ def build_feature_vector(*, event: Dict, symbol: str) -> list:
     # --------            -- ------------------------------------------------------
     if USE_SOCIAL_REGIME:
         try:
-            from engine.dev_core.social_regime import get_social_regime_vector
+            from engine.social_regime import get_social_regime_vector
             rg = get_social_regime_vector(symbol=str(symbol), ts_ms=int(ts_ms)) or {}
         except Exception:
             rg = {}

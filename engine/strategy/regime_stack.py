@@ -20,8 +20,8 @@ import json
 import time
 from typing import Any, Dict, Optional
 
-from engine.dev_core.storage import connect
-from engine.dev_core.factor_universe import _get_feature_asof as _get_factor_feature_asof
+from engine.storage import connect
+from engine.factor_universe import _get_feature_asof as _get_factor_feature_asof
 
 
 _REGIME_MODEL_VERSION = os.environ.get("REGIME_MODEL_VERSION", "regime_stack_v1")
@@ -180,7 +180,7 @@ def compute_regime_vector(
         # MICRO layer
         # ----------------------------
         try:
-            from engine.dev_core.tech_indicators import compute_tech_features
+            from engine.tech_indicators import compute_tech_features
         except Exception:
             compute_tech_features = None
 
@@ -204,7 +204,7 @@ def compute_regime_vector(
         fear = 0.0
         churn = 0.0
         try:
-            from engine.dev_core.social_regime import get_social_regime_vector
+            from engine.social_regime import get_social_regime_vector
 
             sv = get_social_regime_vector(symbol=sym, ts_ms=int(t)) or {}
             mania = _safe_f(sv.get("mania_score", 0.0), 0.0)

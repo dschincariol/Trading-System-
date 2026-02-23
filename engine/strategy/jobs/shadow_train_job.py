@@ -1,5 +1,5 @@
 # jobs/shadow_train_job.py
-from engine.dev_core.shadow_trainer import train_shadow
+from engine.shadow_trainer import train_shadow
 
 HORIZONS = [60, 300, 900]
 

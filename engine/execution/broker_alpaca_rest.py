@@ -25,13 +25,13 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from engine.dev_core.execution_ledger import log_submit, log_fill
-from engine.dev_core.alpha_lifecycle_engine import apply_alpha_lifecycle
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
-from engine.dev_core.kill_switch import execution_allowed
-from engine.dev_core.risk_state import get_state, set_state
-from engine.dev_core.execution_microstructure import record_open_order
+from engine.execution_ledger import log_submit, log_fill
+from engine.alpha_lifecycle_engine import apply_alpha_lifecycle
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.kill_switch import execution_allowed
+from engine.risk_state import get_state, set_state
+from engine.execution_microstructure import record_open_order
 
 
 BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets").strip()
@@ -107,7 +107,7 @@ def list_orders_after(after_ts_ms: int, status: str = "all", limit: int = 500) -
 # ============================================================
 
 def _latest_order_row(con) -> Optional[Tuple[int, int, list]]:
-    from engine.dev_core.portfolio_execution_intents import load_latest_execution_intents
+    from engine.portfolio_execution_intents import load_latest_execution_intents
     b = load_latest_execution_intents(con)
     orders = list(b.get("intents") or [])
     if not orders:

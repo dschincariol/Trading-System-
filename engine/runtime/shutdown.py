@@ -42,7 +42,7 @@ def runtime_shutdown(*, JOBS: Optional[Any] = None, SUPERVISOR: Optional[Any] = 
 
     # Flush WAL + close pooled connections (runtime owns storage)
     try:
-        from engine.dev_core.storage import connect, close_pooled_connections  # type: ignore
+        from engine.storage import connect, close_pooled_connections  # type: ignore
     except Exception:
         connect = None  # type: ignore
         close_pooled_connections = None  # type: ignore

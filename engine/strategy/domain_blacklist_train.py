@@ -2,7 +2,7 @@ import os
 import time
 import logging
 
-from engine.dev_core.storage import connect, init_db, acquire_job_lock, release_job_lock
+from engine.storage import connect, init_db, acquire_job_lock, release_job_lock
 
 JOB_NAME = "train_domain_blacklist"
 OWNER = os.environ.get("JOB_OWNER", "system")

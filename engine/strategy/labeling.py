@@ -1,11 +1,11 @@
 # dev_core/labeling.py
 import time
 from typing import Dict, List
-from engine.dev_core.prices.returns import compute_return
-from engine.dev_core.prices.volatility import compute_volatility
-from engine.dev_core.storage import connect
-from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
-from engine.dev_core.model_v2 import classify_regime
+from engine.prices.returns import compute_return
+from engine.prices.volatility import compute_volatility
+from engine.storage import connect
+from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.model_v2 import classify_regime
 
 HORIZONS_S = {
     "5m": 300,

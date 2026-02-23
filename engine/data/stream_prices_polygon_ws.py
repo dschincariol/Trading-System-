@@ -41,7 +41,7 @@ try:
 except Exception:
     websocket = None
 
-from engine.dev_core.storage import (
+from engine.storage import (
     connect,
     init_db,
     acquire_job_lock,

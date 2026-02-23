@@ -3,7 +3,7 @@
 
 import os
 import time
-from engine.dev_core.execution_mode import set_execution_mode, set_execution_armed
+from engine.execution_mode import set_execution_mode, set_execution_armed
 
 PANIC_FILE = os.environ.get("PANIC_FILE", "panic.flag")
 

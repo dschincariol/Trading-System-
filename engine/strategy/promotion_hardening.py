@@ -4,13 +4,13 @@ import os
 import time
 from typing import Any, Callable, Dict, Optional
 
-from engine.dev_core.storage import connect, init_db
-from engine.dev_core.model_registry import (
+from engine.storage import connect, init_db
+from engine.model_registry import (
     get_stage_latest,
     promote_to_champion,
     rollback_champion,
 )
-from engine.dev_core.promotion_audit import audit
+from engine.promotion_audit import audit
 
 
 def _now_ms() -> int:

@@ -9,7 +9,7 @@ import os
 import time
 import threading
 
-from engine.dev_core.storage import connect as _db_connect
+from engine.runtime.storage import connect as _db_connect
 
 
 # ---------------------------------------------------

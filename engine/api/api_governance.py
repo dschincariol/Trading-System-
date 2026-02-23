@@ -15,9 +15,9 @@ from engine.api.internal_access import db_connect
 
 def api_post_rollback(_parsed=None, _body=None, _ctx=None):
     try:
-        from engine.dev_core.model_registry import rollback_champion as _rb
-        from engine.dev_core.promotion_audit import audit as _audit
-        from engine.dev_core.model_registry import get_stage_latest as _get
+        from engine.model_registry import rollback_champion as _rb
+        from engine.promotion_audit import audit as _audit
+        from engine.model_registry import get_stage_latest as _get
 
         ch_before = None
         try:
@@ -52,7 +52,7 @@ def api_post_rollback(_parsed=None, _body=None, _ctx=None):
 
 def get_promotion_status():
     try:
-        from engine.dev_core.promotion_guard import promotion_allowed
+        from engine.promotion_guard import promotion_allowed
         allowed = bool(promotion_allowed())
     except Exception:
         allowed = False
@@ -91,7 +91,7 @@ def get_promotion_explain():
     }
 
     try:
-        from engine.dev_core.model_registry import list_recent
+        from engine.model_registry import list_recent
         out["registry"]["embed_regressor"] = list_recent("embed_regressor", limit=50) or []
     except Exception:
         out["registry"]["embed_regressor"] = []
@@ -129,7 +129,7 @@ def get_promotion_explain():
 
 def api_get_exec_conf_calib(_parsed=None, _ctx=None):
     try:
-        from engine.dev_core.exec_conf_calibration import get_latest_exec_conf_calib
+        from engine.exec_conf_calibration import get_latest_exec_conf_calib
         return get_latest_exec_conf_calib()
     except Exception as e:
         return {"ok": False, "error": str(e)}

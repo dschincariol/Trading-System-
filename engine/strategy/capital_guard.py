@@ -2,9 +2,9 @@ import os
 import time
 from typing import Dict, Any, Optional
 
-from engine.dev_core.drawdown_state import get_current_drawdown
-from engine.dev_core.risk_state import get_state, set_state
-from engine.dev_core.storage import connect
+from engine.drawdown_state import get_current_drawdown
+from engine.risk_state import get_state, set_state
+from engine.storage import connect
 
 # thresholds (hard stop)
 MAX_DRAWDOWN = float(os.environ.get("CAPITAL_STOP_DRAWDOWN", "0.25"))  # 25%
@@ -93,7 +93,7 @@ def _drawdown_velocity(con=None) -> float:
 
 def _stress_snapshot(con=None) -> Dict[str, Any]:
     try:
-        from engine.dev_core.market_stress import get_market_stress_snapshot
+        from engine.market_stress import get_market_stress_snapshot
     except Exception:
         return {"stress_score": 0.0}
 

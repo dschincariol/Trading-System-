@@ -11,13 +11,18 @@ This file remains as a stable entrypoint wrapper.
 
 import os
 import sys
-from dotenv import load_dotenv
 
+# -------------------------------------------------------------------
 # Ensure repo root is importable regardless of current working directory
+# (Must run BEFORE any project imports)
+# -------------------------------------------------------------------
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if _BASE_DIR not in sys.path:
     sys.path.insert(0, _BASE_DIR)
 
+from dotenv import load_dotenv
+
+# Load .env into process environment
 load_dotenv()
 
 

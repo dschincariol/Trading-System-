@@ -14,11 +14,11 @@ import json
 import time
 from typing import Any, Dict, Optional, Tuple
 
-from engine.dev_core.storage import connect
+from engine.storage import connect
 
 # Back-compat: some deployments reference this import elsewhere
 try:
-    from engine.dev_core.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot  # noqa: F401
+    from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot  # noqa: F401
 except Exception:
     upsert_from_latest_pnl_attribution_snapshot = None  # type: ignore
 
@@ -663,7 +663,7 @@ def compute_capital_efficiency_snapshot(limit_orders: int = 5000) -> Dict[str, A
     """
     init_execution_ledger()
     try:
-        from engine.dev_core.storage import init_db
+        from engine.storage import init_db
 
         init_db()
     except Exception:

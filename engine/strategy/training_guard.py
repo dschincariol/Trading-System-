@@ -2,7 +2,7 @@
 import time
 from typing import Optional, Dict, Any
 
-from engine.dev_core.risk_state import get_state, set_state, get_state_row
+from engine.risk_state import get_state, set_state, get_state_row
 
 
 # Allowed modes:

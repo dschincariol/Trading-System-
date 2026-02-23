@@ -20,7 +20,7 @@ import math
 import time
 from typing import Dict, Any, List, Optional
 
-from engine.dev_core.storage import connect as _db_connect
+from engine.runtime.storage import connect as _db_connect
 
 
 DEFAULT_WINDOW_S = int(os.environ.get("SHADOW_CAPITAL_WINDOW_S", "86400"))  # 24h
