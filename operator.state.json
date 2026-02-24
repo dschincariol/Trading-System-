@@ -1,0 +1,12 @@
+{
+  "createdAt": "2026-02-24T09:36:11.284Z",
+  "lastExitCode": 1,
+  "lastError": null,
+  "restartAttempts": 14,
+  "lastStartAt": "2026-02-24T14:29:43.645Z",
+  "lastStopAt": null,
+  "lastHealthyAt": "2026-02-24T14:40:08.564Z",
+  "lastMode": "safe",
+  "_restartWindowStart": 1771926719802,
+  "_restartCountWindow": 7
+}

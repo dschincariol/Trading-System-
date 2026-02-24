@@ -321,12 +321,17 @@ port = int(os.environ.get("DASHBOARD_PORT", "8000"))
 # ---------------------------------------------------
 # SUPERVISOR AUTO BOOT (deterministic, ENV-gated)
 # ---------------------------------------------------
-AUTO_BOOT_DAEMONS = os.environ.get("AUTO_BOOT_DAEMONS", "0") == "1"
+def _env_bool(key: str, default: bool = False) -> bool:
+    v = os.environ.get(key)
+    if v is None:
+        return bool(default)
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+AUTO_BOOT_DAEMONS = _env_bool("AUTO_BOOT_DAEMONS", False)
 AUTO_BOOT_TARGETS = [
     x.strip() for x in os.environ.get("AUTO_BOOT_TARGETS", "").split(",")
     if x.strip()
 ]
-
 _HTTPD = None  # set in run_server()
 
 # ---------------------------------------------------

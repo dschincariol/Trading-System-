@@ -37,7 +37,7 @@ const SECRETS_PATH = path.join(ROOT, "operator.secrets.json");
 const STATE_PATH = path.join(ROOT, "operator.state.json");
 
 // Operator server
-const OPERATOR_PORT = Number(process.env.OPERATOR_PORT || 4000);
+const OPERATOR_PORT = Number(process.env.OPERATOR_PORT || 4001);
 const OPERATOR_BIND_HOST = String(process.env.OPERATOR_BIND_HOST || "127.0.0.1");
 const PRODUCTION_MODE = process.env.NODE_ENV === "production";
 
@@ -156,8 +156,18 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function _normalizeDashHostForLoopback(host) {
+  const h = String(host || "").trim();
+  // If dashboard binds to 0.0.0.0, callers should use loopback to reach it.
+  if (h === "0.0.0.0") return "127.0.0.1";
+  // Avoid Windows/IPv6-only localhost resolution surprises.
+  if (h.toLowerCase() === "localhost") return "127.0.0.1";
+  return h || "127.0.0.1";
+}
+
 function dashBaseUrlFromEnv(envObj) {
-  const host = String(envObj.DASHBOARD_HOST || "127.0.0.1");
+  const hostRaw = String(envObj.DASHBOARD_HOST || "127.0.0.1");
+  const host = _normalizeDashHostForLoopback(hostRaw);
   const port = Number(envObj.DASHBOARD_PORT || 8000);
   return `http://${host}:${port}`;
 }
@@ -447,27 +457,41 @@ function emergencyStop() {
 // Health + Readiness (backend integration)
 // --------------------------------------------------
 
-function httpGetJson(url) {
+function httpGetJson(url, timeoutMs = 8000) {
   return new Promise((resolve) => {
     try {
       const lib = url.startsWith("https://") ? https : http;
-      const req = lib.get(url, (res) => {
-        let data = "";
-        res.on("data", (c) => (data += c));
-        res.on("end", () => {
-          try {
-            const obj = JSON.parse(data || "{}");
-            resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, json: obj });
-          } catch {
-            resolve({ ok: false, status: res.statusCode, json: null });
+
+      const req = lib.request(
+        url,
+        {
+          method: "GET",
+          headers: {
+            "Accept": "application/json",
+            "Connection": "close"
           }
-        });
-      });
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (c) => (data += c));
+          res.on("end", () => {
+            try {
+              const obj = JSON.parse(data || "{}");
+              resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, json: obj });
+            } catch {
+              resolve({ ok: false, status: res.statusCode, json: null });
+            }
+          });
+        }
+      );
+
       req.on("error", () => resolve({ ok: false, status: 0, json: null }));
-      req.setTimeout(2500, () => {
-        req.destroy();
+      req.setTimeout(timeoutMs, () => {
+        try { req.destroy(); } catch {}
         resolve({ ok: false, status: 0, json: null });
       });
+
+      req.end();
     } catch {
       resolve({ ok: false, status: 0, json: null });
     }
@@ -477,7 +501,8 @@ function httpGetJson(url) {
 async function verifyHealth() {
   const env = readEnv();
   const port = Number(env.DASHBOARD_PORT || 8000);
-  const host = String(env.DASHBOARD_HOST || "127.0.0.1");
+  const hostRaw = String(env.DASHBOARD_HOST || "127.0.0.1");
+  const host = _normalizeDashHostForLoopback(hostRaw);
   const override = String(env.OPERATOR_HEALTH_URL || "").trim();
 
   const url = override || `http://${host}:${port}/api/health`;

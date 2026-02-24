@@ -12,6 +12,12 @@ from __future__ import annotations
 
 import os
 
+def _env_bool(key: str, default: bool = False) -> bool:
+    v = os.environ.get(key)
+    if v is None:
+        return bool(default)
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
 # -----------------------------
 # Auto-restart guards
 # -----------------------------

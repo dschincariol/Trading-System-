@@ -6,73 +6,7 @@
   <title>Market Impact Dashboard</title>
 
   <style>
-    body {
-  margin: 0;
-  background: #0f1116;
-  font-family: monospace;
-  color: #c9d1d9;
-}
 
-.telemetry-strip {
-  height: 40px;
-  background: #151922;
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  padding: 0 16px;
-  font-size: 12px;
-  border-bottom: 1px solid #222;
-}
-
-#workspace {
-  display: grid;
-  grid-template-columns: 180px 1fr 300px;
-  height: calc(100vh - 240px);
-}
-
-#main-grid {
-  display: grid;
-  grid-template-rows: 1fr 1fr 1fr;
-  gap: 8px;
-  padding: 8px;
-}
-
-.grid-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 8px;
-}
-
-#right-dock {
-  background: #151922;
-  border-left: 1px solid #222;
-  padding: 8px;
-}
-
-#bottom-log {
-  height: 200px;
-  background: #0d1015;
-  border-top: 1px solid #222;
-  overflow-y: auto;
-  font-size: 11px;
-  padding: 8px;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 11px;
-}
-
-th, td {
-  padding: 4px 6px;
-  border-bottom: 1px solid #1c2129;
-}
-
-th {
-  color: #6e7681;
-  text-align: left;
-}
 
     :root{
   /* Motion system (ops-safe) */
@@ -109,6 +43,21 @@ th {
       padding: 16px;
       padding-bottom: max(16px, env(safe-area-inset-bottom));
     }
+
+    /* Telemetry Strip */
+.telemetryStrip{
+  display:flex;
+  gap:18px;
+  align-items:center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size:12px;
+  background: var(--panel2);
+  border:1px solid var(--border);
+  border-radius: var(--r);
+  padding:8px 14px;
+  margin-bottom:12px;
+  box-shadow: var(--shadow);
+}
 
     /* App header */
     .appHeader{
@@ -155,13 +104,29 @@ th {
     /* Original .row is used elsewhere (keep as flex) */
     .row { display: flex; gap: 12px; flex-wrap: wrap; }
 
-    .card {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 10px;
-      margin-bottom: 10px;
-    }
+.card {
+  background:
+    linear-gradient(180deg, rgba(15,26,43,.92), rgba(11,18,32,.92));
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: var(--r);
+  padding: 14px;
+  margin-bottom: 14px;
+  box-shadow:
+    0 10px 24px rgba(0,0,0,.45),
+    0 0 0 1px rgba(255,255,255,.03) inset;
+  transition:
+    transform var(--m-fast) var(--ease-out),
+    box-shadow var(--m-fast) var(--ease-out),
+    border-color var(--m-fast) var(--ease-out);
+}
+
+.card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(88,166,255,.35);
+  box-shadow:
+    0 18px 36px rgba(0,0,0,.55),
+    0 0 0 1px rgba(88,166,255,.08) inset;
+}
 
     /* Card header polish */
     .card h2{
@@ -198,20 +163,25 @@ th {
   display: inline-flex;
   align-items:center;
   gap:6px;
-  padding: 2px 10px;
+  padding: 4px 12px;
   border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--chip);
+  border: 1px solid rgba(255,255,255,.08);
+  background: rgba(255,255,255,.03);
   font-size: 12px;
-  line-height: 18px;
+  font-weight: 600;
   white-space: nowrap;
+  backdrop-filter: blur(6px);
 
   transition:
     background var(--m-fast) var(--ease-out),
-    color var(--m-fast) var(--ease-out),
     border-color var(--m-fast) var(--ease-out),
     transform var(--m-fast) var(--ease-out),
     box-shadow var(--m-fast) var(--ease-out);
+}
+
+.pill:hover {
+  border-color: rgba(88,166,255,.35);
+  background: rgba(88,166,255,.06);
 }
 
     .pill.ok   { border-color: var(--ok); }
@@ -581,25 +551,37 @@ body.mode-expert .operatorOnly { display:none !important; }
     .health-bad { color: var(--crit); font-weight: 800; }
 
     /* Buttons */
-    .btn {
-      appearance: none;
-      border: 1px solid var(--border);
-      background: var(--btn);
-      color: var(--text);
-      padding: 7px 10px;
-      border-radius: 10px;
-      cursor: pointer;
-      font-size: 13px;
-      display:inline-flex;
-      align-items:center;
-      gap:8px;
-      transition: transform .05s ease, filter .12s ease, border-color .12s ease;
-    }
-    .btn:hover { filter: brightness(1.08); border-color: rgba(88,166,255,.45); }
-    .btn:active {
-  transform: translateY(1px) scale(.98);
+.btn {
+  appearance: none;
+  border: 1px solid rgba(255,255,255,.08);
+  background: linear-gradient(180deg, rgba(22,27,34,.95), rgba(15,20,28,.95));
+  color: var(--text);
+  padding: 8px 14px;
+  border-radius: 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  box-shadow: 0 8px 18px rgba(0,0,0,.35);
+
+  transition:
+    transform var(--m-fast) var(--ease-out),
+    box-shadow var(--m-fast) var(--ease-out),
+    border-color var(--m-fast) var(--ease-out);
 }
 
+.btn:hover {
+  border-color: rgba(88,166,255,.45);
+  box-shadow:
+    0 14px 28px rgba(0,0,0,.45),
+    0 0 0 1px rgba(88,166,255,.15) inset;
+}
+
+.btn:active {
+  transform: scale(.97);
+}
     .btn[disabled] { opacity: .5; cursor: not-allowed; }
     .btnSmall { padding: 6px 8px; font-size: 12px; border-radius: 10px; }
 
@@ -624,21 +606,16 @@ body.mode-expert .operatorOnly { display:none !important; }
     .btn .i{ opacity:.95; }
 
     /* Console */
-    .console {
-      position: fixed;
-      bottom: 0;
-      left: 16px;
-      right: 16px;
-      height: 180px;
-      overflow: auto;
-      background: #0a0d12;
-      border: 1px solid #30363d;
-      border-radius: 10px;
-      padding: 8px;
-      font-family: Consolas, monospace;
-      font-size: 11px;
-      z-index: 50;
-    }
+.console {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  max-height: 240px;
+  overflow: auto;
+}
 
     /* Tables */
     .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: var(--r2); }
@@ -800,7 +777,7 @@ tbody tr:hover td{
 
 </head>
 
-<body>
+<body class="theme-tech">
   <!-- SVG Icon Sprite (no external deps) -->
   <svg aria-hidden="true" style="position:absolute; width:0; height:0; overflow:hidden;">
     <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></symbol>
@@ -823,70 +800,9 @@ tbody tr:hover td{
       <span class="pill dim">API: <span class="mono">/api/*</span></span>
     </div>
   </div>
-<header>
-  <h1>Market Impact System</h1>
-
-  <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-
-    <div id="healthBadge" class="pill ok">OK</div>
-
-    <!-- Structured Readiness -->
-    <div id="readinessBadge" class="pill dim">READINESS —</div>
-
-    <!-- Execution Mode -->
-    <div id="execModeBadge" class="pill dim">MODE —</div>
-
-    <!-- Hard Execution Barrier -->
-    <div>
-      <span id="execBarrierPill" class="pill dim">execution: —</span>
-    </div>
-    <pre id="execBarrierRaw" class="small mono" style="margin-top:4px; max-height:120px; overflow:auto;"></pre>
-
-    <!-- Training Mode -->
-    <div id="trainingModeBadge" class="pill dim">TRAIN —</div>
-
-    <!-- Telemetry -->
-    <div id="cpuBadge" class="pill dim">CPU —</div>
-    <div id="memBadge" class="pill dim">RAM —</div>
-    <div id="dbBadge" class="pill dim">DB —</div>
-
-    <!-- Market Stress -->
-    <div
-      id="marketStressHeader"
-      class="pill dim"
-      title="Unified market stress"
-    >
-      Stress: —
-    </div>
-
-  </div>
-</header>
-
-  <div style="display:flex; gap:8px; align-items:center;">
-    <!-- Market Stress badge (read-only) -->
-    <div
-      id="marketStressHeader"
-      class="pill dim"
-      title="Unified market stress (volatility, term structure, credit & rates)"
-    >
-      Stress: —
-    </div>
-  </div>
-</header>
 
   <!-- Bloomberg-style Telemetry Strip -->
-  <div id="telemetryStrip" style="
-      display:flex;
-      gap:18px;
-      align-items:center;
-      font-family: Consolas, monospace;
-      font-size:12px;
-      background:#0a0d12;
-      border:1px solid #30363d;
-      border-radius:10px;
-      padding:6px 12px;
-      margin-bottom:12px;
-    ">
+  <div id="telemetryStrip" class="telemetryStrip">
     <span id="tNav">NAV —</span>
     <span id="tReturn">RET —</span>
     <span id="tDD">DD —</span>
@@ -900,75 +816,42 @@ tbody tr:hover td{
 
   </div>
 
-  <div class="row">
+<!-- ========================================================= -->
+<!-- OPERATOR SUMMARY (Human First View)                      -->
+<!-- ========================================================= -->
+<div class="card" id="operatorSummaryCard">
 
+  <h2>🧭 What’s going on?</h2>
 
-    <!-- Social Pressure -->
-    <div class="card collapsible">
-      <h2>📣 Social Pressure</h2>
-      <div class="small">
-        Attention, confirmation, and manipulation risk (read-only).
-      </div>
-
-      <div class="table-wrap" style="margin-top:8px;">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>z</th>
-              <th>Attention</th>
-              <th>Manip</th>
-              <th>Confirm</th>
-            </tr>
-          </thead>
-          <tbody id="socialPressureBody"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Social Regimes -->
-    <div class="card collapsible">
-      <h2>🧠 Social Regime</h2>
-      <div class="small">
-        Detected crowd state (QUIET / CHURN / FEAR / MANIA).
-      </div>
-
-      <div class="table-wrap" style="margin-top:8px;">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Regime</th>
-              <th>Conf</th>
-            </tr>
-          </thead>
-          <tbody id="socialRegimeBody"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Social Kill-Switch Blocks -->
-    <div class="card collapsible expertOnly">
-      <h2>🛑 Social Blocks</h2>
-      <div class="small">
-        Trades blocked by social manipulation / mania gates.
-      </div>
-
-      <div class="table-wrap" style="margin-top:8px;">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Symbol</th>
-              <th>Reason</th>
-            </tr>
-          </thead>
-          <tbody id="socialBlocksBody"></tbody>
-        </table>
-      </div>
-    </div>
-
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin:6px 0 10px;">
+    <span id="opSystemPill" class="pill dim">System: —</span>
+    <span id="opExecPill" class="pill dim">Trading: —</span>
+    <span id="opTrainPill" class="pill dim">Training: —</span>
+    <span id="opStressPill" class="pill dim">Market: —</span>
+    <span id="opMoodPill" class="pill dim">Mood: —</span>
+    <span id="opUpdatedPill" class="pill dim mono">Updated: —</span>
   </div>
+
+  <div class="small" style="margin-top:4px;">
+    <div><b id="opHeadline">—</b></div>
+    <div id="opMeaning" style="margin-top:6px;">—</div>
+  </div>
+
+  <div style="margin-top:10px; border-top:1px solid rgba(48,54,61,.45); padding-top:10px;">
+    <div class="small" style="font-weight:800;">What should I do?</div>
+    <ul id="opNextList" class="small" style="margin:8px 0 0 18px;">
+      <li>(loading…)</li>
+    </ul>
+  </div>
+
+  <div style="margin-top:12px;">
+    <button class="btn" id="btnOpRefresh">🔄 Refresh</button>
+    <button class="btn btnWarn" id="btnOpFixIssues">🛠 Fix issues</button>
+    <button class="btn" id="btnOpJumpAlerts">🚨 View Alerts</button>
+    <button class="btn" id="btnOpJumpJobs">🧰 Job Console</button>
+  </div>
+
+</div>
 
   <!-- Decision Header (sticky): guided ops clarity + speed -->
   <div id="decisionBar" class="decisionBar">
@@ -1389,7 +1272,7 @@ tbody tr:hover td{
           <button id="btnReloadCalib" class="btn">Reload</button>
         </div>
       </div>
-      <canvas id="calibCanvas" width="900" height="180" style="width:100%; height:180px; border:1px solid #30363d; border-radius:10px; background:#0a0d12; margin-top:10px;"></canvas>
+      <canvas id="calibCanvas" width="900" height="180"  margin-top:10px;"></canvas>
       <pre id="calibRaw" class="small" style="white-space:pre-wrap; margin-top:8px;"></pre>
     </div>
 
@@ -1437,7 +1320,7 @@ tbody tr:hover td{
     <!-- Equity Drift (dashboard.js expects these IDs) -->
     <div id="equityDriftPanel" class="card collapsible">
       <h2>Equity Drift (Broker vs Backtest) <span id="equityDriftMeta" class="pill dim">—</span></h2>
-      <canvas id="equityDriftCanvas" width="900" height="180" style="width:100%; height:180px; border:1px solid #30363d; border-radius:10px; background:#0a0d12;"></canvas>
+      <canvas id="equityDriftCanvas" width="900" height="180" "></canvas>
     </div>
 
     <!-- Strategy Status (dashboard.js first version uses #strategyStatusPanel + #strategyStatusTable) -->
@@ -1744,8 +1627,8 @@ tbody tr:hover td{
   </div>
 
   <!-- Load your real UI controller -->
-  <script src="/ui/dashboard.js"></script>
-  <script src="/ui/voice.js"></script>
+  <script type="module" src="/ui/dashboard.js"></script>
+  <script type="module" src="/ui/voice.js"></script>
 
 </body>
 </html>

@@ -920,77 +920,6 @@ function _drawLineChart(canvas, series, opts = {}) {
   if (opts.label) ctx.fillText(opts.label, pad, H - 6);
 }
 
-async function loadPortfolioBacktestLatest_legacy() {
-  const meta = document.getElementById("portfolioBtMeta");
-  const pre = document.getElementById("portfolioBtMetrics");
-  const c1 = document.getElementById("equityCanvas");
-  const c2 = document.getElementById("ddCanvas");
-
-  // If the card isn't on this page, silently no-op
-  if (!meta || !pre || !c1 || !c2) return;
-
-  try {
-    const j = await fetchJSON("/api/backtest/portfolio/latest");
-    if (!j || !j.ok || !j.run) {
-      meta.textContent = "none";
-      meta.className = "pill dim";
-      pre.textContent = (j && j.error) ? j.error : "(no backtest runs yet)";
-      _drawLineChart(c1, [], { label: "equity" });
-      _drawLineChart(c2, [], { label: "drawdown" });
-      return;
-    }
-
-    meta.textContent = "ok";
-    meta.className = "pill ok";
-
-    const pts = Array.isArray(j.run.points) ? j.run.points : [];
-    const { equity, dd } = _computeEquityAndDD(pts);
-
-    // Equity curve (assumes pnl is cumulative; if it is “PnL only”, it’s still a valid curve)
-    _drawLineChart(c1, equity, { label: `equity (last=${_fmtMoney(equity[equity.length - 1] || 0)})`, stroke: "#2ea043" });
-
-    // Drawdown: show as % (negative)
-    const ddPct = dd.map(x => Number.isFinite(x) ? (x * 100.0) : NaN);
-    _drawLineChart(c2, ddPct, { label: "drawdown %", stroke: "#ff6b6b" });
-
-    // Metrics
-    const metrics = j.run.metrics || {};
-    const lines = [];
-    lines.push(`run_id: ${j.run.id}`);
-    lines.push(`range: ${new Date(j.run.start_ts_ms).toLocaleString()} → ${new Date(j.run.end_ts_ms).toLocaleString()}`);
-    const ordered = [
-      "start_capital",
-      "end_equity",
-      "total_return",
-      "max_drawdown",
-      "ret_mean",
-      "ret_volatility",
-      "downside_volatility",
-      "sharpe_simple",
-      "sortino_simple",
-      "calmar_simple",
-      "turnover_avg",
-      "turnover_total",
-      "steps_used",
-      "steps_skipped",
-      "alerts_seen",
-      "n_points",
-    ];
-
-for (const k of ordered) {
-  if (!(k in metrics)) continue;
-  const v = metrics[k];
-  lines.push(`${k}: ${typeof v === "number" ? v.toFixed(6) : String(v)}`);
-}
-
-    pre.textContent = lines.join("\n") || "(no metrics)";
-  } catch (e) {
-    meta.textContent = "error";
-    meta.className = "pill bad";
-    pre.textContent = e.message;
-  }
-}
-
 async function loadSizePolicyUI() {
 
   const body = document.getElementById("sizePolicyBody");
@@ -1560,20 +1489,31 @@ async function loadEquityReconciliation() {
   }
 }
 
-async function loadHealth() {
-  const h = await fetchJSON("/api/health");
+async function loadHealth(preloaded) {
+  const h = preloaded || await fetchJSON("/api/health");
   if (!h) return;
 
   const pricesOk = !!(h.prices && h.prices.ok);
   const labelsOk = !!(h.labels && h.labels.ok);
   const modelOk  = !!(h.model && h.model.ok);
 
-  // execution degradation flag (UI-only)
-const execDegraded = _isExecutionDegraded();
+  setPill(
+    "healthPrices",
+    pricesOk,
+    pricesOk ? `prices ok (${h.prices.age_s}s)` : "prices stale"
+  );
 
-  setPill("healthPrices", pricesOk, pricesOk ? `prices ok (${h.prices.age_s}s)` : "prices stale");
-  setPill("healthLabels", labelsOk, `labels ${h.labels ? h.labels.count : "?"}`);
-  setPill("healthModel",  modelOk,  `model n=${h.model ? h.model.support_n : "?"}`);
+  setPill(
+    "healthLabels",
+    labelsOk,
+    `labels ${h.labels ? h.labels.count : "?"}`
+  );
+
+  setPill(
+    "healthModel",
+    modelOk,
+    `model n=${h.model ? h.model.support_n : "?"}`
+  );
 
   const btn = document.getElementById("btnRunPipeline");
   if (btn) {
@@ -2518,6 +2458,101 @@ async function loadStructuredReadiness() {
   }
 }
 
+// ============================================================
+// OPERATOR SUMMARY (Human Interpretation Layer)
+// ============================================================
+
+function _pillSet(id, cls, text) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = "pill " + (cls || "dim");
+  el.textContent = text;
+}
+
+function _stressHuman(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return { cls:"dim", label:"unknown" };
+  if (n >= 0.75) return { cls:"bad", label:"high stress" };
+  if (n >= 0.55) return { cls:"warn", label:"elevated stress" };
+  return { cls:"ok", label:"normal" };
+}
+
+function _systemHuman(stateObj) {
+  const s = (stateObj && stateObj.state) ? stateObj.state : "UNKNOWN";
+  if (s === "LIVE") return { cls:"ok", label:"LIVE" };
+  if (s === "DEGRADED") return { cls:"warn", label:"DEGRADED" };
+  if (s === "KILL_SWITCH") return { cls:"bad", label:"HALTED" };
+  return { cls:"dim", label:s };
+}
+
+async function loadOperatorSummary() {
+
+  const card = document.getElementById("operatorSummaryCard");
+  if (!card) return;
+
+  let system = null;
+  let stress = null;
+  let barrier = null;
+
+  try {
+    system =
+      window.__LAST_SYSTEM_STATE__ ||
+      await fetchJSON("/api/system/state");
+  } catch {}
+  try { stress = await fetchJSON("/api/market_stress"); } catch {}
+  try { barrier = await fetchJSON("/api/execution/barrier"); } catch {}
+
+  const sysH = _systemHuman(system || {});
+  _pillSet("opSystemPill", sysH.cls, "System: " + sysH.label);
+
+  const allowed = barrier && barrier.ok && barrier.allowed;
+  _pillSet("opExecPill", allowed ? "ok":"bad",
+    allowed ? "Trading: ALLOWED":"Trading: BLOCKED");
+
+  const stressScore =
+    stress && stress.ok && stress.stress
+      ? stress.stress.stress_score
+      : NaN;
+
+  const stH = _stressHuman(stressScore);
+  _pillSet("opStressPill", stH.cls, "Market: " + stH.label);
+
+  _pillSet("opUpdatedPill", "dim",
+    "Updated: " + new Date().toLocaleTimeString());
+
+const headlineEl = document.getElementById("opHeadline");
+const meaningEl  = document.getElementById("opMeaning");
+
+if (!headlineEl || !meaningEl) return;
+
+  if (!system) {
+    headlineEl.textContent = "System status unavailable";
+    meaningEl.textContent  = "Could not load system state.";
+    return;
+  }
+
+  if (!allowed) {
+    headlineEl.textContent = "Trading is blocked";
+    meaningEl.textContent  =
+      "Order placement is disabled by safety controls.";
+  } else if (sysH.label === "DEGRADED") {
+    headlineEl.textContent = "System is protecting itself";
+    meaningEl.textContent  =
+      "Engine detected instability and reduced risk automatically.";
+  } else {
+    headlineEl.textContent = "System running normally";
+    meaningEl.textContent  =
+      "No immediate action required.";
+  }
+
+  const nextEl = document.getElementById("opNextList");
+  nextEl.innerHTML = `
+    <li>Check Alerts if anything looks unusual</li>
+    <li>Monitor Market stress level</li>
+    <li>Only unlock Advanced mode if required</li>
+  `;
+}
+
 async function loadTelemetry() {
   const strip = document.getElementById("telemetryStrip");
   if (!strip) return;
@@ -2547,13 +2582,15 @@ async function loadTelemetry() {
 
 async function jobAction(name, action) {
   setSelectedJob(name);
+
   if (action === "start") {
-    await fetchJSON(`/api/jobs/start?name=${encodeURIComponent(name)}`);
+    await postJSON(`/api/jobs/start?name=${encodeURIComponent(name)}`, { name });
   } else if (action === "stop") {
-    await fetchJSON(`/api/jobs/stop?name=${encodeURIComponent(name)}`);
+    await postJSON(`/api/jobs/stop?name=${encodeURIComponent(name)}`, { name });
   }
+
   await refresh();
-applyReadOnlyBanner();
+  applyReadOnlyBanner();
 }
 
 async function loadExecutionBarrier() {
@@ -2598,10 +2635,11 @@ try {
     const hEl = document.getElementById("healthStatus");
     const hDet = document.getElementById("healthDetails");
 
-    let systemState = null;
-    try {
-      systemState = await fetchJSON("/api/system/state");
-    } catch {}
+let systemState = null;
+try {
+  systemState = await fetchJSON("/api/system/state");
+  window.__LAST_SYSTEM_STATE__ = systemState;
+} catch {}
 
     const degraded =
       !systemState ||
@@ -2648,8 +2686,9 @@ try {
   if (_pauseRefresh) return;
 
 await Promise.allSettled([
-  loadHealth(),
+  loadHealth(_lastHealth),
   loadStructuredReadiness(),
+  loadOperatorSummary(),
   loadTelemetry(),
   loadTemporalEval(),
   loadTemporalShadowEval(),
@@ -2881,7 +2920,53 @@ function wireUI() {
         btnSP.disabled = false;
       }
     });
+ }
+
+  // -----------------------------
+  // Operator summary quick actions
+  // -----------------------------
+  const btnOpRefresh = document.getElementById("btnOpRefresh");
+  if (btnOpRefresh) {
+    btnOpRefresh.addEventListener("click", async () => {
+      try {
+        const b = document.getElementById("btnRefresh");
+        if (b) b.click();
+        else await refresh();
+      } catch {}
+    });
   }
+
+  const btnOpFix = document.getElementById("btnOpFixIssues");
+  if (btnOpFix) {
+    btnOpFix.addEventListener("click", async () => {
+      try {
+        const b = document.getElementById("btnFixIssues");
+        if (b) b.click();
+        else if (typeof handleAutoFix === "function") await handleAutoFix({ toastFn: toast });
+      } catch {}
+    });
+  }
+
+  const btnOpAlerts = document.getElementById("btnOpJumpAlerts");
+  if (btnOpAlerts) {
+    btnOpAlerts.addEventListener("click", () => {
+      const el = document.getElementById("incidentList") || document.getElementById("alertsHeatmap") || document.getElementById("alerts");
+      if (el && typeof el.scrollIntoView === "function") {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+  }
+
+  const btnOpJobs = document.getElementById("btnOpJumpJobs");
+  if (btnOpJobs) {
+    btnOpJobs.addEventListener("click", () => {
+      const el = document.getElementById("console") || document.getElementById("selectedJob");
+      if (el && typeof el.scrollIntoView === "function") {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+  }
+
 }
 
 function bootDashboard() {

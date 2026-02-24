@@ -79,7 +79,6 @@ PIPELINE_ORDER = [
     "train_embed_models",
     "train_model_v2",
     "validate_now",
-    "process_events",
     "portfolio_rebalance",
     "broker_apply_orders",
 ]

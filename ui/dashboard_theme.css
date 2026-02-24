@@ -1,8 +1,204 @@
 /* ui/dashboard_theme.css
-   Small UI theme overrides that are safe to ship without touching the big inline <style>.
+   TECH THEME HARD OVERRIDES
+   Goal: force dashboard.html to visually match styles.tech.css even with inline <style>.
 */
 
-/* Subtle "degraded" background pulse when system health is not OK */
+/* ---------------------------
+   TOKENS (override inline vars)
+   --------------------------- */
+body.theme-tech {
+  --bg0:#070b10 !important;
+  --bg1:#0b1220 !important;
+  --panel:#0f1a2b !important;
+  --card:#0f1a2b !important;
+
+  --border:rgba(255,255,255,0.08) !important;
+  --border2:rgba(255,255,255,0.12) !important;
+
+  --text:#eaf2ff !important;
+  --muted:#9bb0d9 !important;
+
+  --green:#2bb673 !important;
+  --green2:#19a965 !important;
+  --amber:#f5a524 !important;
+  --red:#e25555 !important;
+  --blue:#3a86ff !important;
+
+  --shadow: 0 14px 35px rgba(0,0,0,0.45) !important;
+  --shadow2: 0 8px 18px rgba(0,0,0,0.28) !important;
+
+  --radius: 16px !important;
+  --radius2: 12px !important;
+  --focus: 0 0 0 4px rgba(58,134,255,0.18) !important;
+
+  background:
+    radial-gradient(1100px 650px at 10% -10%, rgba(58,134,255,.14), transparent 60%),
+    radial-gradient(900px 520px at 90% 0%, rgba(43,182,115,.10), transparent 60%),
+    linear-gradient(180deg, var(--bg1), var(--bg0)) !important;
+
+  color: var(--text) !important;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif !important;
+}
+
+/* kill the old dev-ish body styling in inline <style> */
+body.theme-tech {
+  margin: 0 !important;
+  padding: 16px !important;
+  padding-bottom: max(16px, env(safe-area-inset-bottom)) !important;
+}
+
+/* ---------------------------
+   HEADERS / TOP STRIPS
+   --------------------------- */
+body.theme-tech .appHeader,
+body.theme-tech header,
+body.theme-tech #decisionBar {
+  border-radius: var(--radius) !important;
+}
+
+body.theme-tech #telemetryStrip {
+  background: rgba(15,26,43,.92) !important;
+  border: 1px solid var(--border2) !important;
+  border-radius: var(--radius) !important;
+  box-shadow: var(--shadow2) !important;
+}
+
+/* ---------------------------
+   CARDS (force tech surfaces)
+   --------------------------- */
+body.theme-tech .card {
+  background: rgba(15,26,43,.92) !important;
+  border: 1px solid var(--border2) !important;
+  border-radius: var(--radius) !important;
+  box-shadow: var(--shadow) !important;
+  padding: 14px !important;
+}
+
+/* card header style */
+body.theme-tech .card h2 {
+  font-weight: 800 !important;
+  letter-spacing: .2px !important;
+  color: var(--text) !important;
+  border-bottom: 1px solid rgba(255,255,255,.06) !important;
+  padding-bottom: 10px !important;
+  margin-bottom: 12px !important;
+}
+
+/* ---------------------------
+   PILLS (tech pills)
+   --------------------------- */
+body.theme-tech .pill {
+  background: rgba(255,255,255,0.04) !important;
+  border: 1px solid var(--border2) !important;
+  color: var(--text) !important;
+  border-radius: 999px !important;
+  font-weight: 700 !important;
+}
+
+body.theme-tech .pill.ok { border-color: rgba(43,182,115,.65) !important; }
+body.theme-tech .pill.bad { border-color: rgba(226,85,85,.75) !important; }
+body.theme-tech .pill.warn { border-color: rgba(245,165,36,.75) !important; }
+
+body.theme-tech .pill.dim {
+  color: rgba(155,176,217,.95) !important;
+  background: rgba(255,255,255,0.03) !important;
+}
+
+/* ---------------------------
+   BUTTONS (tech)
+   --------------------------- */
+body.theme-tech .btn {
+  background: rgba(15,26,43,.92) !important;
+  border: 1px solid var(--border2) !important;
+  color: var(--text) !important;
+  border-radius: 14px !important;
+  box-shadow: var(--shadow2) !important;
+  font-weight: 800 !important;
+}
+
+body.theme-tech .btn:hover {
+  border-color: rgba(58,134,255,.55) !important;
+  filter: brightness(1.06) !important;
+}
+
+body.theme-tech .btn:focus {
+  outline: none !important;
+  box-shadow: var(--shadow2), var(--focus) !important;
+}
+
+/* ---------------------------
+   INPUTS / SELECTS
+   --------------------------- */
+body.theme-tech select,
+body.theme-tech input.input,
+body.theme-tech input[type="text"],
+body.theme-tech input[type="number"] {
+  background: rgba(11,18,32,.95) !important;
+  border: 1px solid var(--border2) !important;
+  color: var(--text) !important;
+  border-radius: 14px !important;
+}
+
+/* ---------------------------
+   TABLES (tech)
+   --------------------------- */
+body.theme-tech table {
+  border-collapse: collapse !important;
+}
+
+body.theme-tech th {
+  background: rgba(11,18,32,.95) !important;
+  color: rgba(155,176,217,.95) !important;
+  border-bottom: 1px solid rgba(255,255,255,.08) !important;
+}
+
+body.theme-tech td {
+  border-bottom: 1px solid rgba(255,255,255,.06) !important;
+}
+
+body.theme-tech tbody tr:hover td {
+  background: rgba(58,134,255,.08) !important;
+}
+
+/* ---------------------------
+   CONSOLES / PRE AREAS
+   --------------------------- */
+body.theme-tech .console,
+body.theme-tech pre.console,
+body.theme-tech pre.mono,
+body.theme-tech pre.small {
+  background: rgba(11,18,32,.92) !important;
+  border: 1px solid rgba(255,255,255,.08) !important;
+  border-radius: 14px !important;
+  box-shadow: var(--shadow2) !important;
+  color: rgba(234,242,255,.92) !important;
+}
+
+/* ---------------------------
+   HEATMAP / INCIDENTS / DRAWER
+   (these exist in your HTML)
+   --------------------------- */
+body.theme-tech .heatmapWrap {
+  background: rgba(11,18,32,.70) !important;
+  border: 1px solid rgba(255,255,255,.08) !important;
+  border-radius: var(--radius) !important;
+}
+
+body.theme-tech .incidentItem {
+  border: 1px solid rgba(255,255,255,.10) !important;
+  background: linear-gradient(180deg, rgba(15,26,43,.92), rgba(11,18,32,.92)) !important;
+  border-radius: var(--radius) !important;
+  box-shadow: var(--shadow) !important;
+}
+
+body.theme-tech .drawer {
+  background: rgba(11,18,32,.98) !important;
+  border-left: 1px solid rgba(255,255,255,.10) !important;
+}
+
+/* ---------------------------
+   DEGRADE PULSE (kept)
+   --------------------------- */
 body.system-degraded {
   animation: subtlePulse 2.5s infinite;
 }

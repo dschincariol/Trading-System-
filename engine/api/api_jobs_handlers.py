@@ -13,7 +13,7 @@ from urllib.parse import parse_qs
 
 from engine.runtime.job_registry import ALLOWED_JOBS, JOB_ORDER, PIPELINE_ORDER
 from engine.runtime.lifecycle import snapshot as lifecycle_snapshot
-from engine.runtime.gates import execution_gate_snapshot
+from engine.runtime.gates import execution_gate_snapshot, is_execution_job
 
 def _qs(parsed):
     try:
@@ -119,16 +119,17 @@ def api_post_job_start(parsed, body, ctx):
     if name not in ALLOWED_JOBS:
         return {"ok": False, "error": f"job_not_allowed:{name}"}
 
-    gate = execution_gate_snapshot(
-        get_execution_mode_fn=JOBS.get_execution_mode_fn
-    )
-    if not gate.get("allow_execution"):
-        return {
-            "ok": False,
-            "error": f"execution_gated:{gate.get('reason')}",
-            "gate": gate,
-        }
-
+    # Only gate execution-tagged jobs here. Non-execution ingest/monitor jobs must run in SAFE mode.
+    if is_execution_job(name):
+        gate = execution_gate_snapshot(
+            get_execution_mode_fn=JOBS.get_execution_mode_fn
+        )
+        if not gate.get("allow_execution"):
+            return {
+                "ok": False,
+                "error": f"execution_gated:{gate.get('reason')}",
+                "gate": gate,
+            }
     try:
         res = JOBS.start(name)  # hard execution gating is enforced inside JobManager.start()
     except Exception as e:
