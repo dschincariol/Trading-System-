@@ -508,12 +508,12 @@ class JobManager:
                         "job": str(name),
                     }
             else:
-                gate = execution_gate_snapshot()
+                gate = execution_gate_snapshot(self._get_execution_mode_fn)
 
-                if not gate.get("ok"):
+                if not gate.get("ok") or not gate.get("allow_execution"):
                     return {
                         "ok": False,
-                        "error": str(gate.get("error") or "execution_blocked"),
+                        "error": "execution_blocked",
                         "job": str(name),
                         "gate": gate,
                     }
@@ -588,6 +588,7 @@ class JobManager:
                 _write_job_history(job.name, "start_failed", f"spawn failed: {e}", None)
                 return {"ok": False, "error": f"spawn failed: {e}"}
 
+            con_hb = None
             try:
                 con_hb = _db_connect()
                 try:
@@ -603,7 +604,8 @@ class JobManager:
                         pass
             finally:
                 try:
-                    con_hb.close()
+                    if con_hb is not None:
+                        con_hb.close()
                 except Exception:
                     pass
 
@@ -739,8 +741,8 @@ class JobManager:
                 # Fail-closed by default.
                 # --------------------------------------------------
                 if getattr(job, "meta", {}).get("execution") is True:
-                    gate = execution_gate_snapshot()
-                    if not gate.get("ok"):
+                    gate = execution_gate_snapshot(self._get_execution_mode_fn)
+                    if (not gate.get("ok")) or (not gate.get("allow_execution")):
                         job.append_log(
                             f"[server] auto-restart blocked (execution gated): {gate.get('reason') or gate}"
                         )
