@@ -3,11 +3,11 @@ import json
 import time
 from typing import Optional
 
-from engine.storage import connect
-from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.runtime.storage import connect
+from engine.execution.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from engine.model_registry import register_model
 from engine.training_guard import training_allowed
-from engine.model_v2 import train_regime_model
+from engine.strategy.model_v2 import train_regime_model
 
 def _cost_bps_from_trade(trade: dict, px_in: float, px_out: float, side: int) -> dict:
     """

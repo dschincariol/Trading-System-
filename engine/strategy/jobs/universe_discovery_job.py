@@ -17,7 +17,7 @@ import os
 import sys
 import time
 
-from engine.storage import connect, init_db, acquire_job_lock, release_job_lock
+from engine.runtime.storage import connect, init_db, acquire_job_lock, release_job_lock
 from engine.universe_discovery import discover_universe_once
 
 JOB_NAME = "universe_discovery"

@@ -6,7 +6,7 @@ import os
 import time
 from typing import Dict, Optional
 
-from engine.storage import connect
+from engine.runtime.storage import connect
 
 ANOMALY_THRESHOLD_BPS = float(os.environ.get("PROVIDER_ANOMALY_BPS", "25"))
 STALE_THRESHOLD_MS = int(os.environ.get("PROVIDER_STALE_MS", "2000"))

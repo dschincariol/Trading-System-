@@ -58,7 +58,7 @@ import {
   handleAutoFix
 } from "./promotion_safety.js";
 
-import { scheduleRefreshTasks } from "./refresh_scheduler.js";
+import { scheduleRefreshTasks } from "./refresh_scheduler.js?v=2";
 
 import {
   isReadOnlyMode,
@@ -2553,6 +2553,31 @@ if (!headlineEl || !meaningEl) return;
   `;
 }
 
+async function loadPnL() {
+  const totalEl = document.getElementById("pnlTotal");
+  const uEl = document.getElementById("pnlUnrealized");
+  const rEl = document.getElementById("pnlRealized");
+
+  // UI card not present => skip silently
+  if (!totalEl || !uEl || !rEl) return;
+
+  try {
+    const j = await fetchJSON("/api/pnl");
+    if (!j || !j.ok || !j.data) return;
+
+    const d = j.data || {};
+    const total = Number(d.total);
+    const unr = Number(d.unrealized);
+    const rea = Number(d.realized);
+
+    totalEl.innerText = Number.isFinite(total) ? total.toFixed(2) : "--";
+    uEl.innerText = "Unrealized: " + (Number.isFinite(unr) ? unr.toFixed(2) : "--");
+    rEl.innerText = "Realized: " + (Number.isFinite(rea) ? rea.toFixed(2) : "--");
+  } catch {
+    // ignore transient
+  }
+}
+
 async function loadTelemetry() {
   const strip = document.getElementById("telemetryStrip");
   if (!strip) return;
@@ -2666,9 +2691,34 @@ try {
   } catch (e) {
     console.error(e);
   }
+// Auto-snapshot if CRIT alert detected
+if (Array.isArray(_lastAlerts)) {
+  const crit = _lastAlerts.find(a => a.severity === "CRIT" && !a.resolved);
 
-  try {
-    const tr = await fetchJSON("/api/training_status");
+  if (crit && !sessionStorage.getItem("auto_snapshot_crit")) {
+    sessionStorage.setItem("auto_snapshot_crit", "pending");
+
+    buildSnapshotBundle()
+      .then(bundle => {
+        console.warn("AUTO SNAPSHOT (CRIT)", bundle);
+        sessionStorage.setItem("auto_snapshot_crit", "1");
+      })
+      .catch(() => {
+        sessionStorage.removeItem("auto_snapshot_crit");
+      });
+  }
+}
+
+// ✅ PATCH 2 — Reset auto-snapshot flag if CRIT cleared
+if (Array.isArray(_lastAlerts)) {
+  const stillCrit = _lastAlerts.some(a => a.severity === "CRIT" && !a.resolved);
+  if (!stillCrit) {
+    sessionStorage.removeItem("auto_snapshot_crit");
+  }
+}
+
+try {
+  const tr = await fetchJSON("/api/training_status");
     const tEl = document.getElementById("trainingStatus");
     const tDet = document.getElementById("trainingDetails");
 
@@ -2689,7 +2739,7 @@ await Promise.allSettled([
   loadHealth(_lastHealth),
   loadStructuredReadiness(),
   loadOperatorSummary(),
-  loadTelemetry(),
+  loadPnL(),
   loadTemporalEval(),
   loadTemporalShadowEval(),
   loadSocialPressure(),
@@ -2966,7 +3016,93 @@ function wireUI() {
       }
     });
   }
+  // -----------------------------
+  // Unified Snapshot Button
+  // -----------------------------
+  const btnCopySnapshot = document.getElementById("btnCopySnapshot");
+  if (btnCopySnapshot) {
+    btnCopySnapshot.addEventListener("click", copySnapshotBundle);
+  }
+}
 
+// ============================================================
+// Unified Snapshot Bundle (Operator Support Tool)
+// ============================================================
+async function buildSnapshotBundle() {
+  const endpoints = [
+    "/api/operator/status",
+    "/api/operator/bootstrap",
+    "/api/operator/readiness",
+    "/api/health",
+    "/api/system/state",
+    "/api/execution/barrier",
+    "/api/promotion/status"
+  ];
+
+  const bundle = {
+    ts_iso: new Date().toISOString(),
+    ts_ms: Date.now(),
+    location: window.location.href,
+    userAgent: navigator.userAgent,
+    operator_mode: OPERATOR_MODE,
+    expert_unlocked: EXPERT_UNLOCK,
+    execution_degraded: _isExecutionDegraded(),
+    endpoints: {},
+    alerts_snapshot: _lastAlerts || [],
+    health_snapshot: _lastHealth || null,
+    console_tail: []
+  };
+
+  for (const ep of endpoints) {
+    try {
+      const res = await fetch(ep, { cache: "no-store" });
+      let json = null;
+try {
+  const txt = await res.text();
+  json = txt ? JSON.parse(txt) : null;
+} catch {
+  json = null;
+}
+      bundle.endpoints[ep] = {
+        ok: res.ok,
+        status: res.status,
+        body: json
+      };
+    } catch (e) {
+      bundle.endpoints[ep] = {
+        ok: false,
+        error: String(e)
+      };
+    }
+  }
+
+  const consoleEl = document.getElementById("console");
+  if (consoleEl) {
+    const lines = (consoleEl.innerText || "").split("\n");
+    bundle.console_tail = lines.slice(-300);
+  }
+
+  return bundle;
+}
+async function copySnapshotBundle() {
+  try {
+    const bundle = await buildSnapshotBundle();
+    const text = JSON.stringify(bundle, null, 2);
+
+await navigator.clipboard.writeText(text);
+    const btn = document.getElementById("btnCopySnapshot");
+    if (btn) {
+      const original = btn.innerHTML;
+      btn.innerHTML = "✓ Copied";
+      btn.style.borderColor = "var(--ok)";
+      setTimeout(() => {
+        btn.innerHTML = original;
+        btn.style.borderColor = "";
+      }, 1500);
+    }
+  } catch (e) {
+    alert("Snapshot copy failed: " + e);
+  }
 }
 
 function bootDashboard() {

@@ -1,12 +1,12 @@
 {
   "createdAt": "2026-02-24T09:36:11.284Z",
-  "lastExitCode": 1,
+  "lastExitCode": null,
   "lastError": null,
-  "restartAttempts": 14,
-  "lastStartAt": "2026-02-24T14:29:43.645Z",
-  "lastStopAt": null,
-  "lastHealthyAt": "2026-02-24T14:40:08.564Z",
+  "restartAttempts": 73,
+  "lastStartAt": "2026-02-26T15:45:52.795Z",
+  "lastStopAt": "2026-02-26T15:45:51.091Z",
+  "lastHealthyAt": "2026-02-26T15:46:26.153Z",
   "lastMode": "safe",
-  "_restartWindowStart": 1771926719802,
-  "_restartCountWindow": 7
+  "_restartWindowStart": 1772120437115,
+  "_restartCountWindow": 4
 }

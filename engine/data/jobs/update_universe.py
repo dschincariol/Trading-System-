@@ -23,8 +23,8 @@ import time
 import logging
 from typing import Dict
 
-from engine.storage import connect, init_db, acquire_job_lock, release_job_lock, touch_job_lock, put_job_heartbeat
-from engine.universe import extract_symbol_candidates, upsert_symbol
+from engine.runtime.storage import connect, init_db, acquire_job_lock, release_job_lock, touch_job_lock, put_job_heartbeat
+from engine.data.universe import extract_symbol_candidates, upsert_symbol
 
 JOB_NAME = "update_universe"
 OWNER = os.environ.get(

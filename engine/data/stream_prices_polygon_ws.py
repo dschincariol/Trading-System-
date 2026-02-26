@@ -1,3 +1,4 @@
+# FILE: engine/jobs/stream_prices_polygon_ws.py
 """
 Daemon: Polygon WebSocket live prices -> SQLite
 
@@ -16,6 +17,10 @@ Env:
   STREAM_PRICES_HEARTBEAT_S (default: 2.0)
   STREAM_PRICES_MIN_WRITE_INTERVAL_MS (default: 250)
 
+  STREAM_PRICES_WS_DEAD_AFTER_MS (default: 8000)
+  STREAM_PRICES_WS_RESTART_COOLDOWN_S (default: 10.0)
+  STREAM_PRICES_PROVIDER_HEALTH_EVERY_S (default: 2.0)
+
   JOB_LOCK_STALE_AFTER_S (default: 180)
 
 Notes:
@@ -28,8 +33,6 @@ import os
 import sys
 import threading
 import time
-import asyncio
-import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 if os.environ.get("ENGINE_SUPERVISED") != "1":
@@ -41,13 +44,15 @@ try:
 except Exception:
     websocket = None
 
-from engine.storage import (
+from engine.runtime.storage import (
     connect,
     init_db,
     acquire_job_lock,
     release_job_lock,
     touch_job_lock,
     put_job_heartbeat,
+    _tls_clear_if_matches,
+    _note_write,
 )
 
 JOB_NAME = "stream_prices_polygon_ws"
@@ -61,6 +66,10 @@ LOCK_STALE_AFTER_S = int(os.environ.get("JOB_LOCK_STALE_AFTER_S", "180"))
 
 PROVIDER_NAME = "polygon_ws"
 
+WS_DEAD_AFTER_MS = int(os.environ.get("STREAM_PRICES_WS_DEAD_AFTER_MS", "8000"))
+WS_RESTART_COOLDOWN_S = float(os.environ.get("STREAM_PRICES_WS_RESTART_COOLDOWN_S", "10.0"))
+PROVIDER_HEALTH_EVERY_S = float(os.environ.get("STREAM_PRICES_PROVIDER_HEALTH_EVERY_S", "2.0"))
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -71,6 +80,50 @@ def _safe_json_loads(s: str) -> Any:
         return json.loads(s)
     except Exception:
         return None
+
+
+def _put_provider_health(
+    provider: str,
+    ok: bool,
+    latency_ms: Optional[int],
+    n_symbols: int,
+    error: Optional[str],
+) -> None:
+    con = connect(readonly=False)
+    try:
+        con.execute(
+            """
+            INSERT INTO price_provider_health(ts_ms, provider, ok, latency_ms, n_symbols, error)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(_now_ms()),
+                str(provider),
+                1 if ok else 0,
+                int(latency_ms) if latency_ms is not None else None,
+                int(n_symbols),
+                (str(error)[:400] if error else None),
+            ),
+        )
+        try:
+            con.commit()
+        except Exception:
+            pass
+        try:
+            _note_write(con)
+        except Exception:
+            pass
+    except Exception:
+        # If the pooled connection is unhealthy, drop it.
+        try:
+            _tls_clear_if_matches(con)
+        except Exception:
+            pass
+        try:
+            con.close()
+        except Exception:
+            pass
+    # IMPORTANT: do not close on success (pooled)
 
 
 def _load_symbol_map() -> Dict[str, str]:
@@ -128,6 +181,17 @@ class _WsIngest:
     def close(self) -> None:
         self._stop = True
         try:
+            if self._ws:
+                self._ws.close()
+        except Exception:
+            pass
+
+    def restart(self) -> None:
+        # Force a reconnect cycle without stopping the background thread.
+        # Important: clear subscription state so main thread will resubscribe.
+        try:
+            with self._lock:
+                self._subscribed = set()
             if self._ws:
                 self._ws.close()
         except Exception:
@@ -207,6 +271,14 @@ class _WsIngest:
             backoff_s = min(30.0, backoff_s * 1.8)
 
     def _on_open(self, ws):
+        # New socket session => clear subscription tracking.
+        # Main loop will call ensure_subscriptions() and re-send.
+        try:
+            with self._lock:
+                self._subscribed = set()
+        except Exception:
+            pass
+
         try:
             ws.send(json.dumps({"action": "auth", "params": self.api_key}))
         except Exception:
@@ -354,7 +426,9 @@ def _flush_to_db(
         except Exception:
             ask_f = None
         try:
-            spread_f = float(spread) if spread is not None else (float(ask_f) - float(bid_f) if (ask_f is not None and bid_f is not None) else None)
+            spread_f = float(spread) if spread is not None else (
+                float(ask_f) - float(bid_f) if (ask_f is not None and bid_f is not None) else None
+            )
         except Exception:
             spread_f = None
         try:
@@ -366,7 +440,7 @@ def _flush_to_db(
         q_rows.append((int(rts), str(sym), last_f, bid_f, ask_f, spread_f, vol_f, str(PROVIDER_NAME)))
 
         if last_f is not None:
-            px_rows.append((int(rts), str(sym), float(last_f), str(PROVIDER_NAME)))
+            px_rows.append((int(rts), str(sym), float(last_f)))
 
     if raw_rows:
         con.executemany(
@@ -398,8 +472,8 @@ def _flush_to_db(
     if px_rows:
         con.executemany(
             """
-            INSERT OR REPLACE INTO prices(ts_ms, symbol, px, source)
-            VALUES (?,?,?,?)
+            INSERT OR REPLACE INTO prices(ts_ms, symbol, price)
+            VALUES (?,?,?)
             """,
             px_rows,
         )
@@ -429,9 +503,12 @@ def main():
     ws = _WsIngest(api_key=api_key, endpoint=endpoint, subscribe_trades=sub_trades, subscribe_quotes=sub_quotes)
 
     last_hb = 0.0
+    last_provider_health = 0.0
+    last_restart_s = 0.0
     last_sym_reload_ms = 0
     sym_to_poly: Dict[str, str] = {}
     last_write_by_symbol: Dict[str, int] = {}
+    last_flush_error: Optional[str] = None
 
     try:
         while True:
@@ -443,6 +520,19 @@ def main():
                 ws.ensure_subscriptions(set(sym_to_poly.values()))
                 last_sym_reload_ms = now_ms
 
+            ws_age_ms = int(ws.last_msg_age_ms())
+
+            # Dead-feed detector => force reconnect (cooldown guarded)
+            if ws_age_ms >= int(WS_DEAD_AFTER_MS):
+                if (now_s - last_restart_s) >= float(WS_RESTART_COOLDOWN_S):
+                    last_restart_s = now_s
+                    try:
+                        ws.restart()
+                    except Exception:
+                        pass
+
+            ws_age_ms = int(ws.last_msg_age_ms())
+
             if (now_s - last_hb) >= hb_s:
                 touch_job_lock(JOB_NAME, OWNER, PID)
                 put_job_heartbeat(
@@ -452,13 +542,26 @@ def main():
                     extra_json=json.dumps(
                         {
                             "provider": PROVIDER_NAME,
-                            "ws_age_ms": int(ws.last_msg_age_ms()),
+                            "ws_age_ms": int(ws_age_ms),
                             "n_symbols": int(len(sym_to_poly)),
+                            "last_flush_error": last_flush_error,
                         },
                         separators=(",", ":"),
                     ),
                 )
                 last_hb = now_s
+
+            if (now_s - last_provider_health) >= float(PROVIDER_HEALTH_EVERY_S):
+                ok = ws_age_ms < int(WS_DEAD_AFTER_MS)
+                # latency_ms unknown here; store ws_age_ms as a proxy
+                _put_provider_health(
+                    PROVIDER_NAME,
+                    ok=bool(ok),
+                    latency_ms=int(ws_age_ms),
+                    n_symbols=int(len(sym_to_poly)),
+                    error=last_flush_error,
+                )
+                last_provider_health = now_s
 
             snap = ws.snapshot()
 
@@ -474,13 +577,27 @@ def main():
                     last_write_by_symbol=last_write_by_symbol,
                 )
                 con.execute("COMMIT;")
-            except Exception:
+                last_flush_error = None
+                try:
+                    _note_write(con)
+                except Exception:
+                    pass
+            except Exception as e:
+                last_flush_error = (repr(e) or "flush_error")[:400]
                 try:
                     con.execute("ROLLBACK;")
                 except Exception:
                     pass
-            finally:
-                con.close()
+                # Drop pooled connection on DB error to force a fresh open next loop
+                try:
+                    _tls_clear_if_matches(con)
+                except Exception:
+                    pass
+                try:
+                    con.close()
+                except Exception:
+                    pass
+            # IMPORTANT: do not close on success (pooled)
 
             time.sleep(max(0.05, float(flush_ms) / 1000.0))
 

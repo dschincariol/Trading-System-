@@ -17,7 +17,7 @@ import json
 import time
 import traceback
 
-from engine.storage import connect, init_db
+from engine.runtime.storage import connect, init_db
 from engine.validation import init_validation_db
 
 

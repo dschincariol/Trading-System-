@@ -1,8 +1,6 @@
-# REPLACE ENTIRE FILE: dev_core/live_prices/provider.py
 import os
 import time
-from engine.storage import connect
-from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.runtime.storage import connect
 
 
 def _provider_health_key(name: str) -> str:
@@ -22,8 +20,15 @@ def _record_provider_failure(name: str):
             """,
             (_provider_health_key(name), "fail", int(time.time() * 1000)),
         )
+        try:
+            con.commit()
+        except Exception:
+            pass
     finally:
-        con.close()
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 def _record_provider_success(name: str):
@@ -39,27 +44,34 @@ def _record_provider_success(name: str):
             """,
             (_provider_health_key(name), "ok", int(time.time() * 1000)),
         )
+        try:
+            con.commit()
+        except Exception:
+            pass
     finally:
-        con.close()
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 def get_price_provider_by_name(provider: str):
     provider = str(provider or "").strip().lower()
 
     if provider == "ibkr":
-        from engine.live_prices.ibkr_live import IBKRPriceProvider
+        from engine.data.live_prices.ibkr_live import IBKRPriceProvider
         return IBKRPriceProvider()
 
     if provider == "polygon":
-        from engine.live_prices.polygon_live import PolygonPriceProvider
+        from engine.data.live_prices.polygon_live import PolygonPriceProvider
         return PolygonPriceProvider()
 
     if provider == "ccxt":
-        from engine.live_prices.ccxt_live import CCXTPriceProvider
+        from engine.data.live_prices.ccxt_live import CCXTPriceProvider
         return CCXTPriceProvider()
 
     if provider == "yfinance":
-        from engine.live_prices.yfinance_live import YFinancePriceProvider
+        from engine.data.live_prices.yfinance_live import YFinancePriceProvider
         return YFinancePriceProvider()
 
     raise RuntimeError(f"Unknown live price provider: {provider}")
@@ -68,9 +80,7 @@ def get_price_provider_by_name(provider: str):
 def get_price_provider():
     provider = os.environ.get("LIVE_PRICE_PROVIDER", "yfinance").lower()
 
-    # --------------------------------------------------
     # Preferred provider
-    # --------------------------------------------------
     try:
         p = get_price_provider_by_name(provider)
         _record_provider_success(provider)
@@ -78,10 +88,7 @@ def get_price_provider():
     except Exception:
         _record_provider_failure(provider)
 
-    # --------------------------------------------------
-    # Optional explicit failover chain (comma-separated)
-    # Example: LIVE_PRICE_PROVIDER_CHAIN="ibkr,polygon,yfinance,ccxt"
-    # --------------------------------------------------
+    # Optional explicit failover chain
     chain = os.environ.get("LIVE_PRICE_PROVIDER_CHAIN", "").strip()
     if chain:
         for name in [x.strip().lower() for x in chain.split(",") if x.strip()]:
@@ -92,9 +99,7 @@ def get_price_provider():
             except Exception:
                 _record_provider_failure(name)
 
-    # --------------------------------------------------
-    # HARD FAILOVER CHAIN (deterministic, legacy behavior + IBKR first)
-    # --------------------------------------------------
+    # Hard fallback
     for name in ("ibkr", "polygon", "yfinance", "ccxt"):
         try:
             p = get_price_provider_by_name(name)

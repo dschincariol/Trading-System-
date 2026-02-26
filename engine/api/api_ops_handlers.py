@@ -8,34 +8,8 @@ All runtime objects are accessed via ctx.
 """
 
 from __future__ import annotations
-
-from urllib.parse import parse_qs
-
-from engine.runtime.lifecycle import snapshot as lifecycle_snapshot
 from engine.runtime.gates import execution_gate_snapshot
-
-def _qs(parsed):
-    try:
-        q = parse_qs(parsed.query or "")
-        return {k: v[0] for k, v in q.items()}
-    except Exception:
-        return {}
-
-
-def _deny_if_shutdown():
-    try:
-        snap = lifecycle_snapshot() or {}
-        if str(snap.get("state") or "").upper() == "SHUTDOWN":
-            return {"ok": False, "error": "server_shutting_down"}
-    except Exception:
-        pass
-    return None
-    try:
-        q = parse_qs(parsed.query or "")
-        return {k: v[0] for k, v in q.items()}
-    except Exception:
-        return {}
-
+from engine.api.http_parsing import qs as _qs
 
 # ----------------------------
 # Simple pass-through GETs
@@ -90,15 +64,13 @@ def api_get_temporal_eval(parsed, ctx):
     return get_temporal_eval(limit=limit)
 
 
-def api_get_temporal_models(parsed, ctx):
-    from engine.api.api_dashboard_reads import api_get_temporal_models
-    return api_get_temporal_models(parsed, ctx)
-
+def api_get_model_diagnostics(_parsed, ctx):
+    from engine.api.api_read_advanced import get_model_diagnostics
+    return {"ok": True, "data": get_model_diagnostics()}
 
 def api_get_latest_portfolio_backtest(_parsed, ctx):
-    from engine.api.api_dashboard_reads import api_get_latest_portfolio_backtest
-    return api_get_latest_portfolio_backtest(_parsed, ctx)
-
+    from engine.api.api_read_advanced import get_latest_portfolio_backtest
+    return get_latest_portfolio_backtest()
 
 def api_get_execution_metrics(_parsed, ctx):
     from engine.api.api_read import get_execution_metrics
@@ -111,19 +83,23 @@ def api_get_execution_metrics_rolling(_parsed, ctx):
 
 
 def api_get_execution_metrics_by_symbol(parsed, ctx):
-    from engine.api.api_dashboard_reads import api_get_execution_metrics_by_symbol
-    return api_get_execution_metrics_by_symbol(parsed, ctx)
+    from engine.api.api_read_advanced import get_execution_metrics_by_symbol
+    qs = _qs(parsed)
+    limit = int(qs.get("limit", "50") or "50")
+    return get_execution_metrics_by_symbol(limit=limit)
 
-
-def api_get_execution_cost_by_confidence(parsed, ctx):
-    from engine.api.api_dashboard_reads import api_get_execution_cost_by_confidence
-    return api_get_execution_cost_by_confidence(parsed, ctx)
-
+def api_get_execution_cost_by_confidence(_parsed, ctx):
+    from engine.api.api_read_advanced import get_execution_cost_by_confidence
+    return get_execution_cost_by_confidence()
 
 def api_get_social_features(parsed, ctx):
-    from engine.api.api_dashboard_reads import api_get_social_features
-    return api_get_social_features(parsed, ctx)
-
+    from engine.api.api_read_advanced import get_social_features
+    qs = _qs(parsed)
+    symbol = str(qs.get("symbol", "") or "").strip()
+    if not symbol:
+        return {"ok": False, "error": "missing_symbol"}
+    limit = int(qs.get("limit", "200") or "200")
+    return get_social_features(symbol=symbol, limit=limit)
 
 def api_get_social_regimes(parsed, ctx):
     from engine.api.api_dashboard_reads import api_get_social_regimes

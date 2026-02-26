@@ -24,7 +24,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from engine.storage import connect, init_db
+from engine.runtime.storage import connect, init_db
 from engine.kill_switch import set_kill_switch
 
 

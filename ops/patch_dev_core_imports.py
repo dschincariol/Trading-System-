@@ -26,11 +26,11 @@ MAP = {
     "engine.ingest.gdelt_ingest": "engine.data.ingest.gdelt_ingest",
     "engine.ingest.options_polygon": "engine.data.options.options_polygon",
 
-    "engine.live_prices.ccxt_live": "engine.data.live_prices.ccxt_live",
-    "engine.live_prices.ibkr_live": "engine.data.live_prices.ibkr_live",
-    "engine.live_prices.polygon_live": "engine.data.live_prices.polygon_live",
-    "engine.live_prices.provider": "engine.data.live_prices.provider",
-    "engine.live_prices.yfinance_live": "engine.data.live_prices.yfinance_live",
+    "engine.data.live_prices.ccxt_live": "engine.data.live_prices.ccxt_live",
+    "engine.data.live_prices.ibkr_live": "engine.data.live_prices.ibkr_live",
+    "engine.data.live_prices.polygon_live": "engine.data.live_prices.polygon_live",
+    "engine.data.live_prices.provider": "engine.data.live_prices.provider",
+    "engine.data.live_prices.yfinance_live": "engine.data.live_prices.yfinance_live",
 
     "engine.options.options_polygon": "engine.data.options.options_polygon",
     "engine.options.tradier_live": "engine.data.options.tradier_live",

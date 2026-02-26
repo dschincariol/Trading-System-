@@ -16,7 +16,7 @@ import math
 import time
 from typing import Dict, Any, List, Optional
 
-from engine.storage import connect
+from engine.runtime.storage import connect
 
 
 # ============================================================
@@ -620,7 +620,7 @@ import math
 import time
 from typing import Dict, Any, List, Optional
 
-from engine.storage import connect
+from engine.runtime.storage import connect
 
 
 # ============================================================

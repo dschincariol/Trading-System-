@@ -18,7 +18,7 @@ import time
 import math
 from typing import List, Tuple, Optional
 
-from engine.storage import connect, init_db
+from engine.runtime.storage import connect, init_db
 
 from engine.training_guard import training_allowed
 

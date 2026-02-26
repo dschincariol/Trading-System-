@@ -76,11 +76,11 @@ def compute_system_state(
     running_oneshots = []
 
     if isinstance(jobs, dict):
-        jobs_iter = jobs.values()
+        jobs_list = list(jobs.values())
     else:
-        jobs_iter = jobs or []
+        jobs_list = list(jobs or [])
 
-    for j in jobs_iter:
+    for j in jobs_list:
         try:
             if j.get("running"):
                 if str(j.get("mode") or "") == "daemon":
@@ -145,7 +145,7 @@ def compute_system_state(
     # -------------------------------------------------------
     # BOOTING (no jobs visible)
     # -------------------------------------------------------
-    if not jobs_iter:
+    if not jobs_list:
         out["state"] = STATE_BOOTING
         out["reasons"].append("no_jobs_visible")
         out["ok"] = False
@@ -179,6 +179,7 @@ def compute_system_state(
     has_price_daemon = (
         "poll_prices" in running_daemons
         or "stream_prices_polygon_ws" in running_daemons
+        or "stream_prices_ibkr" in running_daemons
     )
 
     if has_price_daemon and prices_age_s <= max_age_s:

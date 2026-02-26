@@ -7,7 +7,9 @@ ROUTE_SPECS = [
     ("GET", "/api/jobs/history", "api_get_job_history"),
     ("GET", "/api/jobs", "api_get_jobs"),
     ("POST", "/api/jobs/start", "api_post_job_start"),
+    ("GET", "/api/jobs/start", "api_post_job_start"),
     ("POST", "/api/jobs/stop", "api_post_job_stop"),
+    ("GET",  "/api/jobs/stop", "api_post_job_stop"),
     ("POST", "/api/pipeline/run", "api_post_pipeline_run"),
 ]
 
@@ -18,32 +20,8 @@ ROUTE_SPECS_JOBS = ROUTE_SPECS
 # ----------------------------------------------------------------------
 
 import time
-from urllib.parse import parse_qs
+from engine.api.http_parsing import qs as _qs
 from engine.runtime.job_registry import ALLOWED_JOBS, PIPELINE_ORDER, JOB_ORDER
-
-
-def _qs(parsed):
-    try:
-        q = parse_qs(parsed.query or "")
-        return {k: v[0] for k, v in q.items()}
-    except Exception:
-        return {}
-
-
-def _deny_if_shutdown():
-    try:
-        snap = lifecycle_snapshot() or {}
-        if str(snap.get("state") or "").upper() == "SHUTDOWN":
-            return {"ok": False, "error": "server_shutting_down"}
-    except Exception:
-        pass
-    return None
-    try:
-        q = parse_qs(parsed.query or "")
-        return {k: v[0] for k, v in q.items()}
-    except Exception:
-        return {}
-
 
 def _job_name_from(parsed, body) -> str:
     qs = _qs(parsed)
@@ -99,33 +77,54 @@ def api_get_jobs(parsed, ctx):
     }
 
 
-def api_post_job_start(parsed, body, ctx):
-    JOBS = ctx["JOBS"]
-
-    name = _job_name_from(parsed, body)
-    if not name:
-        return {"ok": False, "error": "missing_name"}
-
-    if name not in ALLOWED_JOBS:
-        return {"ok": False, "error": f"job_not_allowed:{name}"}
-
+def api_post_job_start(parsed, body=None, ctx=None):
     try:
-        return JOBS.start(name)
+        from urllib.parse import parse_qs
+
+        query = getattr(parsed, "query", "") or ""
+        q = parse_qs(query)
+        name = (q.get("name") or [""])[0].strip()
+
+        if not name:
+            return {"ok": False, "error": "missing_name"}
+
+        jobs = (ctx or {}).get("JOBS")
+        if not jobs:
+            return {"ok": False, "error": "jobs_manager_unavailable"}
+
+        jobs.start(name)
+
+        return {
+            "ok": True,
+            "job": name,
+            "started": True,
+        }
+
     except Exception as e:
         return {"ok": False, "error": str(e)}
-
-
-def api_post_job_stop(parsed, body, ctx):
-    JOBS = ctx["JOBS"]
-
-    name = _job_name_from(parsed, body)
-    if not name:
-        return {"ok": False, "error": "missing_name"}
-
-    if name not in ALLOWED_JOBS:
-        return {"ok": False, "error": f"job_not_allowed:{name}"}
-
+    
+def api_post_job_stop(parsed, body=None, ctx=None):
     try:
-        return JOBS.stop(name)
+        from urllib.parse import parse_qs
+
+        query = getattr(parsed, "query", "") or ""
+        q = parse_qs(query)
+        name = (q.get("name") or [""])[0].strip()
+
+        if not name:
+            return {"ok": False, "error": "missing_name"}
+
+        jobs = (ctx or {}).get("JOBS")
+        if not jobs:
+            return {"ok": False, "error": "jobs_manager_unavailable"}
+
+        jobs.stop(name)
+
+        return {
+            "ok": True,
+            "job": name,
+            "stopped": True,
+        }
+
     except Exception as e:
         return {"ok": False, "error": str(e)}

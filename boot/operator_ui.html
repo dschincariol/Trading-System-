@@ -106,17 +106,21 @@
       box-sizing:border-box;
       background:#fbfdff;
     }
-    pre{
-      background:#0b1220;
-      color:#e5e7eb;
-      padding:12px;
-      border-radius:12px;
-      overflow:auto;
-      font-family: var(--mono);
-      font-size:12px;
-      line-height:1.35;
-      max-height:340px;
-    }
+pre{
+  background:#0b1220;
+  color:#e5e7eb;
+  padding:12px;
+  border-radius:12px;
+  overflow-y:auto;
+  overflow-x:hidden;
+  font-family: var(--mono);
+  font-size:12px;
+  line-height:1.35;
+  height:340px;
+  max-height:340px;
+  white-space:pre-wrap;
+  word-break:break-word;
+}
     .kvs{
       display:grid;
       grid-template-columns: 1fr 1fr;
@@ -222,6 +226,7 @@
         </div>
 
         <div class="row" style="margin-top:10px;">
+          <button class="ghost" onclick="preflight()">Preflight</button>
           <button onclick="start()">Start</button>
           <button class="secondary" onclick="stop()">Stop</button>
           <button onclick="restart()">Restart</button>
@@ -275,9 +280,10 @@
             <div style="font-weight:900; font-size:14px;">Logs</div>
             <div class="muted">Tail of runtime.log (auto-refreshed).</div>
           </div>
-          <div class="row">
-            <button class="ghost" onclick="loadLogs()">Refresh</button>
-          </div>
+<div class="row">
+  <button class="ghost" onclick="loadLogs()">Refresh</button>
+  <button class="ghost" onclick="copyLogs()">Copy</button>
+</div>
         </div>
         <pre id="logs">(loading…)</pre>
       </div>
@@ -316,9 +322,10 @@
             <div style="font-weight:900; font-size:14px;">Bootstrap Snapshot</div>
             <div class="muted">Operator + engine bootstrap diagnostic.</div>
           </div>
-          <div class="row">
-            <button class="ghost" onclick="loadBootstrap()">Refresh</button>
-          </div>
+<div class="row">
+  <button class="ghost" onclick="loadBootstrap()">Refresh</button>
+  <button class="ghost" onclick="copySnapshot()">Copy Snapshot</button>
+</div>
         </div>
         <pre id="bootstrap">(loading…)</pre>
       </div>
@@ -326,7 +333,7 @@
 
   </div>
 
-<script>
+<script type="module">
 let selectedMode = "safe"; // safe | shadow | live
 
 function esc(s){
@@ -564,6 +571,32 @@ async function saveSecret(){
   await loadSecrets();
 }
 
+async function preflight(){
+  try{
+    renderWizard([{ ok:false, label:"Preflight…", detail:"checking entry, python, port, db, config" }], false);
+
+    const r = await jget(`/api/operator/preflight?mode=${encodeURIComponent(selectedMode)}`);
+
+    const steps = [];
+    if (r && Array.isArray(r.checks)) {
+      for (const c of r.checks) {
+        steps.push({
+          ok: !!c.ok,
+          label: c.label || c.id || "check",
+          detail: (typeof c.details === "string") ? c.details : JSON.stringify(c.details || "", null, 2)
+        });
+      }
+    } else {
+      steps.push({ ok:false, label:"Preflight failed", detail: JSON.stringify(r || {}, null, 2) });
+    }
+
+    renderWizard(steps, !!(r && r.ok));
+    await refreshAll();
+  }catch(e){
+    renderWizard([{ ok:false, label:"Preflight exception", detail:String(e) }], false);
+  }
+}
+
 async function start(){
   if(selectedMode === "live"){
     const c = prompt("TRADING mode enables real execution.\nType TRADE to confirm:");
@@ -582,6 +615,24 @@ async function start(){
 
   await refreshAll();
 }
+
+window.preflight = preflight;
+window.start = start;
+window.stop = stop;
+window.restart = restart;
+window.repairSystem = repairSystem;
+window.runInstitutional = runInstitutional;
+window.clearLastError = clearLastError;
+window.factoryReset = factoryReset;
+window.saveSecret = saveSecret;
+window.loadSecrets = loadSecrets;
+window.validateConfig = validateConfig;
+window.saveConfig = saveConfig;
+window.loadLogs = loadLogs;
+window.loadBootstrap = loadBootstrap;
+window.copyLogs = copyLogs;
+window.copySnapshot = copySnapshot;
+window.setMode = setMode;
 
 async function stop(){
   await jpost("/api/operator/stop");
@@ -631,6 +682,156 @@ async function refreshAll(){
   await updateDashboardLink();
 }
 
+// ---------------------------------
+// Copy Helpers (GLOBAL)
+// ---------------------------------
+async function copyLogs(){
+  try{
+    const text = document.getElementById("logs").innerText || "";
+    await navigator.clipboard.writeText(text);
+    alert("Logs copied to clipboard.");
+  }catch(e){
+    alert("Copy failed.");
+  }
+}
+
+// ---------------------------------
+// Unified Snapshot Copy (GLOBAL)
+// Copies: operator status + readiness + bootstrap + logs
+// ---------------------------------
+// ---------------------------------
+// FULL FORENSIC SNAPSHOT
+// ---------------------------------
+async function buildSnapshotBundle(){
+  const out = {
+    at: new Date().toISOString()
+  };
+
+  async function safe(name, url){
+    try{
+      out[name] = await jget(url);
+    }catch(e){
+      out[name] = { ok:false, error:String(e) };
+    }
+  }
+
+  await Promise.all([
+    safe("operator_status", "/api/operator/status"),
+    safe("readiness", "/api/operator/readiness"),
+    safe("bootstrap", "/api/operator/bootstrapStatus"),
+    safe("jobs", "/api/operator/proxy/jobs"),
+    safe("telemetry", "/api/operator/proxy/telemetry"),
+    safe("system_state", "/api/operator/proxy/system_state"),
+    safe("validation", "/api/operator/proxy/validation"),
+    safe("health", "/api/operator/proxy/health")
+  ]);
+
+  try{
+    out.python_stderr_tail = await jget("/api/operator/stderr_tail?limit=2000");
+  }catch(e){
+    out.python_stderr_tail = { ok:false };
+  }
+
+  try{
+    out.db_schema = await jget("/api/operator/db_schema");
+  }catch(e){
+    out.db_schema = { ok:false };
+  }
+
+  out.logs = document.getElementById("logs").innerText || "";
+
+  return out;
+}
+async function copySnapshot(){
+  const bundle = await buildSnapshotBundle();
+  try{
+    await navigator.clipboard.writeText(JSON.stringify(bundle, null, 2));
+    alert("Snapshot copied to clipboard.");
+  }catch(e){
+    alert("Copy failed.");
+  }
+}
+
+// ---------------------------------
+// AUTO REMEDIATION LOOP (GLOBAL)
+// Self-recovers without manual Start
+// ---------------------------------
+let _autoRemediationBusy = false;
+let _autoFailCount = 0;
+let _autoBackoffMs = 0;
+let _autoLastActionAt = 0;
+
+async function autoRemediationCheck(){
+  if(_autoRemediationBusy) return;
+
+  const now = Date.now();
+  if(_autoBackoffMs > 0 && (now - _autoLastActionAt) < _autoBackoffMs) return;
+
+  _autoRemediationBusy = true;
+
+  try{
+    const status = await jget("/api/operator/status");
+    const readiness = await jget("/api/operator/readiness");
+
+    // 1) If engine not running -> restart
+    if(status.status !== "RUNNING"){
+      console.log("[AUTO] Engine not running -> restart()");
+      _autoLastActionAt = Date.now();
+      await jpost("/api/operator/restart", { mode: status.lastMode || "safe" });
+      _autoFailCount = 0;
+      _autoBackoffMs = 2000;
+      _autoRemediationBusy = false;
+      return;
+    }
+// ----------------------------------
+// Ensure Polygon Stream Alive
+// ----------------------------------
+try{
+  const polygon = await jpost("/api/operator/ensure_polygon_stream");
+  if(polygon && polygon.action === "started"){
+    console.log("[AUTO] Polygon stream started.");
+  }
+}catch(e){
+  console.warn("[AUTO] Polygon ensure error:", e);
+}
+    // 2) If engine running but health failing -> autofix
+if(readiness && readiness.issues && readiness.issues.some(i => i.level === "error")){
+
+  // Detect schema failure
+  if(readiness.issues){
+    const schemaFail = readiness.issues.find(i =>
+      i.code && i.code.includes("missing_tables")
+    );
+    if(schemaFail){
+      console.log("[AUTO] Schema missing -> migrate()");
+      await jpost("/api/operator/repairSchema");
+      await jpost("/api/operator/restart", { mode: "safe" });
+      _autoRemediationBusy = false;
+      return;
+    }
+  }
+
+  console.log("[AUTO] Health failing -> autofix()");
+  await jpost("/api/operator/autofix");
+  _autoRemediationBusy = false;
+  return;
+}
+
+    // healthy: reset backoff
+    _autoFailCount = 0;
+    _autoBackoffMs = 0;
+
+  }catch(e){
+    _autoFailCount += 1;
+    _autoLastActionAt = Date.now();
+    _autoBackoffMs = Math.min(60000, 2000 * _autoFailCount); // capped exponential-ish
+    console.warn("[AUTO] remediation error:", e);
+  }
+
+  _autoRemediationBusy = false;
+}
+
+// Refresh UI loop
 setInterval(async () => {
   await refreshAll();
 }, 3500);

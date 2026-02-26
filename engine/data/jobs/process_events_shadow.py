@@ -55,7 +55,7 @@ if torch.cuda.is_available():
 # -----------------------------------------------------------------------------
 # Project imports
 # -----------------------------------------------------------------------------
-from engine.storage import (
+from engine.runtime.storage import (
     connect,
     connect_ro,
     init_db,
@@ -65,9 +65,9 @@ from engine.storage import (
     put_job_heartbeat,
 )
 
-from engine.universe import get_active_symbols
+from engine.data.universe import get_active_symbols
 from engine.rules_engine import evaluate_rules
-from engine.kill_switch import execution_allowed
+from engine.execution.kill_switch import execution_allowed
 
 # Optional heavy subsystems
 try:

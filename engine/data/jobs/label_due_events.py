@@ -19,7 +19,7 @@ import logging
 import random
 from typing import Optional
 
-from engine.storage import (
+from engine.runtime.storage import (
     connect,
     init_db,
     acquire_job_lock,
@@ -28,7 +28,7 @@ from engine.storage import (
     put_job_heartbeat,
     put_event,
 )
-from engine.model_v2 import classify_regime
+from engine.strategy.model_v2 import classify_regime
 
 # ---------------            -- ------------------------------------------------------
 # Job / runtime config

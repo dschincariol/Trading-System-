@@ -54,7 +54,7 @@ try:
 except Exception:
     pass
 
-from engine.storage import connect, init_db, acquire_job_lock, release_job_lock
+from engine.runtime.storage import connect, init_db, acquire_job_lock, release_job_lock
 from engine.asset_map import asset_class_for_symbol
 from engine.training_guard import training_allowed
 

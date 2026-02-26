@@ -22,14 +22,14 @@ import time
 import math
 from typing import Dict, List, Optional, Tuple
 
-from engine.storage import connect
-from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
-from engine.strategy_selector import choose_strategy_name, load_strategy_module
-from engine.universe import get_active_symbols
-from engine.symbol_blacklist import is_blacklisted
-from engine.portfolio_risk_gate import apply_portfolio_risk_gate
-from engine.risk_state import get_state
-from engine.factor_universe import _get_feature_asof as _get_factor_feature_asof
+from engine.runtime.storage import connect
+from engine.execution.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.strategy.strategy_selector import choose_strategy_name, load_strategy_module
+from engine.data.universe import get_active_symbols
+from engine.strategy.symbol_blacklist import is_blacklisted
+from engine.strategy.portfolio_risk_gate import apply_portfolio_risk_gate
+from engine.runtime.risk_state import get_state
+from engine.runtime.factor_universe import _get_feature_asof as _get_factor_feature_asof
 
 # -----------------------------
 # Strategy controls (env)
@@ -1498,7 +1498,7 @@ def compute_rebalance() -> Dict:
 
                 # --- Regime Vector Injection ---
                 try:
-                    from engine.regime_stack import compute_regime_vector, regime_compatibility
+                    from engine.strategy.regime_stack import compute_regime_vector, regime_compatibility
 
                     regime_vector = compute_regime_vector(s)
 
@@ -1890,7 +1890,7 @@ def compute_rebalance() -> Dict:
         # ---            -- ------------------------------------------------------
         try:
             from engine.size_policy import load_latest_size_policy, size_factor
-            from engine.drawdown_state import get_current_drawdown
+            from engine.strategy.drawdown_state import get_current_drawdown
 
             pol = load_latest_size_policy(con)
             if pol:

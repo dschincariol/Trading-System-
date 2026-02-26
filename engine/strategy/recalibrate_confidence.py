@@ -9,10 +9,10 @@ Idempotent and safe to run repeatedly.
 import os
 import time
 
-from engine.storage import init_db, acquire_job_lock, release_job_lock
+from engine.runtime.storage import init_db, acquire_job_lock, release_job_lock
 from engine.training_guard import training_allowed
 from engine.embed_regressor import train_embed_models
-from engine.learning import learn_relevance_stats
+from engine.strategy.learning import learn_relevance_stats
 
 
 def main():

@@ -149,7 +149,7 @@ def _build_covariance(con, syms: List[str], lookback: int) -> Tuple[List[List[fl
     Σ_ij = corr(i,j) * vol_i * vol_j
     Returns (Sigma, vols)
     """
-    from engine.risk import realized_vol_from_prices, corr_from_prices
+    from engine.strategy.risk import realized_vol_from_prices, corr_from_prices
 
     n = len(syms)
     vols = []

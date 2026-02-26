@@ -7,7 +7,7 @@ import time
 import math
 from collections import defaultdict
 
-from engine.storage import connect, init_db
+from engine.runtime.storage import connect, init_db
 
 
 def main():

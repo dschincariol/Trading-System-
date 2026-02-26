@@ -182,7 +182,7 @@ def build_feature_vector(*, event: Dict, symbol: str) -> list:
     # --------            -- ------------------------------------------------------
     if USE_FACTOR_UNIVERSE:
         try:
-            from engine.factor_universe import FACTOR_FEATURE_DIM, get_factor_universe_vector
+            from engine.runtime.factor_universe import FACTOR_FEATURE_DIM, get_factor_universe_vector
             fv = get_factor_universe_vector(ts_ms=ts_ms) or []
             if len(fv) != int(FACTOR_FEATURE_DIM):
                 fv = [0.0] * int(FACTOR_FEATURE_DIM)
@@ -219,7 +219,7 @@ def build_feature_vector(*, event: Dict, symbol: str) -> list:
     # --------            -- ------------------------------------------------------
     if USE_WEATHER_FEATURES:
         try:
-            from engine.weather_features import get_weather_feature_snapshot
+            from engine.data.weather_features import get_weather_feature_snapshot
             wx = get_weather_feature_snapshot(symbol=str(symbol), ts_ms=ts_ms) or {}
         except Exception:
             wx = {}

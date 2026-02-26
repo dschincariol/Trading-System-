@@ -9,8 +9,8 @@ import math
 import logging
 import numpy as np
 
-from engine.storage import connect, init_db
-from engine.factor_universe import put_factor_feature
+from engine.runtime.storage import connect, init_db
+from engine.runtime.factor_universe import put_factor_feature
 
 LOG = logging.getLogger("compute_options_skew")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))

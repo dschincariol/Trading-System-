@@ -3,7 +3,7 @@ import time
 import json
 import logging
 
-from engine.storage import (
+from engine.runtime.storage import (
     init_db,
     acquire_job_lock,
     release_job_lock,
@@ -13,7 +13,7 @@ from engine.storage import (
     put_event,
 )
 
-from engine.universe import get_active_symbols
+from engine.data.universe import get_active_symbols
 from engine.ingest.gdelt_ingest import ingest_gdelt_doc
 
 JOB_NAME = "poll_gdelt"

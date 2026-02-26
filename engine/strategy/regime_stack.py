@@ -20,8 +20,8 @@ import json
 import time
 from typing import Any, Dict, Optional
 
-from engine.storage import connect
-from engine.factor_universe import _get_feature_asof as _get_factor_feature_asof
+from engine.runtime.storage import connect
+from engine.runtime.factor_universe import _get_feature_asof as _get_factor_feature_asof
 
 
 _REGIME_MODEL_VERSION = os.environ.get("REGIME_MODEL_VERSION", "regime_stack_v1")

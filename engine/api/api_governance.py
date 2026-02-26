@@ -52,7 +52,7 @@ def api_post_rollback(_parsed=None, _body=None, _ctx=None):
 
 def get_promotion_status():
     try:
-        from engine.promotion_guard import promotion_allowed
+        from engine.strategy.promotion_guard import promotion_allowed
         allowed = bool(promotion_allowed())
     except Exception:
         allowed = False

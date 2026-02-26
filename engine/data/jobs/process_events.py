@@ -186,7 +186,7 @@ if torch.cuda.is_available():
         _LIVE_STREAM = None
         _SHADOW_STREAM = None
 
-from engine.storage import (
+from engine.runtime.storage import (
     connect,
     connect_ro,
     init_db,
@@ -200,16 +200,16 @@ from engine.storage import (
 )
 
 from engine.predictor import predict_event
-from engine.alerts import emit_alert, init_alerts_db
+from engine.runtime.alerts import emit_alert, init_alerts_db
 from engine.validation import store_prediction, init_validation_db
 from engine.decision_log import log_decision, hash_feature_vector
 from engine.confidence_adjust import get_adjusted_confidence
-from engine.universe import get_active_symbols
-from engine.model_v2 import get_current_regime
+from engine.data.universe import get_active_symbols
+from engine.strategy.model_v2 import get_current_regime
 from engine.news_domain import extract_domain, is_domain_blocked, domain_conf_multiplier
-from engine.symbol_blacklist import is_blacklisted
+from engine.strategy.symbol_blacklist import is_blacklisted
 from engine.rules_engine import evaluate_rules
-from engine.kill_switch import execution_allowed
+from engine.execution.kill_switch import execution_allowed
 
 # ------            -- ------------------------------------------------------
 # Optional subsystems (shadow-safe)

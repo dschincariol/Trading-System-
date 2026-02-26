@@ -15,7 +15,7 @@ import time
 import socket
 import os as _os
 
-from engine.storage import connect, init_db, acquire_job_lock, release_job_lock
+from engine.runtime.storage import connect, init_db, acquire_job_lock, release_job_lock
 from engine.embed_regressor import train_embed_models
 from engine.training_guard import training_allowed
 

@@ -24,14 +24,14 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from engine.storage import connect, init_db, acquire_job_lock, release_job_lock
-from engine.kill_switch import execution_allowed
+from engine.runtime.storage import connect, init_db, acquire_job_lock, release_job_lock
+from engine.execution.kill_switch import execution_allowed
 from engine.position_reconcile import pre_live_position_reconcile
 from engine.adaptive_order_slicer import AdaptiveOrderSlicer
-from engine.portfolio_risk_gate import apply_execution_risk_governor
+from engine.strategy.portfolio_risk_gate import apply_execution_risk_governor
 from engine.rules_engine import evaluate_rules
-from engine.execution_mode import get_execution_mode
-from engine.regime_stack import compute_regime_vector, regime_compatibility, regime_model_version
+from engine.execution.execution_mode import get_execution_mode
+from engine.strategy.regime_stack import compute_regime_vector, regime_compatibility, regime_model_version
 from engine.broker_router import apply_new_portfolio_orders_router as apply_new_portfolio_orders
 
 # Newer path (preferred)
@@ -42,7 +42,7 @@ except Exception:
 
 # EPE import (support both module names)
 try:
-    from engine.execution_policy_engine import apply_execution_policy  # type: ignore
+    from engine.execution.execution_policy_engine import apply_execution_policy  # type: ignore
 except Exception:
     try:
         from engine.execution.execution_policy_engine import apply_execution_policy  # type: ignore

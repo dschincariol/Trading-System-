@@ -1,4 +1,3 @@
-# engine/api/http_transport.py
 """
 HTTP transport layer only.
 
@@ -16,10 +15,38 @@ from urllib.parse import urlparse, parse_qs
 
 
 def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, static_dir=None):
+    """
+    Builds and returns a configured HTTP request handler class.
+    """
 
-    routes = {(m, p): h for (m, p, h) in ROUTE_SPECS}
+    # ------------------------------------------------------------
+    # Normalize ROUTE_SPECS (supports dict and tuple formats)
+    # ------------------------------------------------------------
+    routes = {}
+
+    for r in ROUTE_SPECS:
+        # dict style: {"method": "...", "path": "...", "handler": "..."}
+        if isinstance(r, dict):
+            method = str(r.get("method", "")).upper()
+            path = str(r.get("path", ""))
+            handler = r.get("handler")
+            if method and path and handler:
+                routes[(method, path)] = handler
+            continue
+
+        # tuple style: (method, path, handler)
+        if isinstance(r, tuple) and len(r) >= 3:
+            method = str(r[0]).upper()
+            path = str(r[1])
+            handler = r[2]
+            routes[(method, path)] = handler
+            continue
+
     _STATIC_DIR = static_dir or os.getcwd()
 
+    # ------------------------------------------------------------
+    # Handler Class
+    # ------------------------------------------------------------
     class Handler(SimpleHTTPRequestHandler):
 
         ROUTES = routes
@@ -30,9 +57,12 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, stat
             try:
                 super().__init__(*args, directory=_STATIC_DIR, **kwargs)
             except TypeError:
-                # Older Python fallback: leave default behavior
+                # Older Python fallback
                 super().__init__(*args, **kwargs)
 
+        # --------------------------------------------------------
+        # Helpers
+        # --------------------------------------------------------
 
         def _normalize_ui_legacy_path(self):
             try:
@@ -47,12 +77,15 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, stat
                 n = int(self.headers.get("Content-Length") or "0")
             except Exception:
                 n = 0
+
             if n <= 0:
                 return None
+
             try:
                 raw = self.rfile.read(n)
             except Exception:
                 return None
+
             try:
                 return json.loads(raw.decode("utf-8", errors="replace") or "{}")
             except Exception:
@@ -60,7 +93,11 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, stat
 
         def respond_json(self, obj, status=200):
             try:
-                data = json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                data = json.dumps(
+                    obj,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
             except Exception:
                 data = b'{"ok":false,"error":"json_encode_failed"}'
                 status = 500
@@ -73,6 +110,7 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, stat
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
+
             try:
                 self.wfile.write(data)
             except Exception:
@@ -88,6 +126,7 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, stat
         def _require_mutation_auth(self):
             token = (dashboard_api_token or "").strip()
 
+            # Token-based auth
             if token:
                 try:
                     hdr = (self.headers.get("X-API-Token") or "").strip()
@@ -109,10 +148,15 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, stat
 
                 return {"ok": False, "error": "unauthorized"}
 
+            # Localhost fallback
             if self._is_localhost_client():
                 return None
 
             return {"ok": False, "error": "forbidden (localhost only)"}
+
+        # --------------------------------------------------------
+        # Core Dispatch
+        # --------------------------------------------------------
 
         def _dispatch(self):
             method = str(self.command or "").upper().strip()
@@ -122,30 +166,29 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, stat
             key = (method, parsed.path)
             handler_name = self.ROUTES.get(key)
 
+            # No route match → static or 404
             if not handler_name:
                 if method == "GET":
                     return super().do_GET()
-                return self.respond_json({"ok": False, "error": "unknown endpoint"}, 404)
+                return self.respond_json(
+                    {"ok": False, "error": "unknown endpoint"},
+                    404,
+                )
 
             fn = API_HANDLERS.get(handler_name)
             if not fn:
-                return self.respond_json({"ok": False, "error": f"handler_missing:{handler_name}"}, 500)
+                return self.respond_json(
+                    {"ok": False, "error": f"handler_missing:{handler_name}"},
+                    500,
+                )
 
+            # Auth required for non-GET
             if method != "GET":
                 auth = self._require_mutation_auth()
                 if auth:
                     return self.respond_json(auth, 403)
 
             try:
-                # Flexible call signatures:
-                # GET:
-                #   fn(parsed)
-                #   fn(parsed, ctx)
-                #
-                # POST:
-                #   fn(parsed, body)
-                #   fn(parsed, body, ctx)
-
                 if method == "GET":
                     try:
                         return self.respond_json(fn(parsed, self.CTX))
@@ -160,7 +203,14 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, stat
                     return self.respond_json(fn(parsed, body))
 
             except Exception as e:
-                return self.respond_json({"ok": False, "error": str(e)}, 500)
+                return self.respond_json(
+                    {"ok": False, "error": str(e)},
+                    500,
+                )
+
+        # --------------------------------------------------------
+        # HTTP verbs
+        # --------------------------------------------------------
 
         def do_GET(self):
             return self._dispatch()

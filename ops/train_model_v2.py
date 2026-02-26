@@ -5,10 +5,10 @@ import os
 import logging
 import socket
 
-from engine.storage import connect, init_db
-from engine.storage import acquire_job_lock, release_job_lock
+from engine.runtime.storage import connect, init_db
+from engine.runtime.storage import acquire_job_lock, release_job_lock
 from engine.training_guard import training_allowed
-from engine.model_v2 import train_regime_stats
+from engine.strategy.model_v2 import train_regime_stats
 
 
 # ----------------------------

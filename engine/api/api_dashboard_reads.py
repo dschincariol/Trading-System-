@@ -7,7 +7,8 @@ Goal:
 """
 
 import json
-from urllib.parse import parse_qs
+
+from engine.api.http_parsing import qs as _qs
 
 from engine.api.api_read_advanced import (
     get_model_diagnostics,
@@ -25,32 +26,6 @@ from engine.api.api_read_advanced import (
 )
 
 # ------------------------------
-# Query parsing
-# ------------------------------
-
-def _qs(parsed):
-    try:
-        q = parse_qs(parsed.query or "")
-        return {k: v[0] for k, v in q.items()}
-    except Exception:
-        return {}
-
-
-def _deny_if_shutdown():
-    try:
-        snap = lifecycle_snapshot() or {}
-        if str(snap.get("state") or "").upper() == "SHUTDOWN":
-            return {"ok": False, "error": "server_shutting_down"}
-    except Exception:
-        pass
-    return None
-    try:
-        q = parse_qs(parsed.query or "")
-        return {k: v[0] for k, v in q.items()}
-    except Exception:
-        return {}
-
-# ------------------------------
 # Handlers (HTTP signatures)
 # build_handler calls:
 #   GET: handler(parsed, ctx)
@@ -60,7 +35,8 @@ def _deny_if_shutdown():
 def api_get_model_diagnostics(_parsed, _ctx=None):
     return {"ok": True, "data": get_model_diagnostics()}
 
-def api_get_temporal_models(parsed, _ctx=None):
+def api_get_temporal_models(parsed, ctx):
+    from engine.api.api_read_advanced import get_temporal_models
     qs = _qs(parsed)
     limit = int(qs.get("limit", "20") or "20")
     return get_temporal_models(limit=limit)

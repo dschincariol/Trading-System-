@@ -62,6 +62,12 @@ def _apply_pragmas(con: sqlite3.Connection, readonly: bool) -> None:
         except Exception:
             pass
 
+    # Allow FK checks to be deferred to commit when possible (safer for batched writes)
+    try:
+        con.execute("PRAGMA defer_foreign_keys=ON;")
+    except Exception:
+        pass
+
     # Ensure WAL actually active (defensive)
     try:
         jm = con.execute("PRAGMA journal_mode;").fetchone()
@@ -164,6 +170,12 @@ def connect(readonly: bool = False):
 
 def connect_ro() -> sqlite3.Connection:
     return connect(readonly=True)
+
+def _tls_clear_if_matches(con: sqlite3.Connection) -> None:
+    for key in ("rw", "ro"):
+        cur = getattr(_TLS, key, None)
+        if cur is con:
+            setattr(_TLS, key, None)
 
 def _maybe_wal_checkpoint(con: sqlite3.Connection, *, force: bool = False) -> None:
     """
@@ -877,7 +889,9 @@ def init_db():
             CREATE TABLE IF NOT EXISTS prices (
               ts_ms INTEGER NOT NULL,
               symbol TEXT NOT NULL,
-              price REAL NOT NULL,
+              price REAL,
+              px REAL,
+              source TEXT,
               PRIMARY KEY(symbol, ts_ms)
             );
 
@@ -1625,6 +1639,19 @@ def init_db():
         _ensure_symbol_universe_columns(con)
         _ensure_price_quotes_schema(con)
         _ensure_price_quotes_raw_schema(con)
+
+        # Ensure prices table has px + source (backward compatible)
+        try:
+            if not _has_column(con, "prices", "px"):
+                con.execute("ALTER TABLE prices ADD COLUMN px REAL;")
+        except Exception:
+            pass
+        try:
+            if not _has_column(con, "prices", "source"):
+                con.execute("ALTER TABLE prices ADD COLUMN source TEXT;")
+        except Exception:
+            pass
+
         _ensure_price_anomaly_schema(con)
         _ensure_options_chain_schema(con)
         _ensure_options_chain_v2_schema(con)
@@ -1679,6 +1706,7 @@ def init_db():
 
     finally:
         try:
+            _tls_clear_if_matches(con)
             con.close()
         except Exception:
             pass
@@ -1711,6 +1739,10 @@ def put_event(ts_ms, source, title, body, url, event_key, meta_json=None):
             (str(event_key),),
         ).fetchone()
 
+        if not row:
+            # Defensive: if insert was ignored but row isn't found, signal failure upstream
+            return 0
+
         return int(row[0])
     finally:
         try:
@@ -1722,10 +1754,7 @@ def put_event(ts_ms, source, title, body, url, event_key, meta_json=None):
         except Exception:
             pass
         try:
-            _maybe_wal_checkpoint(con, force=True)
-        except Exception:
-            pass
-        try:
+            _tls_clear_if_matches(con)
             con.close()
         except Exception:
             pass
@@ -1759,12 +1788,18 @@ def put_price(ts_ms, symbol, price):
         except Exception:
             pass
         try:
+            _tls_clear_if_matches(con)
             con.close()
         except Exception:
             pass
-
-
-def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> bool:
+        
+def acquire_job_lock(
+    job_name: str,
+    owner: str,
+    pid: int,
+    ttl_s: int = 180,
+    stale_after_s: int = None,  # backwards-compat alias used by older jobs
+) -> bool:
     """
     Best-effort single-instance lock.
     Returns True if lock acquired/renewed, False otherwise.
@@ -1772,10 +1807,24 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> b
     import os
     import time
 
+    # Backwards compat: some jobs call acquire_job_lock(..., stale_after_s=180)
+    if stale_after_s is not None:
+        try:
+            ttl_s = int(stale_after_s)
+        except Exception:
+            pass
+
     # Enforce supervisor-only job starts by default.
+    # Accept either env (repo currently uses both in different places):
+    #   ENGINE_SUPERVISED=1
+    #   ENGINE_LAUNCHED_BY_SUPERVISOR=1
     # Override ONLY when intentionally running a job manually:
     #   ALLOW_STANDALONE_JOBS=1 python <job>.py
-    if os.environ.get("ENGINE_LAUNCHED_BY_SUPERVISOR", "0") != "1" and os.environ.get("ALLOW_STANDALONE_JOBS", "0") != "1":
+    supervised = (
+        os.environ.get("ENGINE_SUPERVISED", "0") == "1"
+        or os.environ.get("ENGINE_LAUNCHED_BY_SUPERVISOR", "0") == "1"
+    )
+    if (not supervised) and os.environ.get("ALLOW_STANDALONE_JOBS", "0") != "1":
         return False
 
     now_ms = int(time.time() * 1000)
@@ -1785,12 +1834,14 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> b
 
     try:
         con.execute("BEGIN IMMEDIATE;")
+
         row = con.execute(
             "SELECT owner, pid, heartbeat_ts_ms FROM job_locks WHERE job_name=?",
             (str(job_name),),
         ).fetchone()
 
         if row is None:
+            # New lock
             con.execute(
                 """
                 INSERT INTO job_locks(job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms)
@@ -1798,18 +1849,16 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> b
                 """,
                 (str(job_name), str(owner), int(pid), now_ms, now_ms),
             )
-            con.execute("COMMIT;")
-            try:
-                _note_write(con)
-            except Exception:
-                pass
-            return True
+        else:
+            cur_owner, cur_pid, hb_ms = str(row[0]), int(row[1]), int(row[2])
+            is_stale = (now_ms - hb_ms) > stale_ms
+            is_same = (cur_owner == str(owner) and cur_pid == int(pid))
 
-        cur_owner, cur_pid, hb_ms = str(row[0]), int(row[1]), int(row[2])
-        is_stale = (now_ms - hb_ms) > stale_ms
-        is_same = (cur_owner == str(owner) and cur_pid == int(pid))
+            if not (is_same or is_stale):
+                con.execute("ROLLBACK;")
+                return False
 
-        if is_same or is_stale:
+            # Renew or steal stale lock
             con.execute(
                 """
                 UPDATE job_locks
@@ -1818,28 +1867,43 @@ def acquire_job_lock(job_name: str, owner: str, pid: int, ttl_s: int = 180) -> b
                 """,
                 (str(owner), int(pid), now_ms, str(job_name)),
             )
-            con.execute("COMMIT;")
-            try:
-                _note_write(con)
-            except Exception:
-                pass
-            return True
 
-        con.execute("ROLLBACK;")
-        return False
+        # Keep heartbeat row current on successful acquire/renew
+        try:
+            con.execute(
+                """
+                INSERT INTO job_heartbeats(job_name, owner, pid, ts_ms, extra_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(job_name) DO UPDATE SET
+                  owner=excluded.owner,
+                  pid=excluded.pid,
+                  ts_ms=excluded.ts_ms,
+                  extra_json=excluded.extra_json
+                """,
+                (str(job_name), str(owner), int(pid), now_ms, None),
+            )
+        except Exception:
+            pass
+
+        con.execute("COMMIT;")
+        try:
+            _note_write(con)
+        except Exception:
+            pass
+        return True
+
     except Exception:
         try:
             con.execute("ROLLBACK;")
         except Exception:
             pass
         return False
+
     finally:
         try:
             con.close()
         except Exception:
             pass
-
-
 def release_job_lock(job_name: str, owner: str, pid: int) -> None:
     con = connect(readonly=False)
     try:
@@ -1857,6 +1921,7 @@ def release_job_lock(job_name: str, owner: str, pid: int) -> None:
             pass
     finally:
         try:
+            _tls_clear_if_matches(con)
             con.close()
         except Exception:
             pass
@@ -1887,6 +1952,7 @@ def touch_job_lock(job_name: str, owner: str, pid: int) -> None:
         except Exception:
             pass
         try:
+            _tls_clear_if_matches(con)
             con.close()
         except Exception:
             pass
@@ -1921,6 +1987,7 @@ def put_job_heartbeat(job_name: str, owner: str, pid: int, extra_json: str = Non
         except Exception:
             pass
         try:
+            _tls_clear_if_matches(con)
             con.close()
         except Exception:
             pass
@@ -1940,6 +2007,7 @@ def get_job_checkpoint(job_name: str) -> Dict[str, int]:
         }
     finally:
         try:
+            _tls_clear_if_matches(con)
             con.close()
         except Exception:
             pass
@@ -1970,6 +2038,7 @@ def put_job_checkpoint(job_name: str, last_event_id: int, last_event_ts_ms: int)
         except Exception:
             pass
         try:
+            _tls_clear_if_matches(con)
             con.close()
         except Exception:
             pass

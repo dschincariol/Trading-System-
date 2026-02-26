@@ -73,5 +73,6 @@ TRAINING_RESUME_MIN_OK_STREAK = int(os.environ.get("TRAINING_RESUME_MIN_OK_STREA
 # Preflight
 # -----------------------------
 PREFLIGHT_ENABLE = os.environ.get("PREFLIGHT_ENABLE", "1") == "1"
-PREFLIGHT_BLOCK_JOBS = os.environ.get("PREFLIGHT_BLOCK_JOBS", "1") == "1"
+# Allow initial boot of price feeds even if health not yet green
+PREFLIGHT_BLOCK_JOBS = os.environ.get("PREFLIGHT_BLOCK_JOBS", "0") == "1"
 PREFLIGHT_PRICES_MAX_AGE_S = float(os.environ.get("PREFLIGHT_PRICES_MAX_AGE_S", "300"))

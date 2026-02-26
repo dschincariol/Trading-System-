@@ -4,7 +4,7 @@ import os
 import time
 from typing import Any, Callable, Dict, Optional
 
-from engine.storage import connect, init_db
+from engine.runtime.storage import connect, init_db
 from engine.model_registry import (
     get_stage_latest,
     promote_to_champion,

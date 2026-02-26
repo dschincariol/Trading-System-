@@ -7,7 +7,7 @@ import json
 import math
 from typing import Dict, Any, List, Optional, Tuple
 
-from engine.storage import connect
+from engine.runtime.storage import connect
 
 
 # ------------------------------------------------------------

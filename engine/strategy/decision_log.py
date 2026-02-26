@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any, Sequence
 
 import numpy as np
 
-from engine.storage import connect, init_db
+from engine.runtime.storage import connect, init_db
 
 
 # ------            -- ------------------------------------------------------

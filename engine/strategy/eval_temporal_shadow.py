@@ -19,7 +19,7 @@ from typing import Dict, Any, Tuple
 
 import numpy as np
 
-from engine.storage import connect, init_db
+from engine.runtime.storage import connect, init_db
 
 
 SCHEMA = """

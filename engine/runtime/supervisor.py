@@ -205,7 +205,19 @@ class RuntimeSupervisor:
             if self._enforce_deps_on_start:
                 return self.start_with_deps(name, strict=True)
             try:
-                return self._delegate.start(name)
+                # Ensure consistent environment marker even when delegating
+                old = os.environ.get("ENGINE_SUPERVISED")
+                os.environ["ENGINE_SUPERVISED"] = "1"
+                try:
+                    return self._delegate.start(name)
+                finally:
+                    if old is None:
+                        try:
+                            del os.environ["ENGINE_SUPERVISED"]
+                        except Exception:
+                            pass
+                    else:
+                        os.environ["ENGINE_SUPERVISED"] = old
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
@@ -310,12 +322,15 @@ class RuntimeSupervisor:
                 if strict:
                     ok = False
                     errors.append(f"not_registered:{name}")
+                    return {"ok": False, "order": resolved, "started": started, "errors": errors}
                 continue
 
             r = self.start(name)
             if not r.get("ok"):
                 ok = False
                 errors.append(f"start_failed:{name}:{r.get('error') or ''}".strip(":"))
+                if strict:
+                    return {"ok": False, "order": resolved, "started": started, "errors": errors}
             else:
                 started.append(name)
 

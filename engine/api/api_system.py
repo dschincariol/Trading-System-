@@ -17,11 +17,14 @@ ROUTE_SPECS_SYSTEM = [
     ("GET",  "/api/health",               "api_get_health"),
     ("GET",  "/api/readiness",            "api_get_readiness"),
     ("GET",  "/api/telemetry",            "api_get_telemetry"),
+    ("GET",  "/api/training_status", "api_get_training_status"),
     ("GET",  "/api/server/status",        "api_get_server_status"),
     ("POST", "/api/server/shutdown",      "api_post_server_shutdown"),
     ("GET", "/api/execution/barrier", "api_get_execution_barrier"),
     ("GET", "/api/supervisor/status", "api_get_supervisor_status"),
     ("GET", "/api/system/config", "api_get_runtime_config"),
+    ("POST", "/api/system/repair_schema", "api_post_repair_schema"),
+
 ]
 
 

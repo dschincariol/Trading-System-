@@ -22,13 +22,13 @@ import torch
 torch.set_num_threads(int(os.environ.get("TORCH_NUM_THREADS", "16")))
 torch.set_num_interop_threads(int(os.environ.get("TORCH_INTEROP_THREADS", "4")))
 
-from engine.storage import init_db, put_event, put_price, connect
+from engine.runtime.storage import init_db, put_event, put_price, connect
 from engine.prices.csv_feed import load_prices
 from engine.labeling import label_event
-from engine.learning import learn_relevance_stats as train_stats_from_labels
+from engine.strategy.learning import learn_relevance_stats as train_stats_from_labels
 
 from engine.predictor import expected_impact
-from engine.alerts import emit_alert, init_alerts_db
+from engine.runtime.alerts import emit_alert, init_alerts_db
 from engine.validation import (
     init_validation_db,
     store_prediction,

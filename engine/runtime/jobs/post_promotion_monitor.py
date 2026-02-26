@@ -6,7 +6,7 @@ import os
 import time
 from typing import Any, Dict, Optional, Tuple
 
-from engine.storage import connect, init_db
+from engine.runtime.storage import connect, init_db
 from engine.validation import init_validation_db
 from engine.promotion_hardening import auto_rollback, close_watch
 from engine.kill_switch import activate

@@ -8,7 +8,7 @@ import logging
 import random
 from typing import Dict, Any, Optional, Tuple
 
-from engine.storage import (
+from engine.runtime.storage import (
     connect,
     init_db,
     acquire_job_lock,
@@ -21,7 +21,7 @@ from engine.storage import (
 
 from engine.model_registry import register_model, get_stage_latest, promote_to_champion
 from engine.promotion_hardening import promote_with_snapshot_and_db_watch
-from engine.promotion_guard import promotion_allowed
+from engine.strategy.promotion_guard import promotion_allowed
 from engine.promotion_audit import audit
 from engine.training_guard import training_allowed
 

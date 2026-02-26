@@ -1,4 +1,4 @@
-from engine.storage import connect
+from engine.runtime.storage import connect
 import sys
 
 def main():

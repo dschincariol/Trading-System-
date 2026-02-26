@@ -471,6 +471,30 @@ class JobManager:
         with self._lock:
             return self._jobs.get(name)
 
+    # -------------------------------------------------
+    # Compatibility API for dashboard job log/history
+    # ctx["JOBS"] is a JobManager in api_handlers
+    # -------------------------------------------------
+    def get_job_log(self, name: str, tail: int = 200) -> Dict:
+        job = self.get(name)
+        if not job:
+            return {"ok": False, "error": "job_not_found", "job": str(name)}
+
+        try:
+            text = job.tail(int(tail or 0))
+            lines = text.split("\n") if text else []
+            return {"ok": True, "job": str(name), "lines": lines}
+        except Exception as e:
+            return {"ok": False, "error": "job_log_exception", "detail": str(e), "job": str(name)}
+
+    def get_job_history(self, name: str, limit: int = 200) -> Dict:
+        try:
+            rows = _read_job_history(str(name or ""), limit=int(limit or 0))
+            return {"ok": True, "job": str(name), "rows": rows}
+        except Exception as e:
+            return {"ok": False, "error": "job_history_exception", "detail": str(e), "job": str(name)}
+        
+        
     def is_running(self, name: str) -> bool:
         j = self.get(name)
         if not j:
@@ -536,7 +560,13 @@ class JobManager:
                             and j.proc
                             and j.proc.poll() is None
                         ):
-                            return {"ok": False, "error": f"daemon already running in group '{job.group}': {j.name}"}
+                            # Deterministic replacement: stop existing daemon in group
+                            try:
+                                j.append_log(f"[server] stopping due to group replacement by {job.name}")
+                                _write_job_history(j.name, "group_replaced", f"replaced by {job.name}", None)
+                                j.proc.terminate()
+                            except Exception:
+                                pass
 
             if job.mode == "oneshot":
                 if not _acquire_lock(f"job:{job.name}", ttl_ms=10 * 60 * 1000):
@@ -784,23 +814,30 @@ class JobManager:
                 job.append_log(f"[server] daemon crashed; scheduling restart in {delay}ms")
                 _write_job_history(job.name, "autorestart_scheduled", f"delay_ms={delay}", job.exit_code)
 
-            time.sleep(delay / 1000.0)
+            def _restart_later(jref: JobState, delay_ms: int):
+                time.sleep(delay_ms / 1000.0)
 
-            with job._lock:
-                if job.stop_requested:
-                    continue
-                if self.is_running(job.name):
-                    continue
+                with jref._lock:
+                    if jref.stop_requested:
+                        return
+                    if self.is_running(jref.name):
+                        return
 
-            res = self.start(job.name)
-            if not res.get("ok"):
-                with job._lock:
-                    job.append_log(f"[server] auto-restart failed: {res.get('error')}")
-                    _write_job_history(job.name, "autorestart_failed", str(res.get("error") or ""), job.exit_code)
-                continue
+                res = self.start(jref.name)
+                if not res.get("ok"):
+                    with jref._lock:
+                        jref.append_log(f"[server] auto-restart failed: {res.get('error')}")
+                        _write_job_history(jref.name, "autorestart_failed", str(res.get("error") or ""), jref.exit_code)
+                    return
 
-            with job._lock:
-                job.restart_attempts_window.append(int(time.time() * 1000))
-                job.next_restart_ms = 0
-                job.append_log("[server] auto-restart: started")
-                _write_job_history(job.name, "autorestart_started", "started", None)
+                with jref._lock:
+                    jref.restart_attempts_window.append(int(time.time() * 1000))
+                    jref.next_restart_ms = 0
+                    jref.append_log("[server] auto-restart: started")
+                    _write_job_history(jref.name, "autorestart_started", "started", None)
+
+            threading.Thread(
+                target=_restart_later,
+                args=(job, delay),
+                daemon=True,
+            ).start()

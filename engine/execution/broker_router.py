@@ -46,13 +46,13 @@ except Exception:
     _kill_switch_snapshot = None  # type: ignore
 
 try:
-    from engine.execution_mode import get_execution_mode as _get_execution_mode  # type: ignore
+    from engine.execution.execution_mode import get_execution_mode as _get_execution_mode  # type: ignore
 except Exception:
     _get_execution_mode = None  # type: ignore
 
 # Best-effort DB access for realized slippage distribution
 try:
-    from engine.storage import connect  # type: ignore
+    from engine.runtime.storage import connect  # type: ignore
 except Exception:
     connect = None  # type: ignore
 

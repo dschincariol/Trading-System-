@@ -46,9 +46,9 @@ import os
 import math
 from typing import Dict, Any, Tuple, Optional
 
-from engine.model_v2 import get_current_regime, classify_regime
-from engine.storage import connect
-from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.strategy.model_v2 import get_current_regime, classify_regime
+from engine.runtime.storage import connect
+from engine.execution.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 USE = os.environ.get("PORTFOLIO_REGIME_SCALE_ENABLE", "1") == "1"
 

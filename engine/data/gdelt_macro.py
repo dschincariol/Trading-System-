@@ -3,7 +3,7 @@ import time
 import statistics
 from typing import Any, Dict, Optional, List
 
-from engine.storage import connect
+from engine.runtime.storage import connect
 
 DEFAULT_BUCKET_SEC = int(os.environ.get("GDELT_MACRO_BUCKET_SEC", "900"))  # 15m
 ZWIN = int(os.environ.get("GDELT_MACRO_ZWIN", "64"))  # buckets

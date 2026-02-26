@@ -30,9 +30,9 @@ import os
 import time
 from typing import Optional, Tuple, Dict, Any
 
-from engine.storage import connect
-from engine.risk_state import get_state
-from engine.regime_compat import regime_compat_multiplier
+from engine.runtime.storage import connect
+from engine.runtime.risk_state import get_state
+from engine.strategy.regime_compat import regime_compat_multiplier
 
 MAX_POS = float(os.environ.get("MAX_POSITION_FRACTION", "0.20"))  # 20% notional
 Z_REF = float(os.environ.get("POSITION_Z_REF", "2.0"))            # z=2 => full scale (before conf)

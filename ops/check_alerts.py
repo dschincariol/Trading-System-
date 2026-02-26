@@ -1,7 +1,7 @@
 # check_alerts.py
 import sqlite3
 
-from engine.alerts import SCHEMA as ALERTS_SCHEMA
+from engine.runtime.alerts import SCHEMA as ALERTS_SCHEMA
 
 con = sqlite3.connect("dev.db")
 try:

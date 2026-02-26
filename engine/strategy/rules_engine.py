@@ -12,11 +12,11 @@ import time
 from typing import Any, Dict
 
 from engine.kill_switch import activate, clear
-from engine.drawdown_state import get_current_drawdown
+from engine.strategy.drawdown_state import get_current_drawdown
 from engine.exec_stats import get_exec_winrate_global, get_exec_stats_by_symbol
 from engine.drift_utils import get_max_drift_ratio, get_symbol_max_drift_ratio
-from engine.storage import connect
-from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.runtime.storage import connect
+from engine.execution.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 USE = os.environ.get("RULES_ENGINE_ENABLED", "1") == "1"
 

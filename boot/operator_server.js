@@ -107,6 +107,18 @@ function ensureLogDir() {
   if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
 }
 
+function rotateLogsIfNeeded() {
+  try {
+    if (fs.existsSync(RUNTIME_LOG)) {
+      const st = fs.statSync(RUNTIME_LOG);
+      if (st.size > 100 * 1024 * 1024) {
+        const rotated = RUNTIME_LOG + "." + Date.now();
+        fs.renameSync(RUNTIME_LOG, rotated);
+      }
+    }
+  } catch {}
+}
+
 function atomicWrite(file, data) {
   fs.writeFileSync(file + ".tmp", data);
   fs.renameSync(file + ".tmp", file);
@@ -166,10 +178,16 @@ function _normalizeDashHostForLoopback(host) {
 }
 
 function dashBaseUrlFromEnv(envObj) {
-  const hostRaw = String(envObj.DASHBOARD_HOST || "127.0.0.1");
-  const host = _normalizeDashHostForLoopback(hostRaw);
-  const port = Number(envObj.DASHBOARD_PORT || 8000);
-  return `http://${host}:${port}`;
+  const raw =
+    (envObj && envObj.DASHBOARD_BASE) ||
+    process.env.DASHBOARD_BASE ||
+    "http://127.0.0.1:8000";
+
+  let base = String(raw).trim();
+  if (!base.startsWith("http://") && !base.startsWith("https://")) {
+    base = "http://" + base;
+  }
+  return base.replace(/\/+$/, "");
 }
 
 // --------------------------------------------------
@@ -363,7 +381,25 @@ function startEngine(mode = "safe") {
   const logStream = fs.createWriteStream(RUNTIME_LOG, { flags: "a" });
   logStream.write(`\n[${nowIso()}] OPERATOR start mode=${finalMode} python=${python}\n`);
 
-  child = spawn(python, [ENTRY], { env: { ...process.env, ...sanitized }, cwd: ROOT });
+  // Consolidated bootstrap from ui_console.pyw (schema/module DB init)
+  const boot = runPythonBootstrap(python);
+  if (!boot.ok) {
+    logStream.write(`[${nowIso()}] [startup] bootstrap FAILED: ${JSON.stringify(boot.steps || [], null, 2)}\n`);
+    setLastError("BOOTSTRAP_FAIL", "Python bootstrap failed (schema/module init)", boot.steps || []);
+    try { logStream.end(); } catch {}
+    return { ok: false, status: "STOPPED", bootstrap: boot };
+  } else {
+    logStream.write(`[${nowIso()}] [startup] bootstrap ok\n`);
+  }
+
+  child = spawn(python, [ENTRY], {
+  cwd: ROOT,
+  env: {
+    ...process.env,
+    ...sanitized,
+    PYTHONPATH: ROOT
+  }
+});
 
   state.lastStartAt = nowIso();
   state.lastMode = finalMode;
@@ -397,14 +433,19 @@ function startEngine(mode = "safe") {
       state._restartCountWindow += 1;
       state.restartAttempts = (state.restartAttempts || 0) + 1;
 
-      if (state._restartCountWindow > 5) {
-        setLastError(
-          "CRASH_LOOP_DETECTED",
-          "Engine crashed too many times within 10 minutes. Auto-restart disabled."
-        );
-        saveState();
-        return;
-      }
+if (state._restartCountWindow > 5) {
+
+  // Institutional downgrade
+  state.lastMode = "safe";
+  saveState();
+
+  setLastError(
+    "CRASH_LOOP_DETECTED",
+    "Engine crash loop detected. Downgraded to SAFE mode. Manual promotion required."
+  );
+
+  return;
+}
 
       setLastError("ENGINE_CRASH", "Engine exited unexpectedly", { code });
       saveState();
@@ -768,6 +809,68 @@ function touchDbFile(resolvedDb) {
 }
 
 // --------------------------------------------------
+// Python bootstrap (schema/module DB init) — consolidated from ui_console.pyw
+// --------------------------------------------------
+function runPythonBootstrap(pythonCmd) {
+  try {
+    const steps = [];
+
+    // 1) Module-owned schemas expected by engine preflight
+    {
+      const r = spawnSync(
+        pythonCmd,
+        ["-u", "-c",
+          "from engine.strategy.portfolio import init_portfolio_db; "
+          + "from engine.execution.broker_sim import init_broker_db; "
+          + "from engine.runtime.alerts import init_alerts_db; "
+          + "from engine.strategy.validation import init_validation_db; "
+          + "from engine.strategy.model_v2 import init_model_db; "
+          + "init_portfolio_db(); init_broker_db(); init_alerts_db(); init_validation_db(); init_model_db(); "
+          + "print('[startup] module db init ok')"
+        ],
+        {
+  cwd: ROOT,
+  env: { ...process.env, PYTHONPATH: ROOT },
+  stdio: "pipe"
+}
+      );
+
+      const out = (r.stdout ? String(r.stdout) : "") + (r.stderr ? String(r.stderr) : "");
+      const ok = r.status === 0;
+      steps.push({ id: "module_db_init", ok, details: out.trim() });
+      if (!ok) return { ok: false, steps };
+    }
+
+    // 2) Ensure backtest output tables exist (engine.strategy.portfolio_backtest)
+    {
+      const r = spawnSync(
+        pythonCmd,
+        ["-u", "-c",
+          "from engine.strategy.portfolio_backtest import SCHEMA; "
+          + "from engine.runtime.storage import connect; "
+          + "con=connect(); con.executescript(SCHEMA); con.commit(); con.close(); "
+          + "print('[startup] portfolio_backtest schema ok')"
+        ],
+        {
+  cwd: ROOT,
+  env: { ...process.env, PYTHONPATH: ROOT },
+  stdio: "pipe"
+}
+      );
+
+      const out = (r.stdout ? String(r.stdout) : "") + (r.stderr ? String(r.stderr) : "");
+      const ok = r.status === 0;
+      steps.push({ id: "backtest_schema", ok, details: out.trim() });
+      if (!ok) return { ok: false, steps };
+    }
+
+    return { ok: true, steps };
+  } catch (e) {
+    return { ok: false, steps: [{ id: "bootstrap_exception", ok: false, details: String(e) }] };
+  }
+}
+
+// --------------------------------------------------
 // Institutional Check (health + telemetry changes)
 // --------------------------------------------------
 
@@ -790,6 +893,71 @@ async function checkTelemetryFlow() {
 
   return { ok: changed, url, detail: changed ? "telemetry changed" : "telemetry unchanged" };
 }
+
+// --------------------------------------------
+// Ensure Polygon stream job exists + running
+// --------------------------------------------
+app.post("/api/operator/ensure_polygon_stream", async (req, res) => {
+  try {
+    const envObj = readEnv();
+    const mode = state.lastMode || "safe";
+
+    // Do not start in SAFE mode
+    if (mode === "safe") {
+      return res.json({ ok: true, action: "safe_mode_blocked" });
+    }
+
+    // Require API key
+    if (!String(envObj.POLYGON_API_KEY || "").trim()) {
+      return res.json({ ok: false, error: "missing_polygon_api_key" });
+    }
+
+    const base = dashBaseUrlFromEnv(envObj);
+
+    const jobsRes = await httpGetJson(`${base}/api/jobs`);
+    if (!jobsRes.ok || !jobsRes.json) {
+      return res.json({ ok: false, error: "jobs_api_unreachable" });
+    }
+
+    const jobs = jobsRes.json.jobs || [];
+    const streamJob = jobs.find(j => j.name === "stream_prices_polygon_ws");
+
+    if (!streamJob) {
+      return res.json({ ok: false, error: "job_not_registered" });
+    }
+
+    if (!streamJob.running) {
+      await httpGetJson(`${base}/api/jobs/start?name=stream_prices_polygon_ws`);
+      return res.json({ ok: true, action: "started" });
+    }
+
+    return res.json({ ok: true, action: "already_running" });
+
+  } catch (e) {
+    return res.json({ ok: false, error: String(e) });
+  }
+});
+
+// --------------------------------------------------
+// Proxy: stop job via dashboard
+// --------------------------------------------------
+app.get("/api/operator/jobs/stop", async (req, res) => {
+  try {
+    const name = String(req.query.name || "").trim();
+    if (!name) return res.json({ ok: false, error: "missing_name" });
+
+    const envObj = readEnv();
+    const base = dashBaseUrlFromEnv(envObj);
+
+    const r = await httpGetJson(`${base}/api/jobs/stop?name=${encodeURIComponent(name)}`);
+
+    if (!r.ok) return res.json({ ok: false, error: "dashboard_unreachable" });
+
+    res.json(r.json);
+  } catch (e) {
+    res.json({ ok: false, error: String(e) });
+  }
+});
 
 // --------------------------------------------------
 // API
@@ -918,9 +1086,16 @@ app.get("/api/operator/institutionalCheck", async (req, res) => {
   const { resolvedDb } = resolveDbPathFromSanitized(sanitized);
   const dbPathWritable = isPathWritable(resolvedDb);
 
-  const health = (status() === "RUNNING") ? await verifyHealth() : { ok: false };
-  const healthOk = !!(health && health.ok);
+const health = (status() === "RUNNING") ? await verifyHealth() : { ok: false };
+const healthOk = !!(health && health.ok);
 
+let schemaInvalid = false;
+if (healthOk && health.body && Array.isArray(health.body.notes)) {
+  const notesText = health.body.notes.join(" ");
+  if (notesText.includes("missing_tables") || notesText.includes("missing_cols")) {
+    schemaInvalid = true;
+  }
+}
   const telemetry = (status() === "RUNNING") ? await checkTelemetryFlow() : { ok: false, detail: "engine not running" };
   const dataFlowing = !!(telemetry && telemetry.ok);
 
@@ -937,7 +1112,8 @@ app.get("/api/operator/institutionalCheck", async (req, res) => {
     entryExists,
     dbPathWritable,
     healthOk,
-    dataFlowing,
+    schemaInvalid,
+    requiresRepair: schemaInvalid,
     details: {
       dashboardBase: dashBaseUrlFromEnv(sanitized),
       telemetry: telemetry || null,
@@ -946,6 +1122,45 @@ app.get("/api/operator/institutionalCheck", async (req, res) => {
     },
     errors
   });
+});
+
+app.post("/api/operator/repairSchema", async (req, res) => {
+  try {
+    const envObj = readEnv();
+    const base = dashBaseUrlFromEnv(envObj);
+
+    const r = await new Promise((resolve) => {
+      const lib = base.startsWith("https") ? https : http;
+      const req2 = lib.request(
+        `${base}/api/system/repair_schema`,
+        { method: "POST" },
+        (resp) => {
+          let data = "";
+          resp.on("data", (c) => (data += c));
+          resp.on("end", () => {
+            try {
+              resolve({ ok: true, json: JSON.parse(data || "{}") });
+            } catch {
+              resolve({ ok: false, json: null });
+            }
+          });
+        }
+      );
+      req2.on("error", () => resolve({ ok: false }));
+      req2.end();
+    });
+
+    if (!r.ok || !r.json || !r.json.ok) {
+      setLastError("SCHEMA_REPAIR_FAIL", "Schema repair failed", r.json);
+      return res.json({ ok: false, result: r.json });
+    }
+
+    clearLastError();
+    return res.json({ ok: true, result: r.json });
+  } catch (e) {
+    setLastError("SCHEMA_REPAIR_EXCEPTION", "Schema repair exception", String(e));
+    return res.json({ ok: false, error: String(e) });
+  }
 });
 
 // UI calls this (AutoFix/Repair)
@@ -988,6 +1203,14 @@ app.post("/api/operator/autofix", async (req, res) => {
 
 app.post("/api/operator/start", async (req, res) => {
   const mode = String((req.body && req.body.mode) || "safe");
+
+    if (mode === "live") {
+    const confirm = String((req.body && req.body.confirm) || "");
+    if (confirm !== "TRADE") {
+      return res.json({ ok:false, error:"LIVE_CONFIRM_REQUIRED" });
+    }
+  }
+
   const steps = [];
 
   steps.push({ id: "preflight", ok: true, label: "Preflight checks", detail: "running" });
@@ -1000,6 +1223,15 @@ app.post("/api/operator/start", async (req, res) => {
   steps[steps.length - 1] = { id: "preflight", ok: true, label: "Preflight checks", detail: "ok" };
 
   steps.push({ id: "spawn", ok: true, label: "Launching backend", detail: "starting python" });
+  
+    if (state.lastError && state.lastError.kind === "CRASH_LOOP_DETECTED" && mode === "live") {
+    return res.json({
+      ok: false,
+      status: "SAFE_LOCKED",
+      error: "System locked in SAFE mode due to crash loop. Manual intervention required."
+    });
+  }
+  
   const r = startEngine(mode);
   if (!r.ok) {
     steps[steps.length - 1] = { id: "spawn", ok: false, label: "Launching backend", detail: r };
@@ -1041,7 +1273,23 @@ app.post("/api/operator/start", async (req, res) => {
   }
   steps[steps.length - 1] = { id: "telemetry", ok: true, label: "Checking telemetry", detail: "telemetry responding" };
 
-  return res.json({ ok: true, status: "RUNNING", mode, steps });
+  // Ensure Polygon stream automatically (direct call)
+try {
+  await sleep(500);
+  await new Promise((resolve) => {
+    http.request(
+      {
+        host: OPERATOR_BIND_HOST,
+        port: OPERATOR_PORT,
+        path: "/api/operator/ensure_polygon_stream",
+        method: "POST"
+      },
+      () => resolve()
+    ).on("error", () => resolve()).end();
+  });
+} catch {}
+
+return res.json({ ok: true, status: "RUNNING", mode, steps });
 });
 
 app.post("/api/operator/stop", (req, res) => {
@@ -1111,12 +1359,184 @@ app.post("/api/operator/factoryReset", (req, res) => {
   res.json({ ok: true });
 });
 
+// --------------------------------------------
+// Python STDERR tail
+// --------------------------------------------
+app.get("/api/operator/stderr_tail", async (req, res) => {
+  try{
+    const fs = require("fs");
+    const path = require("path");
+
+    const limit = Number(req.query.limit || 2000);
+    const logPath = path.join(__dirname, "engine_stderr.log");
+
+    if(!fs.existsSync(logPath)){
+      return res.json({ ok:false, error:"no_stderr_log" });
+    }
+
+    const data = fs.readFileSync(logPath, "utf8");
+    const tail = data.slice(-limit);
+
+    res.json({ ok:true, tail });
+  }catch(e){
+    res.json({ ok:false, error:String(e) });
+  }
+});
+
+// --------------------------------------------------
+// Dashboard Proxy Endpoints (Unified Operator Layer)
+// --------------------------------------------------
+app.get("/api/operator/proxy/:name", async (req, res) => {
+  try {
+    const name = req.params.name;
+    const envObj = readEnv();
+    const base = dashBaseUrlFromEnv(envObj);
+
+    const map = {
+      jobs: "/api/jobs",
+      telemetry: "/api/telemetry",
+      system_state: "/api/system/state",
+      validation: "/api/validation",
+      health: "/api/health"
+    };
+
+    if (!map[name]) {
+      return res.json({ ok: false, error: "invalid_proxy_target" });
+    }
+
+    const r = await httpGetJson(base + map[name]);
+    if (!r.ok) {
+      return res.json({ ok: false, error: "dashboard_unreachable" });
+    }
+
+    res.json(r.json);
+
+  } catch (e) {
+    res.json({ ok: false, error: String(e) });
+  }
+});
+
+// --------------------------------------------
+// DB schema inspection
+// --------------------------------------------
+app.get("/api/operator/db_schema", async (req, res) => {
+  try {
+    let sqlite3 = null;
+    try {
+      sqlite3 = require("sqlite3");
+    } catch (e) {
+      return res.json({ ok: false, error: "sqlite3_not_installed", details: String(e) });
+    }
+
+    const dbPath = process.env.DB_PATH || "./data/trading.db";
+    const db = new sqlite3.Database(dbPath);
+
+    db.all("SELECT name FROM sqlite_master WHERE type='table'", [], (err, rows) => {
+      if (err) {
+        res.json({ ok: false, error: String(err) });
+        return;
+      }
+      res.json({ ok: true, tables: rows.map((r) => r.name) });
+    });
+
+  } catch (e) {
+    res.json({ ok: false, error: String(e) });
+  }
+});
+
 // UI
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "operator_ui.html"));
 });
 
+// --------------------------------------------
+// Background Watchdog (Institutional Hardened)
+// --------------------------------------------
+let _healthFailCount = 0;
+
+setInterval(async () => {
+  try {
+
+    if (status() !== "RUNNING") {
+      _healthFailCount = 0;
+      return;
+    }
+
+    const readiness = await getReadiness();
+
+    // ---------------------------------
+    // HEALTH DEBOUNCE (3 strikes)
+    // ---------------------------------
+    if (!readiness.health || !readiness.health.ok) {
+
+      _healthFailCount++;
+
+      if (_healthFailCount >= 3) {
+
+        setLastError(
+          "HEALTH_DEBOUNCED_FAIL",
+          "Health failed 3 consecutive checks. Restarting engine."
+        );
+
+        stopEngine();
+        await sleep(1500);
+        startEngine(state.lastMode || "safe");
+
+        _healthFailCount = 0;
+      }
+
+      return;
+    }
+
+    // Health OK
+    _healthFailCount = 0;
+
+    // ---------------------------------
+    // ENSURE STREAM RUNNING
+    // ---------------------------------
+    await new Promise((resolve) => {
+      http.request(
+        {
+          host: OPERATOR_BIND_HOST,
+          port: OPERATOR_PORT,
+          path: "/api/operator/ensure_polygon_stream",
+          method: "POST"
+        },
+        () => resolve()
+      )
+        .on("error", () => resolve())
+        .end();
+    });
+
+    // ---------------------------------
+    // TARGETED STREAM RESTART (no engine restart)
+    // ---------------------------------
+    const envObj = readEnv();
+    const base = dashBaseUrlFromEnv(envObj);
+    const jobsRes = await httpGetJson(`${base}/api/jobs`);
+
+    if (jobsRes.ok && jobsRes.json && Array.isArray(jobsRes.json.jobs)) {
+
+      const stream = jobsRes.json.jobs.find(
+        j => j.name === "stream_prices_polygon_ws"
+      );
+
+      if (stream && stream.running === false) {
+        await httpGetJson(`${base}/api/jobs/start?name=stream_prices_polygon_ws`);
+      }
+    }
+
+  } catch {}
+
+}, 5000);
+
+
+// --------------------------------------------------
+// START OPERATOR SERVER
+// --------------------------------------------------
 app.listen(OPERATOR_PORT, OPERATOR_BIND_HOST, () => {
   ensureLogDir();
-  console.log(`Operator Control Center: http://${OPERATOR_BIND_HOST}:${OPERATOR_PORT}`);
+  console.log(
+    `Operator Control Center: http://${OPERATOR_BIND_HOST}:${OPERATOR_PORT}`
+  );
 });

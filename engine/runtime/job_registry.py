@@ -43,6 +43,7 @@ ALLOWED_JOBS = {
     "compute_drift": ("engine/data/jobs/compute_drift.py", "oneshot", None, {"execution": False}),
     "calibrate_price_confidence": ("engine/data/jobs/calibrate_price_confidence.py", "oneshot", None, {"execution": False}),
     "monitor_calibration_health": ("engine/data/jobs/monitor_calibration_health.py", "oneshot", None, {"execution": False}),
+    "calibrate_confidence_from_prices": ("engine/strategy/jobs/calibrate_confidence_from_prices.py", "oneshot", None, {"execution": False}),
 
     # A.1 supervised embed regressor training
     "train_embed_models": ("engine/strategy/jobs/train_embed_models.py", "oneshot", None, {"execution": False}),
@@ -84,9 +85,9 @@ PIPELINE_ORDER = [
 ]
 
 JOB_ORDER = [
-    "poll_prices",
     "stream_prices_polygon_ws",
     "stream_prices_ibkr",
+    "poll_prices",
     "poll_options",
     "provider_monitor",
     "ingest_now",

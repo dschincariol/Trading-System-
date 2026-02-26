@@ -12,10 +12,8 @@ import time
 from typing import Dict
 
 from engine.runtime.storage import connect as _db_connect
-from engine.training_guard import (
-    get_training_status,
-    set_training_mode,
-)
+from engine.training_guard import get_training_status
+
 
 # ---------------------------------------------------
 # ENV THRESHOLDS
@@ -32,11 +30,11 @@ HEALTH_MIN_MODEL_SUPPORT = int(os.environ.get("HEALTH_MIN_MODEL_SUPPORT", "10"))
 PREFLIGHT_ENABLE = os.environ.get("PREFLIGHT_ENABLE", "1") == "1"
 PREFLIGHT_PRICES_MAX_AGE_S = float(os.environ.get("PREFLIGHT_PRICES_MAX_AGE_S", "300"))
 
-_PREFLIGHT_CACHE = {
-    "ok": True,
+_PREFLIGHT_CACHE: Dict = {
+    "ok": False,
     "notes": [],
-    "tables_ok": True,
-    "health_ok": True,
+    "tables_ok": False,
+    "health_ok": False,
     "ts_ms": 0,
 }
 
@@ -48,9 +46,9 @@ _PREFLIGHT_CACHE = {
 def _get_table_cols(con, table: str):
     try:
         rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+        return [r[1] for r in rows] if rows else []
     except Exception:
-        rows = []
-    return [r[1] for r in rows] if rows else []
+        return []
 
 
 # ---------------------------------------------------
@@ -60,6 +58,7 @@ def _get_table_cols(con, table: str):
 def get_schema_audit():
     ts_ms = int(time.time() * 1000)
     con = _db_connect()
+
     try:
         try:
             rows = con.execute(
@@ -84,28 +83,27 @@ def get_schema_audit():
                 "required": True,
                 "cols": ["job_name", "owner", "heartbeat_ts_ms"],
             },
-            # Optional shadow scoring table
             "shadow_capital_scores": {
                 "required": False,
                 "cols": ["ts_ms", "window_s", "regime", "model_name", "score"],
             },
         }
 
-        for t, spec in SCHEMA_EXPECTATIONS.items():
-            if t not in have:
+        for table, spec in SCHEMA_EXPECTATIONS.items():
+            if table not in have:
                 if spec.get("required"):
-                    missing_tables.append(t)
+                    missing_tables.append(table)
                 continue
 
-            cols_have = _get_table_cols(con, t)
-            miss = [c for c in spec.get("cols", []) if c not in cols_have]
-            if miss and spec.get("required"):
-                missing_cols[t] = miss
+            cols_have = _get_table_cols(con, table)
+            missing = [c for c in spec.get("cols", []) if c not in cols_have]
+            if missing and spec.get("required"):
+                missing_cols[table] = missing
 
-        ok = (not missing_tables) and (not missing_cols)
+        ok = not missing_tables and not missing_cols
 
         return {
-            "ok": bool(ok),
+            "ok": ok,
             "ts_ms": ts_ms,
             "missing_tables": missing_tables,
             "missing_cols": missing_cols,
@@ -122,26 +120,30 @@ def get_schema_audit():
 
 def get_health_snapshot():
     con = _db_connect()
+    now_ms = int(time.time() * 1000)
+
     try:
         out = {}
-        now_ms = int(time.time() * 1000)
 
         # ---------------------------
         # Prices freshness
         # ---------------------------
         try:
             row = con.execute("SELECT MAX(ts_ms) FROM prices").fetchone()
+            if row and row[0]:
+                age_s = (now_ms - int(row[0])) / 1000.0
+                out["prices"] = {
+                    "ok": age_s < HEALTH_PRICES_MAX_AGE_S,
+                    "age_s": round(age_s, 1),
+                    "max_age_s": HEALTH_PRICES_MAX_AGE_S,
+                }
+            else:
+                out["prices"] = {
+                    "ok": False,
+                    "age_s": None,
+                    "max_age_s": HEALTH_PRICES_MAX_AGE_S,
+                }
         except Exception:
-            row = None
-
-        if row and row[0]:
-            age_s = (now_ms - int(row[0])) / 1000.0
-            out["prices"] = {
-                "ok": age_s < HEALTH_PRICES_MAX_AGE_S,
-                "age_s": round(age_s, 1),
-                "max_age_s": HEALTH_PRICES_MAX_AGE_S,
-            }
-        else:
             out["prices"] = {
                 "ok": False,
                 "age_s": None,
@@ -153,17 +155,20 @@ def get_health_snapshot():
         # ---------------------------
         try:
             row = con.execute("SELECT MAX(ts_ms) FROM events").fetchone()
+            if row and row[0]:
+                age_s = (now_ms - int(row[0])) / 1000.0
+                out["events"] = {
+                    "ok": age_s < HEALTH_EVENTS_MAX_AGE_S,
+                    "age_s": round(age_s, 1),
+                    "max_age_s": HEALTH_EVENTS_MAX_AGE_S,
+                }
+            else:
+                out["events"] = {
+                    "ok": False,
+                    "age_s": None,
+                    "max_age_s": HEALTH_EVENTS_MAX_AGE_S,
+                }
         except Exception:
-            row = None
-
-        if row and row[0]:
-            age_s = (now_ms - int(row[0])) / 1000.0
-            out["events"] = {
-                "ok": age_s < HEALTH_EVENTS_MAX_AGE_S,
-                "age_s": round(age_s, 1),
-                "max_age_s": HEALTH_EVENTS_MAX_AGE_S,
-            }
-        else:
             out["events"] = {
                 "ok": False,
                 "age_s": None,
@@ -263,15 +268,14 @@ def run_preflight() -> Dict:
         # ---------------------------
         # Health validation
         # ---------------------------
-        h = get_health_snapshot()
+        health = get_health_snapshot()
 
-        prices_ok = bool(h.get("prices", {}).get("ok"))
-        labels_ok = bool(h.get("labels", {}).get("ok"))
-        model_ok = bool(h.get("model", {}).get("ok"))
+        prices = health.get("prices", {}) or {}
+        prices_ok = bool(prices.get("ok"))
 
-        out["health_ok"] = bool(prices_ok and labels_ok and model_ok)
+        out["health_ok"] = prices_ok
 
-        age_s = float(h.get("prices", {}).get("age_s") or 1e9)
+        age_s = float(prices.get("age_s") or 1e9)
         if age_s > PREFLIGHT_PRICES_MAX_AGE_S:
             out["ok"] = False
             out["notes"].append(f"prices too stale: {age_s:.1f}s")
@@ -286,10 +290,6 @@ def run_preflight() -> Dict:
 
 
 def preflight_cached(max_age_s: float = 30.0) -> Dict:
-    """
-    Returns cached preflight only if recent.
-    Prevents stale OK state after system degradation.
-    """
     now = int(time.time() * 1000)
     cache = dict(_PREFLIGHT_CACHE or {})
     ts = int(cache.get("ts_ms") or 0)

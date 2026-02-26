@@ -79,7 +79,7 @@ def write_job_event(job_name: str, event: str, detail: dict | None = None):
 # ============================================================
 
 def set_promotion_enabled(value: str):
-    from engine.promotion_guard import set_guard
+    from engine.strategy.promotion_guard import set_guard
 
     v = "1" if str(value) == "1" else "0"
     set_guard("promotion_enabled", v)

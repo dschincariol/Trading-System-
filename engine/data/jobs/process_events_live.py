@@ -72,7 +72,7 @@ if torch.cuda.is_available():
 # -----------------------------------------------------------------------------
 # Project imports
 # -----------------------------------------------------------------------------
-from engine.storage import (
+from engine.runtime.storage import (
     connect,
     connect_ro,
     init_db,
@@ -83,14 +83,14 @@ from engine.storage import (
 )
 
 from engine.predictor import predict_event
-from engine.alerts import emit_alert, init_alerts_db
+from engine.runtime.alerts import emit_alert, init_alerts_db
 from engine.validation import store_prediction, init_validation_db
 from engine.decision_log import log_decision, hash_feature_vector
 from engine.confidence_adjust import get_adjusted_confidence
-from engine.universe import get_active_symbols
-from engine.model_v2 import get_current_regime
+from engine.data.universe import get_active_symbols
+from engine.strategy.model_v2 import get_current_regime
 from engine.news_domain import extract_domain, is_domain_blocked
-from engine.kill_switch import execution_allowed
+from engine.execution.kill_switch import execution_allowed
 from engine.rules_engine import evaluate_rules
 
 # -----------------------------------------------------------------------------

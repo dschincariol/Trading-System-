@@ -6,10 +6,20 @@ import threading
 
 from engine.runtime.health import get_health_snapshot, run_preflight
 from engine.runtime.system_state import compute_system_state
+from engine.runtime.jobs.repair_schema import run as repair_schema
 
+def api_post_repair_schema(_parsed):
+    return repair_schema()
 
 def api_get_health(_parsed, _ctx):
-    return get_health_snapshot()
+    try:
+        h = get_health_snapshot()
+        if isinstance(h, dict):
+            h.setdefault("ok", True)
+            return h
+        return {"ok": False, "error": "invalid_health_snapshot"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def api_get_system_state(_parsed, ctx):
@@ -36,7 +46,16 @@ def api_get_system_state(_parsed, ctx):
         kill_switches=kill_switches,
     )
 
-    return state
+    # Ensure stable API contract for UI console
+    if isinstance(state, dict):
+        state.setdefault("ok", True)
+        return state
+
+    return {
+        "ok": False,
+        "state": "UNKNOWN",
+        "error": "invalid_system_state",
+    }
 
 
 def api_get_readiness(_parsed, ctx):

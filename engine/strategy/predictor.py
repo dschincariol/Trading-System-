@@ -9,15 +9,15 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-from engine.storage import connect
-from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
-from engine.learning import (
+from engine.runtime.storage import connect
+from engine.execution.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.strategy.learning import (
     confidence_from_weight,
     confidence_from_n,
     get_global_prior,
     learn_relevance_stats,
 )
-from engine.model_v2 import get_regime_prior, get_spillover_betas, get_current_regime
+from engine.strategy.model_v2 import get_regime_prior, get_spillover_betas, get_current_regime
 
 # ------            -- ------------------------------------------------------
 # Option A: supervised embedding regressor (OPT-IN)

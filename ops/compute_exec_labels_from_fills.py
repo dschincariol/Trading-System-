@@ -8,7 +8,7 @@ import os
 import time
 from typing import Optional
 
-from engine.storage import (
+from engine.runtime.storage import (
     connect,
     init_db,
     acquire_job_lock,
@@ -19,8 +19,8 @@ from engine.storage import (
 
 from engine.broker_fill_utils import get_realized_trade
 from engine.alpha_lifecycle_engine import compute_alpha_decay_metrics
-from engine.regime_compat import update_regime_compat
-from engine.model_v2 import get_current_regime
+from engine.strategy.regime_compat import update_regime_compat
+from engine.strategy.model_v2 import get_current_regime
 
 # -----------------------------
 # Step 7: Production job safety

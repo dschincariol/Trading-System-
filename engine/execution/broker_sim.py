@@ -27,8 +27,8 @@ import math
 import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from engine.storage import connect
-from engine.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.runtime.storage import connect
+from engine.execution.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 
 # -----------------------------
 # Small numeric guards
@@ -643,7 +643,7 @@ def apply_new_portfolio_orders(
 
             # Kill switch (global/symbol) is enforced here as a last line of defense
             try:
-                from engine.kill_switch import execution_allowed
+                from engine.execution.kill_switch import execution_allowed
 
                 allow, _, _ = execution_allowed(con=con, symbol=symbol, regime=None)
                 if not allow:

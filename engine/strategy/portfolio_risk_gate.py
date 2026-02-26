@@ -30,8 +30,8 @@ Notes:
 import os
 from typing import Any, Dict, Tuple, List, Optional
 
-from engine.drawdown_state import get_current_drawdown
-from engine.weather_features import get_weather_feature_snapshot
+from engine.strategy.drawdown_state import get_current_drawdown
+from engine.data.weather_features import get_weather_feature_snapshot
 
 USE = os.environ.get("PORTFOLIO_USE_RISK_GATE", "1") == "1"
 
@@ -388,7 +388,7 @@ def apply_execution_risk_governor(
 
     # global pause switch (fail closed)
     try:
-        from engine.risk_state import get_state
+        from engine.runtime.risk_state import get_state
 
         if str(get_state("execution_pause", "0") or "0").strip() == "1":
             return [], {"ok": False, "status": "blocked_execution_pause", "broker": broker, "mode": mode}

@@ -13,7 +13,7 @@ Uses table: social_features (bucketed).
 import os
 from typing import Any, Dict, Optional
 
-from engine.storage import connect
+from engine.runtime.storage import connect
 
 DEFAULT_BUCKET_SEC = int(os.environ.get("SOCIAL_DEFAULT_BUCKET_SEC", "300"))  # 5m
 
