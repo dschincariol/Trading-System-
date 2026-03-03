@@ -1,0 +1,127 @@
+# compute_drift.py
+import os
+import time
+import json
+import logging
+
+from engine.storage import (
+    init_db,
+    connect,
+    acquire_job_lock,
+    release_job_lock,
+    touch_job_lock,
+    put_job_heartbeat,
+)
+from engine.drift import compute_drift
+
+JOB_NAME = "compute_drift"
+OWNER = os.environ.get(
+    "JOB_OWNER",
+    os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "unknown")),
+)
+PID = os.getpid()
+
+LOCK_STALE_AFTER_S = int(os.environ.get("JOB_LOCK_STALE_AFTER_S", "180"))
+HEARTBEAT_EVERY_S = float(os.environ.get("HEARTBEAT_EVERY_S", "15.0"))
+
+# stale-data guardrails
+MAX_PREDICTIONS_AGE_S = float(os.environ.get("DRIFT_MAX_PREDICTIONS_AGE_S", "900"))
+MAX_LABELS_AGE_S = float(os.environ.get("DRIFT_MAX_LABELS_AGE_S", "900"))
+
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s [compute_drift] %(message)s",
+)
+
+
+def _latest_age_s(con, table: str) -> float | None:
+    try:
+        row = con.execute(f"SELECT MAX(ts_ms) FROM {table}").fetchone()
+    except Exception:
+        return None
+    if not row or not row[0]:
+        return None
+    return (int(time.time() * 1000) - int(row[0])) / 1000.0
+
+
+def main():
+    init_db()
+
+    if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
+        logging.error("another instance is holding the job lock; exiting")
+        raise SystemExit(2)
+
+    started_ms = int(time.time() * 1000)
+    last_hb_s = 0.0
+
+    try:
+        with connect() as con:
+            pred_age_s = _latest_age_s(con, "predictions")
+            lbl_age_s = _latest_age_s(con, "labels")
+
+            if pred_age_s is None or pred_age_s > MAX_PREDICTIONS_AGE_S:
+                logging.warning(
+                    "skipping drift: predictions stale or missing age_s=%s limit=%s",
+                    pred_age_s,
+                    MAX_PREDICTIONS_AGE_S,
+                )
+                return
+
+            if lbl_age_s is None or lbl_age_s > MAX_LABELS_AGE_S:
+                logging.warning(
+                    "skipping drift: labels stale or missing age_s=%s limit=%s",
+                    lbl_age_s,
+                    MAX_LABELS_AGE_S,
+                )
+                return
+
+            now_s = time.time()
+            if (now_s - last_hb_s) >= HEARTBEAT_EVERY_S:
+                touch_job_lock(JOB_NAME, OWNER, PID)
+                put_job_heartbeat(JOB_NAME, OWNER, PID)
+                put_job_heartbeat(
+                    JOB_NAME,
+                    OWNER,
+                    PID,
+                    extra_json=json.dumps(
+                        {
+                            "predictions_age_s": round(pred_age_s, 1),
+                            "labels_age_s": round(lbl_age_s, 1),
+                        }
+                    ),
+                )
+                last_hb_s = now_s
+
+            compute_drift()
+
+            # check for any retraining signals produced by compute_drift
+            try:
+                from engine.strategy.training_hooks import fetch_pending, mark_processed
+                from engine.runtime.run_root_script import run_root_script
+
+                pending = fetch_pending(os.environ.get("MODEL_NAME", "embed_regressor"))
+                for mname, reason, ts in pending:
+                    logging.warning("drift->retrain signal model=%s reason=%s ts=%s", mname, reason, ts)
+                    # fire off embed model retrain job (oneshot)
+                    try:
+                        run_root_script("train_embed_models.py")
+                    except Exception:
+                        logging.exception("failed to invoke train_embed_models after drift signal")
+                    finally:
+                        mark_processed(mname, reason)
+            except Exception:
+                logging.exception("error handling retraining signals")
+
+            dur_ms = int(time.time() * 1000) - started_ms
+            logging.info("drift computation complete dur_ms=%s", int(dur_ms))
+
+    finally:
+        try:
+            release_job_lock(JOB_NAME, OWNER, PID)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()

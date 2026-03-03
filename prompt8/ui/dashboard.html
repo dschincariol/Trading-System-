@@ -1,0 +1,1761 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Market Impact Dashboard</title>
+
+  <style>
+    body {
+  margin: 0;
+  background: #0f1116;
+  font-family: monospace;
+  color: #c9d1d9;
+}
+
+.telemetry-strip {
+  height: 40px;
+  background: #151922;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 16px;
+  font-size: 12px;
+  border-bottom: 1px solid #222;
+}
+
+#workspace {
+  display: grid;
+  grid-template-columns: 180px 1fr 300px;
+  height: calc(100vh - 240px);
+}
+
+#main-grid {
+  display: grid;
+  grid-template-rows: 1fr 1fr 1fr;
+  gap: 8px;
+  padding: 8px;
+}
+
+.grid-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+#right-dock {
+  background: #151922;
+  border-left: 1px solid #222;
+  padding: 8px;
+}
+
+#bottom-log {
+  height: 200px;
+  background: #0d1015;
+  border-top: 1px solid #222;
+  overflow-y: auto;
+  font-size: 11px;
+  padding: 8px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+th, td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #1c2129;
+}
+
+th {
+  color: #6e7681;
+  text-align: left;
+}
+
+    :root{
+  /* Motion system (ops-safe) */
+  --m-fast: 120ms;
+  --m-med: 180ms;
+  --m-slow: 260ms;
+  --ease-out: cubic-bezier(.22,.61,.36,1);
+      --bg: #0e1117;
+      --panel: #0b0f15;
+      --panel2:#0a0d12;
+      --text:#e6edf3;
+      --muted:#9da7b3;
+      --border:#30363d;
+      --chip:#0e1117;
+      --btn:#161b22;
+
+      --ok:#2ea043;
+      --warn:#d29922;
+      --crit:#ff6b6b;
+      --info:#58a6ff;
+
+      --r: 14px;
+      --r2: 10px;
+      --shadow: 0 10px 24px rgba(0,0,0,.30);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 16px;
+      padding-bottom: max(16px, env(safe-area-inset-bottom));
+    }
+
+    /* App header */
+    .appHeader{
+      display:flex;
+      align-items:center;
+      gap:12px;
+      flex-wrap:wrap;
+      margin-bottom: 14px;
+    }
+    .appTitle{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      font-weight: 900;
+      letter-spacing: .2px;
+      font-size: 20px;
+      margin: 0;
+    }
+    .appSubtitle{
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+    .appRight{
+      margin-left:auto;
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex-wrap:wrap;
+      
+    }
+
+    /* Cards grid (outer layout only) */
+    .cards{
+      display:grid;
+      grid-template-columns: repeat(2, minmax(340px, 1fr));
+      gap: 12px;
+      align-items:start;
+    }
+    @media (max-width: 1100px){
+      .cards{ grid-template-columns: 1fr; }
+    }
+
+    /* Original .row is used elsewhere (keep as flex) */
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+
+    /* Card header polish */
+    .card h2{
+      margin: 0 0 10px;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      font-size: 16px;
+      letter-spacing: .2px;
+    }
+
+    /* Collapsible */
+    .collapsible h2 { cursor: pointer; user-select: none; }
+    .collapsible.collapsed pre,
+    .collapsible.collapsed table,
+    .collapsible.collapsed canvas,
+    .collapsible.collapsed .table-wrap,
+    .collapsible.collapsed .console { display: none; }
+    .collapsible h2::after { content: " ▾"; opacity: 0.6; margin-left:auto; }
+    .collapsible.collapsed h2::after { content: " ▸"; }
+
+    /* Sticky card headers (so you can scroll inside a tall card) */
+    .card h2 {
+      position: sticky;
+      top: 0;
+      background: linear-gradient(to bottom, var(--panel) 85%, rgba(11,15,21,0));
+      padding: 10px 0 8px;
+      z-index: 2;
+      border-bottom: 1px solid rgba(48,54,61,.35);
+    }
+
+    /* Pills */
+.pill {
+  display: inline-flex;
+  align-items:center;
+  gap:6px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--chip);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+
+  transition:
+    background var(--m-fast) var(--ease-out),
+    color var(--m-fast) var(--ease-out),
+    border-color var(--m-fast) var(--ease-out),
+    transform var(--m-fast) var(--ease-out),
+    box-shadow var(--m-fast) var(--ease-out);
+}
+
+    .pill.ok   { border-color: var(--ok); }
+    .pill.bad  { border-color: var(--crit); }
+    .pill.dim  { opacity: .9; color: var(--muted); }
+.pill.warn {
+  background: linear-gradient(180deg, #f0b429, #d29922);
+  color:#000;
+  border-color: rgba(0,0,0,.35);
+  font-weight: 700;
+}
+
+.pill.crit {
+  background: linear-gradient(180deg, #ff7b7b, #ff4d4d);
+  color:#fff;
+  border-color: rgba(0,0,0,.35);
+  font-weight: 900;
+  box-shadow: 0 0 0 1px rgba(255,107,107,.35),
+              0 0 18px rgba(255,107,107,.25);
+}
+    .pill.acked{ background:#6e7681; color:#fff; border-color: rgba(0,0,0,.25); }
+    .pill.resolved { background:#444; color:#ddd; border-color: rgba(0,0,0,.25); }
+
+    @keyframes critPulse {
+  0%   { box-shadow: 0 0 0 rgba(255,107,107,0); }
+  50%  { box-shadow: 0 0 18px rgba(255,107,107,.35); }
+  100% { box-shadow: 0 0 0 rgba(255,107,107,0); }
+}
+
+.pill.crit {
+  animation: critPulse var(--m-slow) var(--ease-out) 1;
+}
+
+    /* -----------------------------
+       Operator vs Expert visibility
+       ----------------------------- */
+body.mode-operator .expertOnly { 
+  display:none !important; 
+}
+
+/* Expert panels visually de-emphasized in Operator Mode */
+body.mode-operator .card.expertOnly,
+body.mode-operator .expertAction {
+  opacity: .55;
+  filter: grayscale(.15);
+  pointer-events: none;
+}
+
+body.mode-operator.expert-unlocked .card.expertOnly,
+body.mode-operator.expert-unlocked .expertAction {
+  opacity: 1;
+  filter: none;
+  pointer-events: auto;
+}
+
+body.mode-expert .operatorOnly { display:none !important; }
+
+    /* Expert unlock gates risky actions while staying in Operator Mode */
+    body.mode-operator .expertAction { display:none !important; }
+    body.mode-operator.expert-unlocked .expertAction { display:inline-flex !important; }
+
+    /* -----------------------------
+       Decision Header (sticky)
+       ----------------------------- */
+.decisionBar{
+  position: sticky;
+  top: 0;
+  z-index: 999;
+  border: 1px solid rgba(88,166,255,.35);
+  background: rgba(11,15,21,.94);
+  backdrop-filter: blur(12px);
+  border-radius: var(--r);
+  padding: 10px 12px;
+  box-shadow: 0 12px 26px rgba(0,0,0,.45);
+  margin: 0 0 12px;
+}
+
+    .decisionRow{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .decisionLeft{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex-wrap:wrap;
+    }
+    .decisionRight{
+      margin-left:auto;
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex-wrap:wrap;
+    }
+    .pill.clickable{ cursor:pointer; user-select:none; }
+    .pill.clickable:hover{ filter: brightness(1.05); }
+
+    .filtersRow{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(48,54,61,.45);
+    }
+    .input, select{
+      background: var(--btn);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-size: 13px;
+      outline: none;
+    }
+    .input::placeholder{ color: rgba(157,167,179,.75); }
+
+    /* -----------------------------
+       Heatmap
+       ----------------------------- */
+    .heatmapWrap{
+      border: 1px solid rgba(48,54,61,.45);
+      border-radius: 12px;
+      overflow:hidden;
+      background: var(--panel2);
+    }
+    .heatmapGrid{
+      display:grid;
+      grid-template-columns: 160px repeat(4, 1fr);
+      gap: 1px;
+      background: rgba(48,54,61,.45);
+    }
+.hmCell{
+  background: var(--panel);
+  padding: 8px 10px;
+  font-size: 12px;
+  min-height: 34px;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  cursor:pointer;
+  user-select:none;
+  transition: filter var(--m-fast) var(--ease-out),
+            background var(--m-fast) var(--ease-out),
+            transform var(--m-fast) var(--ease-out);
+
+}
+
+.hmCell:hover{
+  filter: brightness(1.12);
+  transform: scale(1.015);
+}
+
+    .hmHead{
+      font-weight: 800;
+      background: #0b0f15;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    .hmSym{
+      font-weight: 800;
+      gap:10px;
+    }
+    .hmSwatch{
+      width: 10px;
+      height: 10px;
+      border-radius: 3px;
+      border: 1px solid rgba(0,0,0,.25);
+      flex: 0 0 auto;
+    }
+    .hmMeta{
+      margin-left:auto;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    /* -----------------------------
+       Incident list
+       ----------------------------- */
+    .incidentList{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      margin-top: 12px;
+    }
+
+.incidentItem{
+  position: relative;
+  border: 1px solid rgba(48,54,61,.55);
+  background: linear-gradient(to bottom, rgba(10,13,18,.75), rgba(11,15,21,.97));
+  border-radius: 14px;
+  padding: 10px 12px 10px 16px;
+  box-shadow: 0 10px 22px rgba(0,0,0,.25);
+  cursor:pointer;
+
+  animation: incidentIn var(--m-med) var(--ease-out) both;
+  transition:
+    transform var(--m-fast) var(--ease-out),
+    box-shadow var(--m-fast) var(--ease-out),
+    filter var(--m-fast) var(--ease-out);
+}
+
+.incidentItem:hover{
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px rgba(0,0,0,.35);
+  filter: brightness(1.05);
+}
+
+/* Severity rail */
+.incidentItem::before{
+  content:"";
+  position:absolute;
+  left:0;
+  top:8px;
+  bottom:8px;
+  width:4px;
+  border-radius: 4px;
+  background: var(--border);
+}
+
+.incidentItem[data-sev="CRIT"]::before{
+  background: var(--crit);
+  box-shadow: 0 0 12px rgba(255,107,107,.6);
+}
+
+.incidentItem[data-sev="WARN"]::before{
+  background: var(--warn);
+}
+
+    .incidentTop{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .incidentTitle{
+      font-weight: 900;
+      letter-spacing:.2px;
+    }
+    .incidentSub{
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 6px;
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .incidentActions{
+      margin-left:auto;
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+    }
+    canvas.spark{
+      width: 86px;
+      height: 18px;
+      border: 1px solid rgba(48,54,61,.55);
+      border-radius: 8px;
+      background: #0b0f15;
+    }
+
+    @keyframes incidentIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+    /* -----------------------------
+       Incident drawer (right side)
+       ----------------------------- */
+    .drawerOverlay{
+      display:none;
+      position:fixed;
+      inset:0;
+      background: rgba(0,0,0,.55);
+      z-index: 2000;
+    }
+.drawer{
+  position:fixed;
+  top:0;
+  right:0;
+  height:100%;
+  width:min(520px, 92vw);
+  background: #0b0f15;
+  border-left: 1px solid var(--border);
+  box-shadow: -18px 0 40px rgba(0,0,0,.55);
+  padding: 14px;
+  overflow:auto;
+
+  animation: drawerIn var(--m-med) var(--ease-out) both;
+}
+
+    .drawerHeader{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: linear-gradient(to bottom, #0b0f15 85%, rgba(11,15,21,0));
+      padding: 8px 0 10px;
+      border-bottom: 1px solid rgba(48,54,61,.45);
+    }
+    .drawerTitle{
+      font-weight: 950;
+      letter-spacing:.2px;
+      font-size: 16px;
+    }
+    .drawerSection{
+      margin-top: 12px;
+      border: 1px solid rgba(48,54,61,.45);
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(10,13,18,.55);
+    }
+    .drawerSection h3{
+      margin: 0 0 8px;
+      font-size: 13px;
+      letter-spacing:.2px;
+    }
+    .drawerKvs{
+      display:grid;
+      grid-template-columns: 120px 1fr;
+      gap: 6px 10px;
+      font-size: 12px;
+    }
+    .kvK{ color: var(--muted); }
+    .kvV{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+
+    .status {
+  font-weight: 800;
+  margin: 6px 0 6px;
+  transition: color var(--m-fast) var(--ease-out);
+}
+
+    .status.ok { color: var(--ok); }
+    .status.bad { color: var(--crit); }
+
+    @keyframes drawerIn {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+    /* Text helpers */
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      opacity: 0.95;
+    }
+    .small { font-size: 12px; color: var(--muted); }
+    .health-ok { color: var(--ok); }
+    .health-bad { color: var(--crit); font-weight: 800; }
+
+    /* Buttons */
+    .btn {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--btn);
+      color: var(--text);
+      padding: 7px 10px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 13px;
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      transition: transform .05s ease, filter .12s ease, border-color .12s ease;
+    }
+    .btn:hover { filter: brightness(1.08); border-color: rgba(88,166,255,.45); }
+    .btn:active {
+  transform: translateY(1px) scale(.98);
+}
+
+    .btn[disabled] { opacity: .5; cursor: not-allowed; }
+    .btnSmall { padding: 6px 8px; font-size: 12px; border-radius: 10px; }
+
+    /* Button groups: nicer wrapping + spacing */
+    .btnRow{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin: 10px 0;
+    }
+
+    /* Icons (SVG sprite) */
+    .i{
+      width:16px;
+      height:16px;
+      display:inline-block;
+      flex:0 0 auto;
+      fill: currentColor;
+      opacity: .95;
+    }
+    .btn .i{ opacity:.95; }
+
+    /* Console */
+    .console {
+      position: fixed;
+      bottom: 0;
+      left: 16px;
+      right: 16px;
+      height: 180px;
+      overflow: auto;
+      background: #0a0d12;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 8px;
+      font-family: Consolas, monospace;
+      font-size: 11px;
+      z-index: 50;
+    }
+
+    /* Tables */
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: var(--r2); }
+    table { width: 100%; border-collapse: collapse; min-width: 520px; }
+    th, td { 
+  padding: 8px 9px; 
+  border-bottom: 1px solid rgba(48,54,61,.65); 
+  font-size: 13px; 
+  vertical-align: top; 
+}
+
+tbody tr:hover td{
+  background: rgba(88,166,255,.08);
+}
+    th {
+      background: rgba(22,27,34,.95);
+      text-align: left;
+      position: sticky;
+      top: 38px; /* leaves space for sticky card header */
+      z-index: 1;
+      border-bottom: 1px solid rgba(48,54,61,.85);
+      backdrop-filter: blur(6px);
+    }
+    tbody tr:nth-child(odd) td{ background: rgba(255,255,255,.01); }
+    tbody tr:hover td{ background: rgba(88,166,255,.06); }
+
+    /* Canvas polish */
+    canvas{
+      border: 1px solid var(--border);
+      border-radius: var(--r2);
+      background: var(--panel2);
+    }
+
+    /* Modal polish */
+    #whyModal{
+      backdrop-filter: blur(4px);
+    }
+
+    @media (prefers-reduced-motion: reduce){
+  *{
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+    /* Mobile */
+    @media (max-width: 768px) {
+      body { padding: 12px; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+      .cards { grid-template-columns: 1fr; gap: 10px; }
+      .card { padding: 12px; min-width: 0; }
+      .appTitle { font-size: 18px; }
+      h2 { font-size: 16px; }
+      pre.mono { font-size: 11px; }
+      button, select, input { min-height: 44px; font-size: 16px; }
+      th { top: 36px; }
+    }
+
+    /* Small helper blocks already present in your HTML */
+    .pb { line-height: 1.25; }
+    .pb-steps { margin-top: 4px; font-size: 12px; opacity: 0.85; }
+
+    /* =============================
+       Decision framing UI
+       ============================= */
+    .decisionFrame { border-color: rgba(88,166,255,.25); background: rgba(10,13,18,.62); }
+    .dfTop{ display:flex; gap:12px; flex-wrap:wrap; align-items:flex-start; }
+    .dfPosture{ display:flex; flex-direction:column; gap:6px; min-width: 180px; }
+    .dfRight{ margin-left:auto; display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; }
+    .dfRow{ display:flex; flex-direction:column; gap:6px; }
+    .dfBlock{ margin-top:10px; padding-top:10px; border-top: 1px solid rgba(48,54,61,.35); }
+
+    .postureBadge{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(48,54,61,.55);
+      background: rgba(11,15,21,.90);
+      font-weight: 950;
+      letter-spacing: .4px;
+      min-height: 42px;
+      gap:10px;
+      user-select:none;
+    }
+    .postureBadge.monitor{ border-color: rgba(46,160,67,.75); }
+    .postureBadge.prepare{ border-color: rgba(210,153,34,.85); }
+.postureBadge.act{
+  border-color: rgba(255,107,107,.85);
+  animation: softPulse 1.1s ease-in-out infinite;
+}
+
+    .postureDot{
+      width: 10px; height: 10px; border-radius: 999px;
+      background: #6e7681;
+      box-shadow: 0 0 0 3px rgba(110,118,129,.15);
+    }
+    .postureBadge.monitor .postureDot{ background: var(--ok); box-shadow: 0 0 0 3px rgba(46,160,67,.16); }
+    .postureBadge.prepare .postureDot{ background: var(--warn); box-shadow: 0 0 0 3px rgba(210,153,34,.16); }
+    .postureBadge.act .postureDot{ background: var(--crit); box-shadow: 0 0 0 3px rgba(255,107,107,.16); }
+
+    @keyframes softPulse {
+      0% { transform: scale(1); filter: brightness(1); }
+      50% { transform: scale(1.02); filter: brightness(1.06); }
+      100% { transform: scale(1); filter: brightness(1); }
+    }
+    .pulse { animation: softPulse 1.1s ease-in-out 1; }
+
+    /* =============================
+       Voice UI (iPhone friendly)
+       ============================= */
+    .voicePanel{
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(48,54,61,.45);
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+    }
+    .voiceTop{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .voiceTitle{ font-weight: 900; letter-spacing:.2px; }
+    .voiceMeta{ margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; }
+    .voiceTranscript{
+      padding: 10px 12px;
+      border: 1px solid rgba(48,54,61,.55);
+      border-radius: 12px;
+      background: rgba(10,13,18,.55);
+      min-height: 44px;
+      white-space: pre-wrap;
+    }
+
+    /* Make the mic button feel “held” */
+    #btnVoice.isListening{
+      border-color: rgba(88,166,255,.65);
+      box-shadow: 0 0 0 4px rgba(88,166,255,.14);
+    }
+#btnVoice.isListening::after{
+  content: " ●";
+  color: #58a6ff;
+  font-weight: 900;
+}
+
+    /* iPhone: ensure comfortable tap targets in decision bar */
+    @media (max-width: 768px){
+      #btnVoice { min-height: 44px; }
+      .postureBadge{ width: 100%; justify-content:flex-start; }
+      .dfRight{ width: 100%; }
+    }
+  </style>
+
+  <!-- Small theme overrides (degraded pulse, exec-blocked accent, etc.) -->
+  <link rel="stylesheet" href="./dashboard_theme.css" />
+
+</head>
+
+<body>
+  <!-- SVG Icon Sprite (no external deps) -->
+  <svg aria-hidden="true" style="position:absolute; width:0; height:0; overflow:hidden;">
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M17.65 6.35A7.95 7.95 0 0012 4V1L7 6l5 5V7a5 5 0 11-5 5H5a7 7 0 107.75-6.92 7.9 7.9 0 014.9 1.27z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M6 7h12l-1 14H7L6 7zm3-3h6l1 2H8l1-2z"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><path d="M12 12a4 4 0 10-4-4 4 4 0 004 4zm0 2c-4.42 0-8 2-8 4v2h16v-2c0-2-3.58-4-8-4z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2l8 4v6c0 5-3.4 9.7-8 10-4.6-.3-8-5-8-10V6l8-4z"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7c3.3 0 6 2.7 6 6a6 6 0 01-6 6H6v2h6a8 8 0 000-16z"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></symbol>
+    <symbol id="i-wand" viewBox="0 0 24 24"><path d="M2 22l14-14 2 2L4 24H2v-2zM16 2l6 6-2 2-6-6 2-2z"/></symbol>
+  </svg>
+
+  <div class="appHeader">
+    <div>
+      <h1 class="appTitle">📊 Market Impact Dashboard</h1>
+      <div class="appSubtitle">Ops console • health • drift • alerts • backtests</div>
+    </div>
+    <div class="appRight">
+      <span class="pill dim">UI: <span class="mono">/ui/dashboard.html</span></span>
+      <span class="pill dim">API: <span class="mono">/api/*</span></span>
+    </div>
+  </div>
+<header>
+  <h1>Market Impact System</h1>
+
+  <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+
+    <div id="healthBadge" class="pill ok">OK</div>
+
+    <!-- Structured Readiness -->
+    <div id="readinessBadge" class="pill dim">READINESS —</div>
+
+    <!-- Execution Mode -->
+    <div id="execModeBadge" class="pill dim">MODE —</div>
+
+    <!-- Hard Execution Barrier -->
+    <div>
+      <span id="execBarrierPill" class="pill dim">execution: —</span>
+    </div>
+    <pre id="execBarrierRaw" class="small mono" style="margin-top:4px; max-height:120px; overflow:auto;"></pre>
+
+    <!-- Training Mode -->
+    <div id="trainingModeBadge" class="pill dim">TRAIN —</div>
+
+    <!-- Telemetry -->
+    <div id="cpuBadge" class="pill dim">CPU —</div>
+    <div id="memBadge" class="pill dim">RAM —</div>
+    <div id="dbBadge" class="pill dim">DB —</div>
+
+    <!-- Market Stress -->
+    <div
+      id="marketStressHeader"
+      class="pill dim"
+      title="Unified market stress"
+    >
+      Stress: —
+    </div>
+
+  </div>
+</header>
+
+  <div style="display:flex; gap:8px; align-items:center;">
+    <!-- Market Stress badge (read-only) -->
+    <div
+      id="marketStressHeader"
+      class="pill dim"
+      title="Unified market stress (volatility, term structure, credit & rates)"
+    >
+      Stress: —
+    </div>
+  </div>
+</header>
+
+  <!-- Bloomberg-style Telemetry Strip -->
+  <div id="telemetryStrip" style="
+      display:flex;
+      gap:18px;
+      align-items:center;
+      font-family: Consolas, monospace;
+      font-size:12px;
+      background:#0a0d12;
+      border:1px solid #30363d;
+      border-radius:10px;
+      padding:6px 12px;
+      margin-bottom:12px;
+    ">
+    <span id="tNav">NAV —</span>
+    <span id="tReturn">RET —</span>
+    <span id="tDD">DD —</span>
+    <span id="tSharpe">Sharpe —</span>
+    <span id="tCalmar">Calmar —</span>
+    <span id="tStress">Stress —</span>
+    <span id="tPromotion">Promo —</span>
+    <span id="tCpu">CPU —</span>
+    <span id="tRam">RAM —</span>
+    <span id="tDb">DB —</span>
+
+  </div>
+
+  <div class="row">
+
+
+    <!-- Social Pressure -->
+    <div class="card collapsible">
+      <h2>📣 Social Pressure</h2>
+      <div class="small">
+        Attention, confirmation, and manipulation risk (read-only).
+      </div>
+
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>z</th>
+              <th>Attention</th>
+              <th>Manip</th>
+              <th>Confirm</th>
+            </tr>
+          </thead>
+          <tbody id="socialPressureBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Social Regimes -->
+    <div class="card collapsible">
+      <h2>🧠 Social Regime</h2>
+      <div class="small">
+        Detected crowd state (QUIET / CHURN / FEAR / MANIA).
+      </div>
+
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Regime</th>
+              <th>Conf</th>
+            </tr>
+          </thead>
+          <tbody id="socialRegimeBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Social Kill-Switch Blocks -->
+    <div class="card collapsible expertOnly">
+      <h2>🛑 Social Blocks</h2>
+      <div class="small">
+        Trades blocked by social manipulation / mania gates.
+      </div>
+
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="socialBlocksBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Decision Header (sticky): guided ops clarity + speed -->
+  <div id="decisionBar" class="decisionBar">
+    <div class="decisionRow">
+      <div class="decisionLeft">
+        <span id="pillSystem" class="pill clickable dim" role="button" tabindex="0">SYSTEM: —</span>
+        <span id="pillCrit" class="pill clickable dim">CRIT: —</span>
+        <span id="pillWarn" class="pill clickable dim">WARN: —</span>
+        <span id="pillData" class="pill clickable dim">Data: —</span>
+        <span id="pillModel" class="pill clickable dim">Model: —</span>
+        <span id="pillExec" class="pill clickable dim">Exec: —</span>
+      </div>
+
+      <div class="decisionRight">
+        <span id="pillUpdated" class="pill dim">Updated: —</span>
+
+        <!-- Operator default ON; Expert unlock is separate -->
+        <button class="btn" id="btnExpertUnlock">
+          <svg class="i"><use href="#i-shield"></use></svg>
+          Unlock Advanced: OFF
+        </button>
+
+        <!-- Push-to-talk voice (safe by design) -->
+        <button class="btn" id="btnVoice" aria-pressed="false" title="Hold to talk">
+          <svg class="i"><use href="#i-wand"></use></svg>
+          Hold to Talk
+        </button>
+
+        <span id="pillVoice" class="pill dim">Voice: OFF</span>
+
+      </div>
+    </div>
+
+    <div class="filtersRow">
+      <select id="globalRange" title="Time range">
+        <option value="15m">Last 15m</option>
+        <option value="1h">Last 1h</option>
+        <option value="6h" selected>Last 6h</option>
+        <option value="24h">Last 24h</option>
+        <option value="7d">Last 7d</option>
+      </select>
+
+      <select id="globalSev" title="Min severity">
+        <option value="ALL">Severity: All</option>
+        <option value="INFO">Severity: INFO+</option>
+        <option value="WARN" selected>Severity: WARN+</option>
+        <option value="CRIT">Severity: CRIT only</option>
+      </select>
+
+      <input id="globalSymbol" class="input" placeholder="Symbol filter (e.g. BTC)" style="min-width:220px;" />
+      <label class="pill dim" style="gap:8px;">
+        <input id="globalChangedOnly" type="checkbox" />
+        changed only
+      </label>
+      <span id="globalHint" class="pill dim">Tip: click a pill to jump</span>
+    </div>
+
+    <!-- Voice panel (hidden unless active / last transcript shown) -->
+    <div id="voicePanel" class="voicePanel" style="display:none;">
+      <div class="voiceTop">
+        <div class="voiceTitle">Voice</div>
+        <div class="voiceMeta">
+          <span id="voiceState" class="pill dim">idle</span>
+          <span id="voiceLang" class="pill dim">en</span>
+        </div>
+      </div>
+
+      <div id="voiceTranscript" class="voiceTranscript mono">(press and hold “Hold to Talk”)</div>
+
+      <div class="voiceHints small">
+        Try: “what’s wrong”, “safe to ignore?”, “what happens next?”, “show similar”, “open the latest critical”, “acknowledge this”, “refresh”.
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+
+    <!-- Job Console -->
+    <div class="card collapsible">
+      <h2>🧰 Job Console</h2>
+
+      <div class="small">Run your pipeline from here (no extra command prompts).</div>
+
+      <div class="btnRow">
+
+        <button class="btn expertAction" id="btnRunPipeline">
+          <svg class="i"><use href="#i-play"></use></svg>
+          Run Full Pipeline
+        </button>
+
+        <button id="btnFixIssues" class="btn btnWarn">🛠 Fix issues automatically</button>
+        
+        <button class="btn" id="btnRefresh">
+          <svg class="i"><use href="#i-refresh"></use></svg>
+          Refresh
+        </button>
+
+        <button class="btn" id="btnClear">
+          <svg class="i"><use href="#i-trash"></use></svg>
+          Clear Log
+        </button>
+        <button class="btn" id="btnOperatorMode">
+          <svg class="i"><use href="#i-user"></use></svg>
+          Operator Mode: ON
+        </button>
+
+        <span class="pill dim">selected: <span id="selectedJob" class="mono">poll_prices</span></span>
+        <span class="pill dim" id="jobStatus">idle</span>
+      </div>
+
+      <div class="btnRow">
+        <button class="btn" data-job="poll_prices" data-action="start">Start poll_prices</button>
+        <button class="btn" data-job="ingest_now" data-action="start">Run ingest_now</button>
+        <button class="btn" data-job="process_events" data-action="start">Run process_events</button>
+        <button class="btn" data-job="label_due_events" data-action="start">Run label_due_events</button>
+        <button class="btn expertAction" data-job="train_model_v2" data-action="start">Run train_model_v2</button>
+        <button class="btn" data-job="validate_now" data-action="start">Run validate_now</button>
+        <button class="btn" data-job="portfolio_rebalance" data-action="start">Run portfolio_rebalance</button>
+        <button class="btn" data-job="portfolio_backtest" data-action="start">Run portfolio_backtest</button>
+        <button class="btn" data-job="broker_apply_orders" data-action="start">Run broker_apply_orders</button>
+      </div>
+
+      <div id="console" class="console"></div>
+    </div>
+
+    <!-- Drift Status (your patch expects these IDs) -->
+    <div class="card collapsible">
+      <h2>🧭 Drift Status</h2>
+      <div id="driftStatus" class="status"></div>
+      <pre id="driftDetails" class="mono"></pre>
+    </div>
+
+    <!-- System Health + pills that dashboard.js sets -->
+    <div class="card collapsible">
+      <h2>🩺 System Health</h2>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin:8px 0;">
+        <span class="pill dim" id="healthPrices">prices: —</span>
+        <span class="pill dim" id="healthLabels">labels: —</span>
+        <span class="pill dim" id="healthModel">model: —</span>
+      </div>
+      <div id="healthStatus" class="status"></div>
+      <pre id="healthDetails" class="mono"></pre>
+    </div>
+
+    <!-- AI Ops Explanation -->
+    <div class="card collapsible">
+      <h2>🤖 AI Ops Summary</h2>
+      <button class="btn" id="btnExplain">Explain issue</button>
+      <pre id="opsExplainText" class="mono"></pre>
+    </div>
+
+    <!-- Training Status -->
+    <div class="card collapsible">
+      <h2>🧪 Training Status</h2>
+      <div id="trainingStatus" class="status"></div>
+      <pre id="trainingDetails" class="mono"></pre>
+    </div>
+
+    <!-- Market Stress (read-only) -->
+    <div class="card collapsible" id="marketStressPanel">
+      <h2>🌩 Market Stress</h2>
+      <div class="small" style="margin-top:6px;">
+        Unified stress score + components (VIX family, VVIX, MOVE, credit/rates proxies).
+      </div>
+
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin:10px 0;">
+        <span class="pill dim">Score:</span>
+        <span id="marketStressBadge" class="pill dim">loading</span>
+        <span class="pill dim">Updated:</span>
+        <span id="marketStressUpdated" class="pill dim mono">—</span>
+      </div>
+
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th>Value</th>
+              <th>Z</th>
+            </tr>
+          </thead>
+          <tbody id="marketStressBody"></tbody>
+        </table>
+      </div>
+
+      <canvas id="marketStressSparkline" height="48" style="margin-top:10px;"></canvas>
+
+<div style="margin-top:8px;">
+  <span class="pill dim">Model confidence:</span>
+  <span id="confidenceBadge" class="pill dim">—</span>
+</div>
+
+<pre id="marketStressRaw" class="mono" style="margin-top:10px; max-height:260px; overflow:auto;">(loading...)</pre>
+    </div>
+
+    <!-- Execution Overlays (read-only) -->
+    <div class="card collapsible" id="execOverlaysPanel">
+      <h2>🧾 Execution Overlays</h2>
+      <div class="small" style="margin-top:6px;">
+        Read-only snapshot of execution knobs (cost model + portfolio exec realism).
+      </div>
+      <pre id="execOverlaysRaw" class="mono" style="max-height:360px; overflow:auto;">(loading...)</pre>
+    </div>
+
+    
+
+    <!-- Promotions -->
+    <div class="card collapsible">
+      <h2>🧯 Promotions Safety</h2>
+      <div class="btnRow">
+        <button class="btn expertAction" id="btnTogglePromotions">Toggle Promotions</button>
+        <button class="btn expertAction" id="btnRollbackChampion">Rollback Champion</button>
+        <button class="btn" id="btnWhyNotPromoted">Why not promoted?</button>
+        <span class="pill dim" id="promotionPill">promotion: ?</span>
+      </div>
+      <pre class="mono small" id="promotionReason"></pre>
+
+      <div class="small" style="margin-top:8px;">Self-Critic Warnings (advisory)</div>
+      <div id="selfCriticWarnings" class="incidentList"></div>
+    </div>
+
+    <!-- Confidence Calibration Curves -->
+    <div class="card collapsible">
+      <h2>📈 Confidence Calibration</h2>
+      <div class="small">Latest isotonic curves (confidence → directional accuracy).</div>
+      <pre id="calibCurves" class="console" style="height:180px;">loading…</pre>
+    </div>
+
+    <!-- Alerts (operator: incident queue + heatmap; expert: raw table) -->
+    <div class="card collapsible">
+      <h2>🚨 Alerts</h2>
+
+      <!-- Operator-first scanning -->
+      <div class="operatorOnly">
+        <div class="small">Scan → click to investigate → follow guided steps. Advanced actions require unlock.</div>
+
+        <div class="small" style="margin-top:6px;">Severity × Confidence by Symbol / Horizon</div>
+<div class="heatmapWrap" style="margin-top:6px;">
+          <div id="alertsHeatmap" class="heatmapGrid"></div>
+        </div>
+
+        <div id="incidentList" class="incidentList"></div>
+      </div>
+
+      <!-- Expert view (raw table preserved; hidden in operator mode) -->
+      <div class="expertOnly">
+        <div class="table-wrap">
+          <table id="alerts">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Sev</th>
+                <th>Symbol</th>
+                <th>H</th>
+                <th>z</th>
+                <th>Conf</th>
+                <th>Event</th>
+                <th>Age</th>
+                <th>Why</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Relevance Stats -->
+    <div class="card collapsible">
+      <h2>🧠 Relevance Stats</h2>
+      <div class="small">
+        Learned relevance weights used by predictor & alerts
+        <span id="relevanceMeta" class="pill dim" style="margin-left:8px;">loading</span>
+      </div>
+
+      <div style="margin-top:8px;">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Horizon</th>
+                <th>Relevance</th>
+                <th>Mean |z|</th>
+                <th>n</th>
+              </tr>
+            </thead>
+            <tbody id="relevanceTableBody"></tbody>
+          </table>
+        </div>
+
+        <div class="small" style="margin-top:6px;">What changed since last refresh</div>
+        <pre id="relevanceDiff" class="console" style="height:120px;">(no previous snapshot)</pre>
+      </div>
+    </div>
+
+    <!-- Size Policy -->
+    <div class="card collapsible">
+      <h2>📏 Size Policy</h2>
+      <div class="small">Learned mapping: confidence → position size factor (0..1).</div>
+      <div style="margin:10px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <button class="btn" id="btnTrainSizePolicy">Train Size Policy</button>
+        <span class="pill dim" id="sizePolicyPill">policy: ?</span>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Bucket</th>
+              <th>Conf Range</th>
+              <th>N</th>
+              <th>Mean Net Ret</th>
+              <th>Std Net Ret</th>
+              <th>Factor</th>
+            </tr>
+          </thead>
+          <tbody id="sizePolicyBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Champion / Challenger -->
+    <div class="card collapsible">
+      <h2>🏆 Champion / Challenger</h2>
+      <div class="small">Auto-learning status (promotions are gated by metrics).</div>
+      <div style="margin:10px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <button class="btn" id="btnRunChallenger">🧪 Train & Eval Challenger</button>
+        <span class="pill dim" id="championPill">champion: ?</span>
+        <span class="pill dim" id="challengerPill">challenger: ?</span>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Stage</th>
+              <th>Kind</th>
+              <th>RMSE</th>
+              <th>Dir Acc</th>
+              <th>n_eval</th>
+              <th>Eval Ts</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody id="modelRegistryBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Validation (dashboard.js expects tbody id="validation") -->
+    <div class="card collapsible">
+      <h2>✅ Validation Scores</h2>
+      <div class="small">MAE/RMSE computed from predictions joined to realized labels.</div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>H</th>
+              <th>MAE</th>
+              <th>RMSE</th>
+              <th>n</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody id="validation"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Temporal Eval (dashboard.js uses "#temporalEval tbody") -->
+    <div class="card collapsible">
+      <h2>🕒 Temporal Predictor Eval <span class="pill dim">shadow only</span></h2>
+      <div class="table-wrap">
+        <table id="temporalEval">
+          <thead>
+            <tr>
+              <th>Horizon (s)</th>
+              <th>N</th>
+              <th>RMSE</th>
+              <th>Directional</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Temporal Shadow Eval (A.7) -->
+    <div class="card collapsible">
+      <h2>🧪 Temporal Shadow Promotion Gates <span class="pill dim">A.7</span></h2>
+      <div class="small">Shows why temporal is / isn’t eligible for promotion.</div>
+      <div class="table-wrap">
+        <table id="temporalShadowEval">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>H</th>
+              <th>N</th>
+              <th>RMSE</th>
+              <th>Base RMSE</th>
+              <th>Dir</th>
+              <th>Base Dir</th>
+              <th>Pass</th>
+              <th>Why</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Confidence Calibration Curves -->
+    <div class="card collapsible">
+      <h2>🎯 Confidence Calibration Curves</h2>
+      <div class="row">
+        <div>
+          <div class="small">Horizon (s)</div>
+          <input id="calibHorizon" type="number" value="3600" style="width:140px;">
+        </div>
+        <div>
+          <div class="small">Model kind</div>
+          <input id="calibKind" type="text" value="ridge" style="width:140px;">
+        </div>
+        <div style="display:flex; align-items:flex-end;">
+          <button id="btnReloadCalib" class="btn">Reload</button>
+        </div>
+      </div>
+      <canvas id="calibCanvas" width="900" height="180" style="width:100%; height:180px; border:1px solid #30363d; border-radius:10px; background:#0a0d12; margin-top:10px;"></canvas>
+      <pre id="calibRaw" class="small" style="white-space:pre-wrap; margin-top:8px;"></pre>
+    </div>
+
+    <!-- Why Not Promoted (promotion audit feed) -->
+    <div class="card collapsible">
+      <h2>🧾 Why Not Promoted</h2>
+      <div class="small">Recent promotion blocks/rejects/rollbacks from promotion_audit.</div>
+      <div class="table-wrap">
+        <table id="promotionAudit">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Model</th>
+              <th>Action</th>
+              <th>Regime/Key</th>
+              <th>Why</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Temporal Models (dashboard.js uses element id="temporalModels") -->
+    <div class="card collapsible">
+      <h2>Temporal Models</h2>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Window</th>
+              <th>Input Dim</th>
+              <th>Weights</th>
+              <th>Metrics</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody id="temporalModels"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Equity Drift (dashboard.js expects these IDs) -->
+    <div id="equityDriftPanel" class="card collapsible">
+      <h2>Equity Drift (Broker vs Backtest) <span id="equityDriftMeta" class="pill dim">—</span></h2>
+      <canvas id="equityDriftCanvas" width="900" height="180" style="width:100%; height:180px; border:1px solid #30363d; border-radius:10px; background:#0a0d12;"></canvas>
+    </div>
+
+    <!-- Strategy Status (dashboard.js first version uses #strategyStatusPanel + #strategyStatusTable) -->
+    <div class="card collapsible">
+      <h2>🧠 Active Strategy <span id="strategyStatusPanel" class="pill dim">—</span></h2>
+      <div class="table-wrap">
+        <table>
+          <tbody id="strategyStatusTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Strategy Metrics (dashboard.js uses "#strategyMetrics tbody") -->
+    <div class="card collapsible">
+      <h2>📈 Strategy Metrics</h2>
+      <div class="table-wrap">
+        <table id="strategyMetrics">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>Window (d)</th>
+              <th>Net Calmar</th>
+              <th>Sharpe</th>
+              <th>Turnover</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Model Metrics (dashboard.js uses "#modelMetrics tbody") -->
+    <div class="card collapsible">
+      <h2>📏 Model Metrics</h2>
+      <div class="table-wrap">
+        <table id="modelMetrics">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>H</th>
+              <th>R²</th>
+              <th>DirAcc</th>
+              <th>ECE</th>
+              <th>AvgConf</th>
+              <th>p50 |e|</th>
+              <th>p90 |e|</th>
+              <th>n</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Broker ↔ Backtest reconciliation badge -->
+    <div class="card collapsible" id="brokerPanel">
+      <h2>🧾 Broker (Paper Execution)</h2>
+      <div class="small" style="margin-top:6px;">
+        Reconciliation:
+        <span id="eqReconBadge" class="pill dim">loading</span>
+      </div>
+      <div id="eqReconDetail" class="small" style="margin-top:4px; opacity:.85;"></div>
+      <pre id="brokerSnapshot" class="console" style="height:240px;">(loading...)</pre>
+    </div>
+
+    <!-- Execution Cost vs Confidence -->
+<div class="card collapsible">
+  <h2>📉 Execution Cost vs Confidence</h2>
+  <div class="small">
+    Average execution cost grouped by prediction confidence.
+    Helps detect whether high-confidence trades are getting worse fills.
+  </div>
+
+  <div class="table-wrap" style="margin-top:8px;">
+    <table>
+      <thead>
+        <tr>
+          <th>Confidence</th>
+          <th>Trades</th>
+          <th>Avg Cost</th>
+          <th>Severity</th>
+        </tr>
+      </thead>
+      <tbody id="execByConfBody"></tbody>
+    </table>
+  </div>
+</div>
+
+    <!-- Portfolio -->
+    <div class="card collapsible">
+      <h2>💼 Portfolio</h2>
+      <div style="margin:10px 0;">
+        <span id="portfolioMeta" class="pill dim">loading</span>
+      </div>
+
+      <div class="small" style="margin:8px 0 4px;">Current Target Positions</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Weight</th>
+              <th>Opened</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody id="portfolioStateBody"></tbody>
+        </table>
+      </div>
+
+      <div class="small" style="margin:8px 0 4px;">Recent Order Intents</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Action</th>
+              <th>From</th>
+              <th>To</th>
+              <th>ΔW</th>
+            </tr>
+          </thead>
+          <tbody id="portfolioOrdersBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Portfolio Backtest Latest (dashboard.js expects span id="portfolioBtMeta") -->
+    <div class="card collapsible">
+      <h2>📈 Portfolio Backtest (Latest) <span id="portfolioBtMeta" class="pill dim" style="margin-left:8px;">loading</span></h2>
+      <div class="row" style="gap:12px; margin-top:10px;">
+        <div style="flex:1 1 360px; min-width:320px;">
+          <div class="small" style="margin:0 0 6px;">Equity Curve</div>
+          <canvas id="portfolioEquityCanvas" width="900" height="220" style="width:100%; height:220px; border:1px solid #30363d; border-radius:10px; background:#0a0d12;"></canvas>
+        </div>
+        <div style="flex:1 1 360px; min-width:320px;">
+          <div class="small" style="margin:0 0 6px;">Drawdown</div>
+          <canvas id="portfolioDdCanvas" width="900" height="220" style="width:100%; height:220px; border:1px solid #30363d; border-radius:10px; background:#0a0d12;"></canvas>
+        </div>
+      </div>
+
+      <div class="small" style="margin:10px 0 6px;">Summary</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Window</th>
+              <th>Return</th>
+              <th>Max DD</th>
+              <th>Sharpe</th>
+              <th>Trades</th>
+            </tr>
+          </thead>
+          <tbody id="portfolioBtSummaryBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Job History + Trends panels (dashboard.js expects these IDs) -->
+    <div class="card collapsible">
+      <h2>🧾 Job History</h2>
+      <div class="btnRow">
+        <button class="btn" id="btnShowJobHistory">Toggle History Panel</button>
+        <button class="btn" id="btnShowTrends">Toggle Confidence Trends</button>
+      </div>
+      <div id="jobHistoryPanel" style="display:none;">
+        <pre id="jobHistory" class="console" style="height:220px;"></pre>
+      </div>
+      <div id="confidenceTrendPanel" style="display:none; margin-top:10px;">
+        <pre id="confidenceTrends" class="console" style="height:220px;"></pre>
+      </div>
+    </div>
+
+<!-- System State -->
+<div class="card collapsible">
+  <h2>🧭 System State</h2>
+
+  <div class="small" style="margin-bottom:6px;">
+    Automation kill-switches (read-only)
+  </div>
+
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+    <span id="ksAutoPipeline" class="pill dim">auto_pipeline: —</span>
+    <span id="ksAutoChallenger" class="pill dim">auto_challenger: —</span>
+    <span id="ksAutoSizePolicy" class="pill dim">auto_size_policy: —</span>
+  </div>
+
+  <pre id="systemStateText" class="mono small"></pre>
+</div>
+
+  </div>
+
+  <!-- Why Modal (dashboard.js expects these IDs) -->
+  <div id="promoWhyModal" class="modal">
+  <div class="modalInner">
+    <div class="modalHeader">
+      <div class="modalTitle" id="promoWhyTitle">Why not promoted?</div>
+      <button class="btn btnSmall" id="btnClosePromoWhy">Close</button>
+    </div>
+    <pre class="mono small" id="promoWhyBody"></pre>
+  </div>
+</div>
+
+<div id="whyModal" style="
+    display:none;
+    position:fixed; inset:0;
+    background: rgba(0,0,0,0.55);
+    z-index:9999;
+    padding: 18px;
+  ">
+    <div style="
+      max-width: 980px;
+      margin: 0 auto;
+      background:#0b0f15;
+      border:1px solid #30363d;
+      border-radius:12px;
+      padding:12px;
+    ">
+      <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
+        <div id="whyTitle" style="font-weight:800;"></div>
+        <div style="margin-left:auto;"></div>
+        <button class="btn" id="btnCloseWhy">Close</button>
+      </div>
+      <pre id="whyBody" class="console" style="height: 420px;"></pre>
+    </div>
+  </div>
+
+  <!-- Incident drawer (operator-first drilldown) -->
+  <div id="incidentOverlay" class="drawerOverlay" onclick="this.style.display='none'">
+    <div class="drawer"
+         role="dialog"
+         aria-modal="true"
+         aria-label="Incident details"
+         onclick="event.stopPropagation()">
+      <div class="drawerHeader">
+        <div>
+          <div id="drawerTitle" class="drawerTitle">Incident</div>
+          <div id="drawerSubtitle" class="small" style="color:var(--muted);"></div>
+        </div>
+        <div style="margin-left:auto;"></div>
+        <button class="btn" id="btnCloseIncident">Close</button>
+      </div>
+
+      <!-- Decision framing (operator-first) -->
+      <div class="drawerSection decisionFrame">
+        <div class="dfTop">
+          <div class="dfPosture">
+            <span class="dfLabel small">Recommended posture</span>
+            <div id="drawerPosture" class="postureBadge">—</div>
+          </div>
+
+          <div class="dfRight">
+            <div class="dfRow">
+              <span class="dfLabel small">Decision confidence</span>
+              <span id="drawerDecisionConfidence" class="pill dim">—</span>
+            </div>
+            <div class="dfRow">
+              <span class="dfLabel small">Safe to ignore?</span>
+              <span id="drawerSafeIgnore" class="pill dim">—</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="dfBlock">
+          <div class="dfLabel small">If nothing changes, what happens next?</div>
+          <div id="drawerNoChange" class="small"></div>
+        </div>
+
+        <div class="dfBlock">
+          <div class="dfLabel small">Why this posture</div>
+          <div id="drawerWhyPosture" class="small"></div>
+        </div>
+      </div>
+
+      <div class="drawerSection">
+        <h3>What this means</h3>
+        <div id="drawerMeaning" class="small"></div>
+      </div>
+
+      <div class="drawerSection">
+        <h3>Safe next steps</h3>
+        <div id="drawerSteps" class="small"></div>
+      </div>
+
+      <div class="drawerSection">
+        <h3>Similar past incidents</h3>
+        <div id="drawerSimilar" class="small">(loading…)</div>
+      </div>
+
+      <div class="drawerSection">
+        <h3>Key facts</h3>
+        <div id="drawerFacts" class="drawerKvs"></div>
+      </div>
+
+      <div class="drawerSection expertAction" style="margin-top:12px;">
+        <h3>Advanced details</h3>
+        <pre id="drawerRaw" class="console" style="height:260px;"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Load your real UI controller -->
+  <script src="/ui/dashboard.js"></script>
+  <script src="/ui/voice.js"></script>
+
+</body>
+</html>

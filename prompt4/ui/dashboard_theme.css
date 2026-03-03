@@ -1,0 +1,19 @@
+/* ui/dashboard_theme.css
+   Small UI theme overrides that are safe to ship without touching the big inline <style>.
+*/
+
+/* Subtle "degraded" background pulse when system health is not OK */
+body.system-degraded {
+  animation: subtlePulse 2.5s infinite;
+}
+
+@keyframes subtlePulse {
+  0% { background-color: #0b0f15; }
+  50% { background-color: #11161d; }
+  100% { background-color: #0b0f15; }
+}
+
+/* Execution blocked accent override (set by JS via dataset) */
+:root[data-exec-blocked="1"] {
+  --accent: #ff6b6b;
+}
