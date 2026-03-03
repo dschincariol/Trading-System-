@@ -50,15 +50,21 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, stat
     class Handler(SimpleHTTPRequestHandler):
 
         ROUTES = routes
-        CTX = ctx or {}
 
         def __init__(self, *args, **kwargs):
-            # Pin static serving to repo root so /ui/* never 404s due to CWD drift
+            self._ctx = ctx or {}
             try:
                 super().__init__(*args, directory=_STATIC_DIR, **kwargs)
             except TypeError:
-                # Older Python fallback
                 super().__init__(*args, **kwargs)
+
+            def __init__(self, *args, **kwargs):
+                # Pin static serving to repo root so /ui/* never 404s due to CWD drift
+                try:
+                    super().__init__(*args, directory=_STATIC_DIR, **kwargs)
+                except TypeError:
+                    # Older Python fallback
+                    super().__init__(*args, **kwargs)
 
         # --------------------------------------------------------
         # Helpers
@@ -69,6 +75,10 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, stat
                 parsed = urlparse(self.path)
                 if parsed.path in ("/", "/dashboard.html"):
                     self.path = "/ui/dashboard.html"
+                    return
+                if parsed.path in ("/terminal", "/terminal.html"):
+                    self.path = "/ui/terminal/terminal.html"
+                    return
             except Exception:
                 pass
 
@@ -189,18 +199,25 @@ def build_handler(ROUTE_SPECS, API_HANDLERS, dashboard_api_token, ctx=None, stat
                     return self.respond_json(auth, 403)
 
             try:
-                if method == "GET":
-                    try:
-                        return self.respond_json(fn(parsed, self.CTX))
-                    except TypeError:
-                        return self.respond_json(fn(parsed))
+                body = None
+                if method != "GET":
+                    body = self._read_json_body() or {}
 
-                body = self._read_json_body() or {}
-
+                # ALWAYS try full 3-arg signature first
                 try:
-                    return self.respond_json(fn(parsed, body, self.CTX))
+                    result = fn(parsed, body, self._ctx)
                 except TypeError:
-                    return self.respond_json(fn(parsed, body))
+                    try:
+                        # Try 2-arg
+                        if body is not None:
+                            result = fn(parsed, body)
+                        else:
+                            result = fn(parsed, self._ctx)
+                    except TypeError:
+                        # Try 1-arg
+                        result = fn(parsed)
+
+                return self.respond_json(result)
 
             except Exception as e:
                 return self.respond_json(

@@ -33,16 +33,29 @@ import os
 import sys
 import threading
 import time
+import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from engine.runtime.runtime_meta import meta_set_if_missing, meta_set
+from engine.runtime.lifecycle_state import set_state, LIVE, WARMING_UP
+
 if os.environ.get("ENGINE_SUPERVISED") != "1":
-    print("stream_prices_polygon_ws must be launched by supervisor")
-    sys.exit(1)
+    # Do NOT hard-exit: JobManager/supervisor wrappers may omit this env.
+    # Exiting here causes restart loops and UI connection resets.
+    print("WARN: stream_prices_polygon_ws running without ENGINE_SUPERVISED=1 (continuing)", flush=True)
+
+log = logging.getLogger("stream_prices_polygon_ws")
+if not log.handlers:
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
 
 try:
     import websocket  # websocket-client
-except Exception:
+except Exception as e:
     websocket = None
+    log.error("websocket-client missing/unimportable: %r", e)
 
 from engine.runtime.storage import (
     connect,
@@ -91,20 +104,60 @@ def _put_provider_health(
 ) -> None:
     con = connect(readonly=False)
     try:
-        con.execute(
-            """
-            INSERT INTO price_provider_health(ts_ms, provider, ok, latency_ms, n_symbols, error)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                int(_now_ms()),
-                str(provider),
-                1 if ok else 0,
-                int(latency_ms) if latency_ms is not None else None,
-                int(n_symbols),
-                (str(error)[:400] if error else None),
-            ),
-        )
+        try:
+            con.execute(
+                """
+                INSERT INTO price_provider_health(ts_ms, provider, ok, latency_ms, n_symbols, error)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(_now_ms()),
+                    str(provider),
+                    1 if ok else 0,
+                    int(latency_ms) if latency_ms is not None else None,
+                    int(n_symbols),
+                    (str(error)[:400] if error else None),
+                ),
+            )
+        except Exception as e:
+            # Auto-create if schema isn't present yet (common on fresh DB)
+            msg = str(e).lower()
+            if ("no such table" in msg) and ("price_provider_health" in msg):
+                try:
+                    con.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS price_provider_health(
+                          ts_ms INTEGER NOT NULL,
+                          provider TEXT NOT NULL,
+                          ok INTEGER NOT NULL,
+                          latency_ms INTEGER,
+                          n_symbols INTEGER NOT NULL,
+                          error TEXT
+                        )
+                        """
+                    )
+                    con.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_price_provider_health_ts ON price_provider_health(ts_ms)"
+                    )
+                    con.execute(
+                        """
+                        INSERT INTO price_provider_health(ts_ms, provider, ok, latency_ms, n_symbols, error)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            int(_now_ms()),
+                            str(provider),
+                            1 if ok else 0,
+                            int(latency_ms) if latency_ms is not None else None,
+                            int(n_symbols),
+                            (str(error)[:400] if error else None),
+                        ),
+                    )
+                except Exception:
+                    raise
+            else:
+                raise
+
         try:
             con.commit()
         except Exception:
@@ -260,9 +313,12 @@ class _WsIngest:
                     on_error=self._on_error,
                     on_close=self._on_close,
                 )
-                self._ws.run_forever(ping_interval=25, ping_timeout=10, origin=None)
-            except Exception:
-                pass
+                self._ws.run_forever(ping_interval=25, ping_timeout=10)
+            except Exception as e:
+                try:
+                    log.warning("ws.run_forever exception: %r", e)
+                except Exception:
+                    pass
 
             if self._stop:
                 break
@@ -479,18 +535,35 @@ def _flush_to_db(
         )
         n_px = len(px_rows)
 
-    return n_raw, n_q, n_px
+    # Deterministic warmup latch: mark first ever price tick
+    try:
+        if n_px > 0:
+            did = meta_set_if_missing("first_price_ts_ms", str(int(ts_ms)))
+            if did:
+                # first tick observed -> LIVE
+                set_state(LIVE, "first_price_tick")
+            else:
+                # keep state progressing; do not regress
+                pass
+        else:
+            # If still no prices, stay in warming up (best effort)
+            set_state(WARMING_UP, "waiting_for_first_price_tick")
+    except Exception:
+        pass
 
+    return n_raw, n_q, n_px
 
 def main():
     init_db()
 
+    # Attempt lock; if fails, clear stale and retry once
     if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
-        raise SystemExit(2)
-
-    api_key = os.environ.get("POLYGON_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("POLYGON_API_KEY not set")
+        try:
+            release_job_lock(JOB_NAME, OWNER, PID)
+        except Exception:
+            pass
+        if not acquire_job_lock(JOB_NAME, OWNER, PID, ttl_s=LOCK_STALE_AFTER_S):
+            raise SystemExit(2)
 
     endpoint = os.environ.get("POLYGON_WS_ENDPOINT", "wss://socket.polygon.io/stocks").strip()
     sub_trades = os.environ.get("POLYGON_WS_SUBSCRIBE_TRADES", "1") == "1"
@@ -500,7 +573,27 @@ def main():
     hb_s = float(os.environ.get("STREAM_PRICES_HEARTBEAT_S", "2.0"))
     min_write_ms = int(os.environ.get("STREAM_PRICES_MIN_WRITE_INTERVAL_MS", str(flush_ms)))
 
-    ws = _WsIngest(api_key=api_key, endpoint=endpoint, subscribe_trades=sub_trades, subscribe_quotes=sub_quotes)
+    api_key = os.environ.get("POLYGON_API_KEY", "").strip()
+
+    ws: Optional[_WsIngest] = None
+    last_ws_build_error: Optional[str] = None
+
+    def _maybe_build_ws() -> Optional[_WsIngest]:
+        nonlocal last_ws_build_error
+        if websocket is None:
+            last_ws_build_error = "websocket_client_missing"
+            return None
+        if not api_key:
+            last_ws_build_error = "POLYGON_API_KEY_not_set"
+            return None
+        try:
+            last_ws_build_error = None
+            return _WsIngest(api_key=api_key, endpoint=endpoint, subscribe_trades=sub_trades, subscribe_quotes=sub_quotes)
+        except Exception as e:
+            last_ws_build_error = (repr(e) or "ws_init_failed")[:400]
+            return None
+
+    ws = _maybe_build_ws()
 
     last_hb = 0.0
     last_provider_health = 0.0
@@ -517,13 +610,26 @@ def main():
 
             if (now_ms - last_sym_reload_ms) >= 30_000 or not sym_to_poly:
                 sym_to_poly = _load_symbol_map()
-                ws.ensure_subscriptions(set(sym_to_poly.values()))
+                if ws:
+                    ws.ensure_subscriptions(set(sym_to_poly.values()))
                 last_sym_reload_ms = now_ms
 
-            ws_age_ms = int(ws.last_msg_age_ms())
+            ws_age_ms = int(ws.last_msg_age_ms()) if ws else (10**9)
+
+            # If ws isn't running yet, periodically retry building it (cooldown guarded)
+            if ws is None:
+                if (now_s - last_restart_s) >= float(WS_RESTART_COOLDOWN_S):
+                    last_restart_s = now_s
+                    api_key = os.environ.get("POLYGON_API_KEY", "").strip()
+                    ws = _maybe_build_ws()
+                    if ws:
+                        try:
+                            ws.ensure_subscriptions(set(sym_to_poly.values()))
+                        except Exception:
+                            pass
 
             # Dead-feed detector => force reconnect (cooldown guarded)
-            if ws_age_ms >= int(WS_DEAD_AFTER_MS):
+            if ws is not None and ws_age_ms >= int(WS_DEAD_AFTER_MS):
                 if (now_s - last_restart_s) >= float(WS_RESTART_COOLDOWN_S):
                     last_restart_s = now_s
                     try:
@@ -531,7 +637,7 @@ def main():
                     except Exception:
                         pass
 
-            ws_age_ms = int(ws.last_msg_age_ms())
+            ws_age_ms = int(ws.last_msg_age_ms()) if ws else (10**9)
 
             if (now_s - last_hb) >= hb_s:
                 touch_job_lock(JOB_NAME, OWNER, PID)
@@ -544,6 +650,8 @@ def main():
                             "provider": PROVIDER_NAME,
                             "ws_age_ms": int(ws_age_ms),
                             "n_symbols": int(len(sym_to_poly)),
+                            "ws_ready": bool(ws is not None),
+                            "ws_error": last_ws_build_error,
                             "last_flush_error": last_flush_error,
                         },
                         separators=(",", ":"),
@@ -554,16 +662,19 @@ def main():
             if (now_s - last_provider_health) >= float(PROVIDER_HEALTH_EVERY_S):
                 ok = ws_age_ms < int(WS_DEAD_AFTER_MS)
                 # latency_ms unknown here; store ws_age_ms as a proxy
+                err = last_flush_error
+                if ws is None:
+                    err = (err or last_ws_build_error or "ws_not_ready")[:400]
                 _put_provider_health(
                     PROVIDER_NAME,
-                    ok=bool(ok),
+                    ok=bool(ok and ws is not None),
                     latency_ms=int(ws_age_ms),
                     n_symbols=int(len(sym_to_poly)),
-                    error=last_flush_error,
+                    error=err,
                 )
                 last_provider_health = now_s
 
-            snap = ws.snapshot()
+            snap = ws.snapshot() if ws else {}
 
             con = connect(readonly=False)
             try:
@@ -603,10 +714,14 @@ def main():
 
     finally:
         try:
-            ws.close()
+            if ws:
+                ws.close()
         except Exception:
             pass
-        release_job_lock(JOB_NAME, OWNER, PID)
+        try:
+            release_job_lock(JOB_NAME, OWNER, PID)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

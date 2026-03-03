@@ -1,7 +1,8 @@
 import sqlite3
+import time
 from engine.runtime.config_schema import load_runtime_config
 
-
+SCHEMA_VERSION = 1
 def run():
     try:
         cfg = load_runtime_config()
@@ -14,6 +15,29 @@ def run():
 
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
+
+    # ---- RUNTIME META (single source of truth) ----
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS runtime_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_ts_ms INTEGER
+    )
+    """)
+
+    # Record schema version (idempotent)
+    try:
+        now = int(time.time() * 1000)
+        cur.execute(
+            """
+            INSERT INTO runtime_meta(key, value, updated_ts_ms)
+            VALUES(?,?,?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts_ms=excluded.updated_ts_ms
+            """,
+            ("schema_version", str(int(SCHEMA_VERSION)), int(now)),
+        )
+    except Exception:
+        pass
 
     # ---- REQUIRED TABLES ----
 
@@ -31,16 +55,16 @@ def run():
     cur.execute("""
     CREATE TABLE IF NOT EXISTS portfolio_state (
         ts_ms INTEGER PRIMARY KEY,
-        equity REAL,
-        drawdown REAL
+        equity REAL NOT NULL DEFAULT 0,
+        drawdown REAL NOT NULL DEFAULT 0
     )
     """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS broker_account (
         ts_ms INTEGER PRIMARY KEY,
-        equity REAL,
-        buying_power REAL
+        equity REAL NOT NULL DEFAULT 0,
+        buying_power REAL NOT NULL DEFAULT 0
     )
     """)
 

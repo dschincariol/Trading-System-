@@ -28,10 +28,12 @@ Notes:
 """
 
 import os
+import json
 from typing import Any, Dict, Tuple, List, Optional
 
 from engine.strategy.drawdown_state import get_current_drawdown
 from engine.data.weather_features import get_weather_feature_snapshot
+from engine.data.asset_map import asset_class_for_symbol
 
 USE = os.environ.get("PORTFOLIO_USE_RISK_GATE", "1") == "1"
 
@@ -42,6 +44,153 @@ DD_ADD_BLOCK = float(os.environ.get("PORTFOLIO_DD_ADD_BLOCK", "0.08"))
 DD_GROSS_MULT = float(os.environ.get("PORTFOLIO_DD_GROSS_MULT", "0.70"))
 
 GROSS_CAP = float(os.environ.get("PORTFOLIO_GROSS_CAP", "1.00"))
+
+# ------            -- ------------------------------------------------------
+# Hard Sleeve Caps (asset-class sleeves)
+# ------            -- ------------------------------------------------------
+USE_SLEEVE_CAPS = os.environ.get("PORTFOLIO_USE_SLEEVE_CAPS", "1") == "1"
+
+# JSON maps: {"EQUITY":0.60,"CRYPTO":0.20,"FX":0.10,"RATES":0.10,"COMMODITY":0.10}
+SLEEVE_MAX_GROSS_JSON = os.environ.get("PORTFOLIO_SLEEVE_MAX_GROSS_JSON", "").strip()
+SLEEVE_MAX_NET_JSON = os.environ.get("PORTFOLIO_SLEEVE_MAX_NET_JSON", "").strip()
+
+SLEEVE_DEFAULT_MAX_GROSS = float(os.environ.get("PORTFOLIO_SLEEVE_DEFAULT_MAX_GROSS", "1.00"))
+SLEEVE_DEFAULT_MAX_NET = float(os.environ.get("PORTFOLIO_SLEEVE_DEFAULT_MAX_NET", "1.00"))
+
+
+def _load_json_map(raw: str) -> Dict[str, float]:
+    if not raw:
+        return {}
+    try:
+        d = json.loads(raw)
+        if isinstance(d, dict):
+            out = {}
+            for k, v in d.items():
+                kk = str(k or "").upper().strip()
+                if not kk:
+                    continue
+                try:
+                    out[kk] = float(v)
+                except Exception:
+                    continue
+            return out
+    except Exception:
+        return {}
+    return {}
+
+
+_SLEEVE_MAX_GROSS = _load_json_map(SLEEVE_MAX_GROSS_JSON)
+_SLEEVE_MAX_NET = _load_json_map(SLEEVE_MAX_NET_JSON)
+
+
+def _sleeve(sym: str) -> str:
+    try:
+        return str(asset_class_for_symbol(sym) or "UNKNOWN").upper().strip() or "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
+
+
+def _sleeve_gross(out: Dict[str, Dict[str, Any]], sleeve_name: str) -> float:
+    g = 0.0
+    sn = str(sleeve_name or "").upper().strip()
+    for s, tgt in (out or {}).items():
+        if _sleeve(s) != sn:
+            continue
+        try:
+            g += abs(float(tgt.get("weight", 0.0) or 0.0))
+        except Exception:
+            pass
+    return float(g)
+
+
+def _sleeve_net(out: Dict[str, Dict[str, Any]], sleeve_name: str) -> float:
+    n = 0.0
+    sn = str(sleeve_name or "").upper().strip()
+    for s, tgt in (out or {}).items():
+        if _sleeve(s) != sn:
+            continue
+        try:
+            side = str(tgt.get("side", "FLAT")).upper()
+            w = float(tgt.get("weight", 0.0) or 0.0)
+            if side == "SHORT":
+                n -= abs(w)
+            elif side == "LONG":
+                n += abs(w)
+        except Exception:
+            pass
+    return float(n)
+
+
+def _apply_sleeve_caps(out: Dict[str, Dict[str, Any]], info: Dict[str, Any]) -> None:
+    if not USE_SLEEVE_CAPS:
+        return
+
+    sleeves = set()
+    for s in (out or {}).keys():
+        sleeves.add(_sleeve(s))
+
+    applied = {}
+    for sn in sorted(list(sleeves)):
+        mg = float(_SLEEVE_MAX_GROSS.get(sn, SLEEVE_DEFAULT_MAX_GROSS))
+        mn = float(_SLEEVE_MAX_NET.get(sn, SLEEVE_DEFAULT_MAX_NET))
+
+        # gross cap
+        g = _sleeve_gross(out, sn)
+        if mg > 0.0 and g > mg + 1e-12 and g > 1e-12:
+            sc = float(mg) / float(g)
+            for s, tgt in (out or {}).items():
+                if _sleeve(s) != sn:
+                    continue
+                try:
+                    tgt["weight"] = float(tgt.get("weight", 0.0) or 0.0) * float(sc)
+                    tgt.setdefault("reason", {})
+                    tgt["reason"].setdefault("risk_gate", {})
+                    tgt["reason"]["risk_gate"]["sleeve_gross_scale"] = float(sc)
+                    tgt["reason"]["risk_gate"]["sleeve"] = str(sn)
+                except Exception:
+                    pass
+            applied.setdefault(sn, {})
+            applied[sn]["gross_cap"] = float(mg)
+            applied[sn]["gross_pre"] = float(g)
+            applied[sn]["gross_scale"] = float(sc)
+
+        # net cap (scale only overweight side)
+        n = _sleeve_net(out, sn)
+        if mn > 0.0 and abs(float(n)) > mn + 1e-12:
+            side_to_scale = "LONG" if n > 0 else "SHORT"
+            denom = 0.0
+            for s, tgt in (out or {}).items():
+                if _sleeve(s) != sn:
+                    continue
+                side = str(tgt.get("side", "FLAT")).upper()
+                if side == side_to_scale:
+                    denom += abs(float(tgt.get("weight", 0.0) or 0.0))
+            if denom > 1e-12:
+                # reduce overweight side by excess
+                target_sum = float(denom) - (abs(float(n)) - float(mn))
+                sc = max(0.0, float(target_sum) / float(denom))
+                for s, tgt in (out or {}).items():
+                    if _sleeve(s) != sn:
+                        continue
+                    side = str(tgt.get("side", "FLAT")).upper()
+                    if side == side_to_scale:
+                        try:
+                            tgt["weight"] = float(tgt.get("weight", 0.0) or 0.0) * float(sc)
+                            tgt.setdefault("reason", {})
+                            tgt["reason"].setdefault("risk_gate", {})
+                            tgt["reason"]["risk_gate"]["sleeve_net_scale"] = float(sc)
+                            tgt["reason"]["risk_gate"]["sleeve_net_side"] = str(side_to_scale)
+                            tgt["reason"]["risk_gate"]["sleeve"] = str(sn)
+                        except Exception:
+                            pass
+                applied.setdefault(sn, {})
+                applied[sn]["net_cap"] = float(mn)
+                applied[sn]["net_pre"] = float(n)
+                applied[sn]["net_scale_side"] = str(side_to_scale)
+                applied[sn]["net_scale"] = float(sc)
+
+    if applied:
+        info["sleeve_caps"] = applied
 
 # ------            -- ------------------------------------------------------
 # Optional: weather-aware portfolio clamps (read-only)
@@ -292,6 +441,12 @@ def apply_portfolio_risk_gate(
                 pass
         info["gross_scale"] = float(scale)
 
+    # Hard sleeve caps (asset-class sleeves) BEFORE net/turnover caps
+    try:
+        _apply_sleeve_caps(out, info)
+    except Exception:
+        pass
+
     # Enforce max net exposure by scaling the overweight side only
     net = _net(out)
     info["net_pre"] = float(net)
@@ -389,6 +544,17 @@ def apply_execution_risk_governor(
     # global pause switch (fail closed)
     try:
         from engine.runtime.risk_state import get_state
+
+        # portfolio risk engine (if enabled) can hard-block execution
+        if str(get_state("portfolio_risk_block", "0") or "0").strip() == "1":
+            details = str(get_state("portfolio_risk_info", "") or "")
+            return [], {
+                "ok": False,
+                "status": "blocked_portfolio_risk",
+                "broker": broker,
+                "mode": mode,
+                "portfolio_risk_info": details,
+            }
 
         if str(get_state("execution_pause", "0") or "0").strip() == "1":
             return [], {"ok": False, "status": "blocked_execution_pause", "broker": broker, "mode": mode}

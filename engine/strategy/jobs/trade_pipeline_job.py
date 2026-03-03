@@ -259,7 +259,7 @@ def main() -> int:
             pass
 
         # ----------- 3. Portfolio Rebalance (writes portfolio_orders) -----------
-        from portfolio_construct import compute_rebalance
+        from engine.strategy.portfolio import compute_rebalance
 
         ok, pr = _run_stage(
             con,

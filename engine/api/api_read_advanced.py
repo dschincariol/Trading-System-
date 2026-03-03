@@ -209,6 +209,198 @@ def get_latest_portfolio_backtest():
 
 
 # --------------------------------------------------
+# PORTFOLIO SNAPSHOT (dashboard)
+# --------------------------------------------------
+
+def get_portfolio_snapshot(
+    limit_state: int = 200,
+    intents_window_ms: int = 2500,
+    intents_max_rows: int = 5000,
+):
+    """
+    Dashboard contract: never return ok=False.
+    Returns ok=True with empty structures if portfolio has not been produced yet.
+    """
+    con = db_connect()
+    try:
+        # If portfolio tables don't exist yet, return empty but ok.
+        if (not _table_exists(con, "portfolio_state")) or (not _table_exists(con, "portfolio_orders")):
+            return {
+                "ok": True,
+                "meta": {"ready": False, "reason": "portfolio_tables_missing"},
+                "state": [],
+                "orders": [],
+            }
+
+        # Meta (best-effort)
+        meta_rows = []
+        if _table_exists(con, "portfolio_meta"):
+            try:
+                meta_rows = con.execute(
+                    "SELECT key, value FROM portfolio_meta ORDER BY key ASC"
+                ).fetchall() or []
+            except Exception:
+                meta_rows = []
+
+        meta = {}
+        for k, v in (meta_rows or []):
+            ks = str(k or "").strip()
+            if not ks:
+                continue
+            meta[ks] = str(v) if v is not None else ""
+
+        # State rows
+        try:
+            st_rows = con.execute(
+                """
+                SELECT symbol, side, weight, opened_ts_ms, updated_ts_ms, source_alert_id, explain_json
+                FROM portfolio_state
+                ORDER BY ABS(weight) DESC, updated_ts_ms DESC
+                LIMIT ?
+                """,
+                (int(limit_state),),
+            ).fetchall() or []
+        except Exception:
+            st_rows = []
+
+        state = []
+        for r in st_rows:
+            try:
+                symbol, side, weight, opened_ts_ms, updated_ts_ms, source_alert_id, explain_json = r
+            except Exception:
+                continue
+            try:
+                ex = json.loads(explain_json or "{}") if explain_json else {}
+            except Exception:
+                ex = {}
+            state.append(
+                {
+                    "symbol": str(symbol or ""),
+                    "side": str(side or ""),
+                    "weight": float(weight or 0.0),
+                    "opened_ts_ms": int(opened_ts_ms or 0),
+                    "updated_ts_ms": int(updated_ts_ms or 0),
+                    "source_alert_id": (int(source_alert_id) if source_alert_id is not None else None),
+                    "explain": (ex if isinstance(ex, dict) else {}),
+                }
+            )
+
+        # Orders/intents (latest batch)
+        try:
+            from engine.strategy.portfolio_execution_intents import load_latest_execution_intents
+
+            intents_res = load_latest_execution_intents(
+                con,
+                window_ms=int(intents_window_ms),
+                max_rows=int(intents_max_rows),
+            )
+        except Exception:
+            intents_res = {"ok": True, "batch_id": None, "batch_ts_ms": None, "intents": []}
+
+        orders = []
+        if isinstance(intents_res, dict):
+            for it in (intents_res.get("intents") or []):
+                if isinstance(it, dict):
+                    orders.append(it)
+
+        return {
+            "ok": True,
+            "meta": {
+                "ready": True,
+                "meta": meta,
+                "orders_batch_id": (intents_res.get("batch_id") if isinstance(intents_res, dict) else None),
+                "orders_batch_ts_ms": (intents_res.get("batch_ts_ms") if isinstance(intents_res, dict) else None),
+            },
+            "state": state,
+            "orders": orders,
+        }
+    finally:
+        con.close()
+
+
+# --------------------------------------------------
+# PORTFOLIO SNAPSHOT (dashboard)
+# --------------------------------------------------
+
+def get_portfolio_snapshot(
+    limit_state: int = 200,
+    intents_window_ms: int = 2500,
+    intents_max_rows: int = 5000,
+):
+    con = db_connect()
+    try:
+        if (not _table_exists(con, "portfolio_state")) or (not _table_exists(con, "portfolio_orders")):
+            return {
+                "ok": True,
+                "meta": {"ready": False, "reason": "portfolio_tables_missing"},
+                "state": [],
+                "orders": [],
+            }
+
+        # State
+        try:
+            st_rows = con.execute(
+                """
+                SELECT symbol, side, weight, opened_ts_ms, updated_ts_ms, source_alert_id, explain_json
+                FROM portfolio_state
+                ORDER BY ABS(weight) DESC, updated_ts_ms DESC
+                LIMIT ?
+                """,
+                (int(limit_state),),
+            ).fetchall() or []
+        except Exception:
+            st_rows = []
+
+        state = []
+        for r in st_rows:
+            try:
+                symbol, side, weight, opened_ts_ms, updated_ts_ms, source_alert_id, explain_json = r
+            except Exception:
+                continue
+            try:
+                ex = json.loads(explain_json or "{}") if explain_json else {}
+            except Exception:
+                ex = {}
+            state.append(
+                {
+                    "symbol": str(symbol or ""),
+                    "side": str(side or ""),
+                    "weight": float(weight or 0.0),
+                    "opened_ts_ms": int(opened_ts_ms or 0),
+                    "updated_ts_ms": int(updated_ts_ms or 0),
+                    "source_alert_id": (int(source_alert_id) if source_alert_id is not None else None),
+                    "explain": ex if isinstance(ex, dict) else {},
+                }
+            )
+
+        # Orders
+        try:
+            from engine.strategy.portfolio_execution_intents import load_latest_execution_intents
+            intents_res = load_latest_execution_intents(
+                con,
+                window_ms=int(intents_window_ms),
+                max_rows=int(intents_max_rows),
+            )
+        except Exception:
+            intents_res = {"ok": True, "batch_id": None, "batch_ts_ms": None, "intents": []}
+
+        orders = intents_res.get("intents") if isinstance(intents_res, dict) else []
+
+        return {
+            "ok": True,
+            "meta": {
+                "ready": True,
+                "orders_batch_id": intents_res.get("batch_id") if isinstance(intents_res, dict) else None,
+                "orders_batch_ts_ms": intents_res.get("batch_ts_ms") if isinstance(intents_res, dict) else None,
+            },
+            "state": state,
+            "orders": orders or [],
+        }
+    finally:
+        con.close()
+
+
+# --------------------------------------------------
 # EXECUTION METRICS
 # --------------------------------------------------
 

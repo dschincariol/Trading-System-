@@ -20,13 +20,15 @@ import json
 import os
 import time
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 from engine.runtime.storage import connect
 from engine.execution.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
 from engine.strategy.strategy_selector import choose_strategy_name, load_strategy_module
 from engine.data.universe import get_active_symbols
 from engine.strategy.symbol_blacklist import is_blacklisted
+from engine.strategy.portfolio_risk_gate import apply_portfolio_risk_gate
+from engine.strategy.portfolio_risk_engine import apply_portfolio_risk_engine
 from engine.strategy.portfolio_risk_gate import apply_portfolio_risk_gate
 from engine.runtime.risk_state import get_state
 from engine.runtime.factor_universe import _get_feature_asof as _get_factor_feature_asof
@@ -786,7 +788,7 @@ def _apply_temporal_dampener(con, desired: Dict[str, Dict], now_ms: int) -> Dict
                 pass
 
     # renormalize gross after dampener
-    grossT = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+    grossT = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
     if grossT > float(PORTFOLIO_GROSS_CAP) and grossT > 1e-9:
         scaleT = float(PORTFOLIO_GROSS_CAP) / float(grossT)
         for sym in list(desired.keys()):
@@ -870,7 +872,7 @@ def _apply_impact_aware_sizing(con, desired: Dict[str, Dict]) -> Dict[str, Dict]
         except Exception:
             pass
 
-    gross = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+    gross = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
     eff_cap = float(_eff_gross_cap())
     if gross > float(eff_cap) and gross > 1e-9:
         sc = float(eff_cap) / float(gross)
@@ -1009,7 +1011,7 @@ def _optimize_capital_allocation(con, desired: Dict[str, Dict]) -> Dict[str, Dic
         desired[sym]["reason"]["alloc_factor"] = float(factor)
 
     # renormalize gross
-    gross = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+    gross = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
     eff_cap = float(_eff_gross_cap())
     if gross > float(eff_cap) and gross > 1e-9:
         sc = float(eff_cap) / float(gross)
@@ -1198,7 +1200,7 @@ def _apply_capital_at_risk_gate(desired: Dict[str, Dict]) -> Tuple[Dict[str, Dic
         meta["car_scaled"] = False
 
     # Renormalize gross after CAR scaling (safety)
-    grossC = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+    grossC = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
     if grossC > float(PORTFOLIO_GROSS_CAP) and grossC > 1e-9:
         scaleC = float(PORTFOLIO_GROSS_CAP) / float(grossC)
         for sym in list(desired.keys()):
@@ -1329,10 +1331,33 @@ def compute_rebalance() -> Dict:
         # Multi-Strategy Capital Competition
         # ------------------------------------------------------
         live_strategies = _load_live_strategies(con)
+
+        # ------------------------------------------------------
+        # Strategy Allocator (Meta Capital Engine)
+        # - rolling perf scoring
+        # - drawdown-aware scaling
+        # - correlation-adjusted allocation
+        # - dynamic redistribution
+        # - config-driven risk budgets
+        # ------------------------------------------------------
+        alloc_map: Dict[str, float] = {}
+        alloc_detail: Dict[str, Any] = {}
+
+        try:
+            from engine.runtime.strategy_allocator import compute_and_persist_strategy_allocations
+
+            alloc_res = compute_and_persist_strategy_allocations(con, now_ms=int(now_ms)) or {}
+            alloc_map = dict(alloc_res.get("allocations") or {})
+            alloc_detail = dict(alloc_res.get("details") or {})
+        except Exception:
+            alloc_map = {}
+            alloc_detail = {}
+
+        # Back-compat fallback: use stored efficiency_score if allocator has no output
         eff_map = _load_strategy_efficiency(con)
 
         strategy_targets: Dict[str, Dict] = {}
-        total_eff = 0.0
+        total_share = 0.0
 
         strat = None  # preserve original "last loaded strat" behavior for later get_regime_profile usage
 
@@ -1342,23 +1367,44 @@ def compute_rebalance() -> Dict:
                 d = strat.build_desired(alerts=alerts, now_ms=int(now_ms)) or {}
                 strategy_targets[str(sname)] = d
 
-                eff = float((eff_map.get(str(sname)) or {}).get("efficiency_score", 0.0) or 0.0)
-                eff = max(0.0, eff)
-                total_eff += eff
+                if alloc_map:
+                    share = float(alloc_map.get(str(sname), 0.0) or 0.0)
+                else:
+                    share = float((eff_map.get(str(sname)) or {}).get("efficiency_score", 0.0) or 0.0)
+                    share = max(0.0, share)
+
+                total_share += float(max(0.0, share))
             except Exception:
                 continue
 
-        # If no efficiency available, equal weight fallback
-        if total_eff <= 1e-9:
-            total_eff = float(len(strategy_targets) or 1)
+        # If no allocation available, equal weight fallback
+        if total_share <= 1e-9:
+            total_share = float(len(strategy_targets) or 1)
 
-        # Merge with efficiency-weighted capital share
+        # Merge with allocator-weighted capital share
         desired: Dict[str, Dict] = {}
 
         for sname, targets in strategy_targets.items():
-            eff = float((eff_map.get(str(sname)) or {}).get("efficiency_score", 0.0) or 0.0)
-            eff = max(0.0, eff)
-            share = eff / total_eff if total_eff > 0 else 0.0
+            if alloc_map:
+                share_raw = float(alloc_map.get(str(sname), 0.0) or 0.0)
+            else:
+                share_raw = float((eff_map.get(str(sname)) or {}).get("efficiency_score", 0.0) or 0.0)
+                share_raw = max(0.0, share_raw)
+
+            share = float(share_raw) / float(total_share) if float(total_share) > 0 else 0.0
+
+            # ------------------------------------------------------
+            # Global Risk Envelope (Top-Down Capital Throttle)
+            # ------------------------------------------------------
+            global_scale = 1.0
+            try:
+                from engine.runtime.global_risk_envelope import compute_global_risk_envelope
+                _g = compute_global_risk_envelope(con, now_ms=int(now_ms)) or {}
+                global_scale = float(_g.get("global_scale", 1.0) or 1.0)
+            except Exception:
+                global_scale = 1.0
+
+            share = float(share) * float(global_scale)
 
             for sym, tgt in (targets or {}).items():
                 try:
@@ -1369,15 +1415,31 @@ def compute_rebalance() -> Dict:
                     if cur is None:
                         desired[sym] = dict(tgt)
                         desired[sym]["weight"] = float(w)
+                        desired[sym]["source_alert_id"] = tgt.get("source_alert_id")
                         desired[sym].setdefault("reason", {})
                         desired[sym]["reason"]["strategy"] = str(sname)
-                        desired[sym]["reason"]["eff_share"] = float(share)
+                        desired[sym]["reason"]["strategy_share"] = float(share)
+                        desired[sym]["reason"]["strategy_alloc"] = {str(sname): float(share)}
+                        if alloc_detail and str(sname) in alloc_detail:
+                            desired[sym]["reason"]["strategy_alloc_detail"] = alloc_detail.get(str(sname))
                     else:
                         # combine weights from multiple strategies
                         cur_w = float(cur.get("weight", 0.0) or 0.0)
                         desired[sym]["weight"] = float(cur_w + w)
+                    if desired[sym].get("source_alert_id") is None:
+                        desired[sym]["source_alert_id"] = tgt.get("source_alert_id")
                         desired[sym].setdefault("reason", {})
                         desired[sym]["reason"]["multi_strategy"] = True
+
+                        # keep attribution of contributing strategy shares
+                        try:
+                            sa = desired[sym]["reason"].get("strategy_alloc")
+                            if not isinstance(sa, dict):
+                                sa = {}
+                            sa[str(sname)] = float(share)
+                            desired[sym]["reason"]["strategy_alloc"] = sa
+                        except Exception:
+                            pass
                 except Exception:
                     continue
 
@@ -1490,7 +1552,7 @@ def compute_rebalance() -> Dict:
                     exj = "{}"
                 exj = str(exj)
 
-                src_id = (tgt or {}).get("source_alert_id", None)
+                src_id = tgt.get("source_alert_id") if isinstance(tgt, dict) else None
                 try:
                     src_id = int(src_id) if src_id is not None else None
                 except Exception:
@@ -1503,7 +1565,7 @@ def compute_rebalance() -> Dict:
                     regime_vector = compute_regime_vector(s)
 
                     try:
-                        regime_profile = getattr(strat, "get_regime_profile", lambda: {})()
+                        regime_profile = getattr(strat, "get_regime_profile", lambda: {})() if strat else {}
                     except Exception:
                         regime_profile = {}
 
@@ -1529,7 +1591,7 @@ def compute_rebalance() -> Dict:
         desired = norm
 
         # renormalize gross
-        grossE = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+        grossE = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
         if grossE > float(PORTFOLIO_GROSS_CAP) and grossE > 1e-9:
             scaleE = float(PORTFOLIO_GROSS_CAP) / float(grossE)
             for sym in list(desired.keys()):
@@ -1672,7 +1734,7 @@ def compute_rebalance() -> Dict:
                 pass
 
         # safety: enforce portfolio gross cap even if strategy already normalized
-        gross = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+        gross = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
         if gross > float(PORTFOLIO_GROSS_CAP) and gross > 1e-9:
             scale = float(PORTFOLIO_GROSS_CAP) / float(gross)
             for sym in list(desired.keys()):
@@ -1778,7 +1840,7 @@ def compute_rebalance() -> Dict:
                         desired[sym]["reason"]["stress_flow_z"] = float(flow_z)
 
                 # renormalize gross after compression
-                gross_s = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+                gross_s = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
                 eff_cap = float(_eff_gross_cap())
                 if gross_s > float(eff_cap) and gross_s > 1e-9:
                     scale_s = float(eff_cap) / float(gross_s)
@@ -1828,7 +1890,7 @@ def compute_rebalance() -> Dict:
                         desired[sym]["reason"]["social_promo_likelihood"] = float(g.get("promo_likelihood_mean", 0.0))
 
                 # renormalize gross after social compression (still respect gross cap)
-                gross_soc = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+                gross_soc = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
                 if gross_soc > float(PORTFOLIO_GROSS_CAP) and gross_soc > 1e-9:
                     scale_soc = float(PORTFOLIO_GROSS_CAP) / float(gross_soc)
                     for sym in list(desired.keys()):
@@ -1873,7 +1935,7 @@ def compute_rebalance() -> Dict:
                         desired[sym]["reason"]["vov_value"] = float(vv)
 
                     # renormalize gross after vov compression
-                    gross_v = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+                    gross_v = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
                     if gross_v > float(PORTFOLIO_GROSS_CAP) and gross_v > 1e-9:
                         scale_v = float(PORTFOLIO_GROSS_CAP) / float(gross_v)
                         for sym in list(desired.keys()):
@@ -1941,7 +2003,7 @@ def compute_rebalance() -> Dict:
                 desired[sym]["reason"]["exec_slippage_bps_est"] = float(meta.get("slippage_bps_est", 0.0))
 
         # renormalize gross after size policy scaling
-        gross3 = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+        gross3 = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
         if gross3 > float(PORTFOLIO_GROSS_CAP) and gross3 > 1e-9:
             scale3 = float(PORTFOLIO_GROSS_CAP) / float(gross3)
             for sym in list(desired.keys()):
@@ -1952,7 +2014,7 @@ def compute_rebalance() -> Dict:
         try:
             if _capital_mode() == "preserve" and desired:
                 cap = float(_eff_gross_cap())
-                gross0 = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+                gross0 = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
                 if gross0 > cap and gross0 > 1e-9:
                     scale_cap = float(cap) / float(gross0)
                     for sym in list(desired.keys()):
@@ -2005,13 +2067,46 @@ def compute_rebalance() -> Dict:
                         pass
 
                 # renormalize gross after regime scaling
-                grossR = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+                grossR = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
                 if grossR > float(PORTFOLIO_GROSS_CAP) and grossR > 1e-9:
                     scaleR = float(PORTFOLIO_GROSS_CAP) / float(grossR)
                     for sym in list(desired.keys()):
                         desired[sym]["weight"] = float(desired[sym]["weight"]) * float(scaleR)
         except Exception:
             pass
+
+        # ---            -- ------------------------------------------------------
+        # Phase 1.5: PORTFOLIO RISK ENGINE (exposure / vol / corr / asset-class)
+        # ---            -- ------------------------------------------------------
+        try:
+            desired, _risk_engine = apply_portfolio_risk_engine(con, desired, state, now_ms=int(now_ms))
+            try:
+                _put_meta(
+                    con,
+                    "last_portfolio_risk_engine",
+                    json.dumps(_risk_engine or {}, separators=(",", ":"), sort_keys=True),
+                )
+            except Exception:
+                pass
+        except Exception:
+            _risk_engine = None
+
+
+        # ---            -- ------------------------------------------------------
+        # Phase 1.5: PORTFOLIO RISK ENGINE (institutional: cov/corr clusters/budgets)
+        # ---            -- ------------------------------------------------------
+        try:
+            desired, _re = apply_portfolio_risk_engine(con, desired, state, now_ms=int(now_ms))
+            try:
+                _put_meta(
+                    con,
+                    "last_portfolio_risk_engine",
+                    json.dumps(_re or {}, separators=(",", ":"), sort_keys=True),
+                )
+            except Exception:
+                pass
+        except Exception:
+            _re = None
 
         # ---            -- ------------------------------------------------------
         # Phase 2: PORTFOLIO HARD RISK GATE (net / turnover / dd add-block)
@@ -2065,9 +2160,9 @@ def compute_rebalance() -> Dict:
         # 1) handle symbols in desired set
         for sym, tgt in desired.items():
             cur = state.get(sym)
-            to_side = tgt["side"]
+            to_side = str(tgt.get("side", "FLAT")).upper()
             to_w = float(tgt["weight"])
-            source_alert_id = tgt["source_alert_id"]
+            source_alert_id = tgt.get("source_alert_id")
 
             explain = {
                 "strategy": {
@@ -2087,13 +2182,13 @@ def compute_rebalance() -> Dict:
                     "rl_choice": str(_get_meta(con, "last_rl_choice") or "multi_strategy"),
                     "rl_score": float(_get_meta(con, "last_rl_score") or 0.0),
                 },
-                "signal": tgt["reason"],
+                "signal": tgt.get("reason") or {},
                 "tradability": _tradability_from_explain(tgt.get("explain_json", "{}")),
             }
 
             if not cur:
                 # open new
-                _write_state_row(con, sym, to_side, to_w, now_ms, now_ms, source_alert_id, tgt["explain_json"])
+                _write_state_row(con, sym, to_side, to_w, now_ms, now_ms, source_alert_id, tgt.get("explain_json", "{}"))
                 _emit_order(con, sym, "OPEN", "FLAT", to_side, 0.0, to_w, source_alert_id, explain)
                 orders_n += 1
                 changed.append(sym)
@@ -2114,7 +2209,7 @@ def compute_rebalance() -> Dict:
 
             # compute action
             if from_side == "FLAT" and to_side != "FLAT" and to_w > 0:
-                _write_state_row(con, sym, to_side, to_w, now_ms, now_ms, source_alert_id, tgt["explain_json"])
+                _write_state_row(con, sym, to_side, to_w, now_ms, now_ms, source_alert_id, tgt.get("explain_json", "{}"))
                 _emit_order(con, sym, "OPEN", "FLAT", to_side, 0.0, to_w, source_alert_id, explain)
                 orders_n += 1
                 changed.append(sym)
@@ -2138,7 +2233,7 @@ def compute_rebalance() -> Dict:
 
             if from_side in ("LONG", "SHORT") and to_side != from_side:
                 # reverse
-                _write_state_row(con, sym, to_side, to_w, now_ms, now_ms, source_alert_id, tgt["explain_json"])
+                _write_state_row(con, sym, to_side, to_w, now_ms, now_ms, source_alert_id, tgt.get("explain_json", "{}"))
                 _emit_order(con, sym, "REVERSE", from_side, to_side, from_w, to_w, source_alert_id, explain)
                 orders_n += 1
                 changed.append(sym)
@@ -2178,7 +2273,7 @@ def compute_rebalance() -> Dict:
         # ---            -- ------------------------------------------------------
         try:
             # Simple proxy: peak gross vs current gross
-            gross_now = sum(abs(float(v.get("weight", 0.0))) for v in desired.values())
+            gross_now = sum(abs(float((v or {}).get("weight", 0.0) or 0.0)) for v in desired.values())
             peak_raw = _get_meta(con, "peak_gross_weight")
             peak = float(peak_raw) if peak_raw is not None else gross_now
             if gross_now > peak:

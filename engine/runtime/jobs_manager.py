@@ -7,7 +7,6 @@ import subprocess
 from collections import deque
 from typing import Deque, Dict, Optional
 
-from engine.runtime.storage import connect as _db_connect
 from engine.runtime.job_registry import ALLOWED_JOBS, JOB_ORDER
 
 from engine.runtime.config import (
@@ -21,293 +20,35 @@ from engine.runtime.config import (
     PREFLIGHT_BLOCK_JOBS,
 )
 
+_DAEMON_STALL_AFTER_MS = int(os.environ.get("DAEMON_STALL_AFTER_MS", "120000"))
+
 from engine.runtime.gates import execution_gate_snapshot
 
-# ------------------------------
-# SQLITE-BASED JOB LOCKS (cross-process safe)
-# ------------------------------
+print("JOBS_MANAGER LOADED FROM:", __file__)
 
-def _ensure_job_locks():
-    con = _db_connect()
-    try:
-        try:
-            cols = [r[1] for r in con.execute("PRAGMA table_info(job_locks)").fetchall()]
-        except Exception:
-            cols = []
-
-        has_legacy_key = ("key" in cols) and ("job_name" not in cols)
-
-        if has_legacy_key:
-            try:
-                con.execute("ALTER TABLE job_locks RENAME TO job_locks_legacy")
-            except Exception:
-                pass
-            cols = []
-
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_locks (
-              job_name TEXT PRIMARY KEY,
-              owner TEXT NOT NULL,
-              pid INTEGER NOT NULL,
-              acquired_ts_ms INTEGER NOT NULL,
-              heartbeat_ts_ms INTEGER NOT NULL,
-              expires_ms INTEGER
-            )
-            """
-        )
-
-        if has_legacy_key:
-            now = int(time.time() * 1000)
-            try:
-                legacy_rows = con.execute(
-                    "SELECT key, owner, expires_ms FROM job_locks_legacy"
-                ).fetchall()
-            except Exception:
-                legacy_rows = []
-
-            for k, owner, exp in legacy_rows or []:
-                con.execute(
-                    """
-                    INSERT OR REPLACE INTO job_locks
-                    (job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms, expires_ms)
-                    VALUES (?,?,?,?,?,?)
-                    """,
-                    (
-                        str(k),
-                        str(owner or ""),
-                        0,
-                        int(now),
-                        int(now),
-                        int(exp) if exp is not None else None,
-                    ),
-                )
-
-        try:
-            cols = [r[1] for r in con.execute("PRAGMA table_info(job_locks)").fetchall()]
-        except Exception:
-            cols = []
-
-        def _add(col: str, ddl: str) -> None:
-            if col in cols:
-                return
-            try:
-                con.execute(ddl)
-            except Exception:
-                pass
-
-        _add("job_name", "ALTER TABLE job_locks ADD COLUMN job_name TEXT")
-        _add("owner", "ALTER TABLE job_locks ADD COLUMN owner TEXT")
-        _add("pid", "ALTER TABLE job_locks ADD COLUMN pid INTEGER")
-        _add("acquired_ts_ms", "ALTER TABLE job_locks ADD COLUMN acquired_ts_ms INTEGER")
-        _add("heartbeat_ts_ms", "ALTER TABLE job_locks ADD COLUMN heartbeat_ts_ms INTEGER")
-        _add("expires_ms", "ALTER TABLE job_locks ADD COLUMN expires_ms INTEGER")
-
-        con.commit()
-    finally:
-        con.close()
-
-def _acquire_lock(name: str, ttl_ms: int = 10_000) -> bool:
-    _ensure_job_locks()
-    con = _db_connect()
-    try:
-        now = int(time.time() * 1000)
-        exp = int(now + int(ttl_ms))
-
-        row = con.execute(
-            "SELECT owner, pid, expires_ms FROM job_locks WHERE job_name=?",
-            (str(name),),
-        ).fetchone()
-
-        if row:
-            try:
-                cur_exp = int(row[2] or 0)
-            except Exception:
-                cur_exp = 0
-            if cur_exp > now:
-                return False
-
-        owner = f"{os.getpid()}:{threading.get_ident()}"
-        pid = int(os.getpid())
-
-        con.execute(
-            """
-            INSERT OR REPLACE INTO job_locks
-              (job_name, owner, pid, acquired_ts_ms, heartbeat_ts_ms, expires_ms)
-            VALUES (?,?,?,?,?,?)
-            """,
-            (str(name), str(owner), int(pid), int(now), int(now), int(exp)),
-        )
-
-        con.commit()
-        return True
-    except Exception:
-        try:
-            con.rollback()
-        except Exception:
-            pass
-        return False
-    finally:
-        con.close()
-
-def _touch_lock(name: str, ttl_ms: int = 10_000) -> None:
-    _ensure_job_locks()
-    con = _db_connect()
-    try:
-        now = int(time.time() * 1000)
-        exp = int(now + int(ttl_ms))
-        con.execute(
-            "UPDATE job_locks SET expires_ms=? WHERE job_name=?",
-            (int(exp), str(name)),
-        )
-        con.commit()
-    except Exception:
-        try:
-            con.rollback()
-        except Exception:
-            pass
-    finally:
-        con.close()
-
-def _heartbeat_lock(job_name: str, ttl_ms: int = 60_000) -> None:
-    _ensure_job_locks()
-    _touch_lock(job_name, ttl_ms=ttl_ms)
-
-    now = int(time.time() * 1000)
-    owner = f"{os.getpid()}:{threading.get_ident()}"
-    pid = int(os.getpid())
-
-    con = _db_connect()
-    try:
-        try:
-            cols = [r[1] for r in con.execute("PRAGMA table_info(job_locks)").fetchall() or []]
-        except Exception:
-            cols = []
-
-        if "heartbeat_ts_ms" in cols:
-            con.execute(
-                "UPDATE job_locks SET heartbeat_ts_ms=?, owner=?, pid=? WHERE job_name=?",
-                (int(now), str(owner), int(pid), str(job_name)),
-            )
-        else:
-            if "acquired_ts_ms" in cols:
-                con.execute(
-                    "UPDATE job_locks SET acquired_ts_ms=?, owner=?, pid=? WHERE job_name=?",
-                    (int(now), str(owner), int(pid), str(job_name)),
-                )
-        con.commit()
-    finally:
-        con.close()
-
-def _release_lock(job_name: str) -> None:
-    _ensure_job_locks()
-    con = _db_connect()
-    try:
-        con.execute("DELETE FROM job_locks WHERE job_name=?", (str(job_name),))
-        con.commit()
-    finally:
-        con.close()
+# ---------------------------------------------------
+# PATHS (robust against wrong CWD)
+# jobs_manager.py lives at: engine/runtime/jobs_manager.py
+# project root is 2 levels up from engine/runtime/
+# ---------------------------------------------------
+_ENGINE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_ENGINE_DIR, ".."))
 
 # ------------------------------
-# JOB HISTORY
+# SQLITE LOCKS + JOB HISTORY (single source of truth)
 # ------------------------------
+from engine.runtime.locks import (
+    ensure_job_locks as _ensure_job_locks,
+    acquire_lock as _acquire_lock,
+    touch_lock as _touch_lock,
+    heartbeat_lock as _heartbeat_lock,
+    read_lock as _read_lock,
+    release_lock as _release_lock,
+    ensure_job_history as _ensure_job_history,
+    write_job_history as _write_job_history,
+    read_job_history as _read_job_history,
+)
 
-def _ensure_job_history():
-    con = _db_connect()
-    try:
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_history (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              ts_ms INTEGER NOT NULL,
-              job_name TEXT NOT NULL,
-              event TEXT NOT NULL,
-              detail TEXT,
-              exit_code INTEGER
-            )
-            """
-        )
-        con.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_job_history_job_ts
-              ON job_history(job_name, ts_ms)
-            """
-        )
-        con.commit()
-    finally:
-        con.close()
-
-def _write_job_history(
-    job_name: str,
-    event: str,
-    detail: str = "",
-    exit_code: int = None,
-    ts_ms: int = None,
-) -> None:
-    try:
-        _ensure_job_history()
-    except Exception:
-        pass
-
-    con = _db_connect()
-    try:
-        now = int(ts_ms or (time.time() * 1000))
-        con.execute(
-            """
-            INSERT INTO job_history(ts_ms, job_name, event, detail, exit_code)
-            VALUES (?,?,?,?,?)
-            """,
-            (
-                int(now),
-                str(job_name or ""),
-                str(event or ""),
-                str(detail or ""),
-                (int(exit_code) if exit_code is not None else None),
-            ),
-        )
-
-        try:
-            max_rows = int(os.environ.get("JOB_HISTORY_MAX_ROWS", "20000"))
-        except Exception:
-            max_rows = 20000
-
-        if max_rows > 0:
-            con.execute(
-                "DELETE FROM job_history WHERE id NOT IN (SELECT id FROM job_history ORDER BY ts_ms DESC LIMIT ?)",
-                (int(max_rows),),
-            )
-
-        con.commit()
-    finally:
-        con.close()
-
-def _read_job_history(job_name: str, limit: int = 200) -> list:
-    _ensure_job_history()
-    con = _db_connect()
-    try:
-        rows = con.execute(
-            """
-            SELECT ts_ms, event, detail, exit_code
-            FROM job_history
-            WHERE job_name=?
-            ORDER BY ts_ms DESC
-            LIMIT ?
-            """,
-            (str(job_name or ""), int(limit)),
-        ).fetchall()
-        out = []
-        for ts_ms, event, detail, exit_code in rows or []:
-            out.append(
-                {
-                    "ts_ms": int(ts_ms or 0),
-                    "event": str(event or ""),
-                    "detail": str(detail or ""),
-                    "exit_code": (int(exit_code) if exit_code is not None else None),
-                }
-            )
-        return out
-    finally:
-        con.close()
 
 # ------------------------------
 # PUBLIC READ HELPERS (API)
@@ -346,8 +87,12 @@ class JobState:
         self.stop_requested: bool = False
         self.restart_attempts_window: Deque[int] = deque(maxlen=50)
         self.next_restart_ms: int = 0
+        self._restart_in_flight: bool = False
         self.last_start_args: Optional[list] = None
         self.last_start_cwd: Optional[str] = None
+
+        # For oneshot jobs, we hold a cross-process lock "job:<name>"
+        self._oneshot_lock_name: Optional[str] = None
 
     def to_dict(self) -> Dict:
         with self._lock:
@@ -440,15 +185,53 @@ class JobManager:
 
         _GLOBAL_JOB_MANAGER.set(self)
 
-        self._watchdog_started = False
-        self._start_watchdog_once()
+        # Ensure DB coordination tables exist early (best-effort)
+        try:
+            _ensure_job_locks()
+        except Exception:
+            pass
+        try:
+            _ensure_job_history()
+        except Exception:
+            pass
+        # -------------------------------------------------
+        # WATCHDOG BOOTSTRAP (inline, no dynamic binding)
+        # -------------------------------------------------
+        if not getattr(self, "_watchdog_started", False):
+            self._watchdog_started = True
+            t = threading.Thread(
+                target=self._daemon_watchdog_loop,
+                daemon=True,
+            )
+            t.start()
 
-    def _start_watchdog_once(self):
-        if self._watchdog_started:
-            return
-        self._watchdog_started = True
-        t = threading.Thread(target=self._daemon_watchdog_loop, daemon=True)
-        t.start()
+        # NOTE:
+        # Do NOT auto-start daemons here.
+        # Deterministic boot is handled by RuntimeSupervisor
+        # inside dashboard_server.run_server().
+
+
+    def start_initial_daemons(self):
+        """
+        Start all daemon jobs once at boot.
+        NOTE: deterministic boot should be handled by RuntimeSupervisor.
+        This is kept only for backwards compatibility.
+        """
+        order = list(JOB_ORDER or [])
+        if not order:
+            # fallback: stable deterministic order
+            order = sorted(list(self._jobs.keys()))
+
+        for name in order:
+            job = self.get(name)
+            if not job:
+                continue
+            if job.mode != "daemon":
+                continue
+            try:
+                self.start(name)
+            except Exception:
+                pass
 
     def list_jobs(self):
         with self._lock:
@@ -512,7 +295,12 @@ class JobManager:
         if not job:
             return {"ok": False, "error": f"unknown job: {name}"}
 
-        if PREFLIGHT_ENABLE and PREFLIGHT_BLOCK_JOBS and self._preflight_fn:
+        if (
+            PREFLIGHT_ENABLE
+            and PREFLIGHT_BLOCK_JOBS
+            and self._preflight_fn
+            and getattr(job, "meta", {}).get("execution") is True
+        ):
             p = self._preflight_fn()
             if not p.get("ok"):
                 return {"ok": False, "error": "preflight_failed", "notes": p.get("notes", [])}
@@ -532,9 +320,13 @@ class JobManager:
                         "job": str(name),
                     }
             else:
-                gate = execution_gate_snapshot(self._get_execution_mode_fn)
+                gate = execution_gate_snapshot(
+                    system_state=self._get_execution_mode_fn() if self._get_execution_mode_fn else None,
+                    kill_switches=self._get_kill_switches_fn() if self._get_kill_switches_fn else None,
+                    execution_degraded=False,
+                )
 
-                if not gate.get("ok") or not gate.get("allow_execution"):
+                if (not gate.get("ok")) or (not gate.get("allowed")):
                     return {
                         "ok": False,
                         "error": "execution_blocked",
@@ -569,28 +361,41 @@ class JobManager:
                                 pass
 
             if job.mode == "oneshot":
-                if not _acquire_lock(f"job:{job.name}", ttl_ms=10 * 60 * 1000):
+                lock_name = f"job:{job.name}"
+                # TTL is extended while running via _pump_output loop
+                if not _acquire_lock(lock_name, ttl_ms=10 * 60 * 1000):
                     return {"ok": False, "error": f"job locked: {job.name}"}
+                job._oneshot_lock_name = lock_name
 
             job.exited_at_ms = None
             job.exit_code = None
 
             py = sys.executable
-            args = [py, "-u", job.script]
 
-            if not os.path.exists(job.script):
+            # Resolve scripts from the project root (robust even if CWD is wrong)
+            script_rel = str(job.script or "")
+            script_path = os.path.abspath(os.path.join(_PROJECT_ROOT, script_rel))
+
+            args = [py, "-u", script_path]
+
+            if not os.path.exists(script_path):
                 if job.mode == "oneshot":
                     _release_lock(f"job:{job.name}")
-                job.append_log(f"[server] script not found: {job.script}")
-                _write_job_history(job.name, "start_failed", f"script not found: {job.script}", None)
-                return {"ok": False, "error": f"script not found: {job.script}"}
+                job.append_log(f"[server] script not found: {script_path} (from {script_rel})")
+                _write_job_history(
+                    job.name,
+                    "start_failed",
+                    f"script not found: {script_path} (from {script_rel})",
+                    None,
+                )
+                return {"ok": False, "error": f"script not found: {script_path}"}
 
             job.append_log(f"[server] starting: {args}")
             _write_job_history(job.name, "start", f"{args}", None)
 
             job.started_at_ms = int(time.time() * 1000)
             job.last_start_args = list(args)
-            job.last_start_cwd = os.getcwd()
+            job.last_start_cwd = str(_PROJECT_ROOT)
 
             env = dict(os.environ)
             env["ENGINE_LAUNCHED_BY_SUPERVISOR"] = "1"
@@ -600,7 +405,7 @@ class JobManager:
             try:
                 job.proc = subprocess.Popen(
                     args,
-                    cwd=os.getcwd(),
+                    cwd=_PROJECT_ROOT,
                     env=env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -618,26 +423,11 @@ class JobManager:
                 _write_job_history(job.name, "start_failed", f"spawn failed: {e}", None)
                 return {"ok": False, "error": f"spawn failed: {e}"}
 
-            con_hb = None
+            # best-effort heartbeat stamp (locks.py is single source of truth)
             try:
-                con_hb = _db_connect()
-                try:
-                    con_hb.execute(
-                        "UPDATE job_locks SET heartbeat_ts_ms=? WHERE job_name=?",
-                        (int(time.time() * 1000), f"job:{job.name}"),
-                    )
-                    con_hb.commit()
-                except Exception:
-                    try:
-                        con_hb.rollback()
-                    except Exception:
-                        pass
-            finally:
-                try:
-                    if con_hb is not None:
-                        con_hb.close()
-                except Exception:
-                    pass
+                _heartbeat_lock(f"job:{job.name}")
+            except Exception:
+                pass
 
             threading.Thread(target=self._pump_output, args=(job,), daemon=True).start()
             return {"ok": True, "status": "started"}
@@ -707,13 +497,63 @@ class JobManager:
 
     def _pump_output(self, job: JobState):
         proc = job.proc
-        if not proc or not proc.stdout:
+        if not proc:
+            return
+
+        # For oneshot jobs, keep the lock alive while the process runs
+        lock_name = getattr(job, "_oneshot_lock_name", None)
+
+        if not proc.stdout:
+            # still wait for exit + release lock
+            try:
+                rc = proc.wait()
+            except Exception:
+                rc = proc.poll()
+            with job._lock:
+                job.exited_at_ms = int(time.time() * 1000)
+                job.exit_code = int(rc) if rc is not None else None
+                job.append_log(f"[server] exited rc={job.exit_code}")
+                _write_job_history(job.name, "exit", "process exited", job.exit_code)
+            if lock_name:
+                try:
+                    _release_lock(lock_name)
+                except Exception:
+                    pass
+                with job._lock:
+                    job._oneshot_lock_name = None
+                    pass
             return
         try:
+            last_hb = 0.0
             for line in proc.stdout:
                 if not line:
                     break
                 job.append_log(line)
+
+                # keep oneshot lock alive (every ~5s)
+                if lock_name:
+                    now_s = time.time()
+                    if (now_s - last_hb) >= 5.0:
+                        last_hb = now_s
+                        try:
+                            _heartbeat_lock(lock_name)
+                        except Exception:
+                            pass
+                            last_hb = 0.0
+            for line in proc.stdout:
+                if not line:
+                    break
+                job.append_log(line)
+
+                # keep oneshot lock alive (every ~5s)
+                if lock_name:
+                    now_s = time.time()
+                    if (now_s - last_hb) >= 5.0:
+                        last_hb = now_s
+                        try:
+                            _heartbeat_lock(lock_name)
+                        except Exception:
+                            pass
         except Exception as e:
             job.append_log(f"[server] log pump error: {e}")
         finally:
@@ -756,10 +596,52 @@ class JobManager:
                     continue
 
                 if self.is_running(job.name):
+                    # heartbeat while healthy
                     try:
                         _heartbeat_lock(f"job:{job.name}")
                     except Exception:
                         pass
+
+                    # stall detection: if heartbeat_ts_ms is not advancing, restart daemon
+                    try:
+                        row = _read_lock(f"job:{job.name}") or {}
+                        hb = int(row.get("heartbeat_ts_ms") or 0)
+                        if hb > 0 and (now - hb) > int(_DAEMON_STALL_AFTER_MS):
+                            job.append_log(f"[server] daemon stall detected; hb_age_ms={now-hb} > {_DAEMON_STALL_AFTER_MS}; forcing restart")
+                            _write_job_history(job.name, "autorestart_stall_detected", f"hb_age_ms={now-hb}", None)
+
+                            # Force-kill without setting stop_requested (so watchdog can restart)
+                            try:
+                                p = job.proc
+                            except Exception:
+                                p = None
+
+                            try:
+                                if p and p.poll() is None:
+                                    try:
+                                        p.terminate()
+                                    except Exception:
+                                        pass
+                                    # short wait then kill
+                                    deadline = time.time() + 2.0
+                                    while time.time() < deadline:
+                                        if p.poll() is not None:
+                                            break
+                                        time.sleep(0.05)
+                                    if p.poll() is None:
+                                        try:
+                                            p.kill()
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+
+                            # allow restart path to proceed
+                            job.exit_code = -9
+                            job.exited_at_ms = now
+                    except Exception:
+                        pass
+
                     continue
 
                 if not job.started_at_ms:
@@ -771,8 +653,12 @@ class JobManager:
                 # Fail-closed by default.
                 # --------------------------------------------------
                 if getattr(job, "meta", {}).get("execution") is True:
-                    gate = execution_gate_snapshot(self._get_execution_mode_fn)
-                    if (not gate.get("ok")) or (not gate.get("allow_execution")):
+                    gate = execution_gate_snapshot(
+                        system_state=self._get_execution_mode_fn() if self._get_execution_mode_fn else None,
+                        kill_switches=self._get_kill_switches_fn() if self._get_kill_switches_fn else None,
+                        execution_degraded=False,
+                    )
+                    if (not gate.get("ok")) or (not gate.get("allowed")):
                         job.append_log(
                             f"[server] auto-restart blocked (execution gated): {gate.get('reason') or gate}"
                         )
@@ -811,28 +697,39 @@ class JobManager:
                 delay = min(int(delay), int(DAEMON_RESTART_MAX_DELAY_MS))
                 job.next_restart_ms = now + delay
 
+                # mark restart thread as pending (prevents duplicate threads)
+                if job._restart_in_flight:
+                    continue
+                job._restart_in_flight = True
+
                 job.append_log(f"[server] daemon crashed; scheduling restart in {delay}ms")
                 _write_job_history(job.name, "autorestart_scheduled", f"delay_ms={delay}", job.exit_code)
+
+                # record attempt at schedule-time to avoid thread storms
+                job.restart_attempts_window.append(int(time.time() * 1000))
 
             def _restart_later(jref: JobState, delay_ms: int):
                 time.sleep(delay_ms / 1000.0)
 
                 with jref._lock:
                     if jref.stop_requested:
+                        jref._restart_in_flight = False
                         return
                     if self.is_running(jref.name):
+                        jref._restart_in_flight = False
                         return
 
                 res = self.start(jref.name)
                 if not res.get("ok"):
                     with jref._lock:
+                        jref._restart_in_flight = False
                         jref.append_log(f"[server] auto-restart failed: {res.get('error')}")
                         _write_job_history(jref.name, "autorestart_failed", str(res.get("error") or ""), jref.exit_code)
                     return
 
                 with jref._lock:
-                    jref.restart_attempts_window.append(int(time.time() * 1000))
                     jref.next_restart_ms = 0
+                    jref._restart_in_flight = False
                     jref.append_log("[server] auto-restart: started")
                     _write_job_history(jref.name, "autorestart_started", "started", None)
 

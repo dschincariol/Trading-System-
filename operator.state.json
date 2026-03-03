@@ -1,12 +1,17 @@
 {
-  "createdAt": "2026-02-24T09:36:11.284Z",
+  "createdAt": "2026-02-27T23:43:10.276Z",
   "lastExitCode": null,
-  "lastError": null,
-  "restartAttempts": 73,
-  "lastStartAt": "2026-02-26T15:45:52.795Z",
-  "lastStopAt": "2026-02-26T15:45:51.091Z",
-  "lastHealthyAt": "2026-02-26T15:46:26.153Z",
+  "lastError": {
+    "at": "2026-02-28T12:31:53.071Z",
+    "kind": "BOOT_HEALTH_FAIL",
+    "message": "Backend did not become healthy",
+    "details": null
+  },
+  "restartAttempts": 0,
+  "lastStartAt": "2026-02-28T12:30:54.479Z",
+  "lastStopAt": null,
+  "lastHealthyAt": "2026-02-28T12:30:56.022Z",
   "lastMode": "safe",
-  "_restartWindowStart": 1772120437115,
-  "_restartCountWindow": 4
+  "_restartWindowStart": null,
+  "_restartCountWindow": 0
 }

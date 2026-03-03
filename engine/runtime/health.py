@@ -13,7 +13,7 @@ from typing import Dict
 
 from engine.runtime.storage import connect as _db_connect
 from engine.training_guard import get_training_status
-
+from engine.runtime.lifecycle_state import get_state as _lc_get_state, WARMING_UP as _WARMING_UP, LIVE as _LIVE, DEGRADED as _DEGRADED
 
 # ---------------------------------------------------
 # ENV THRESHOLDS
@@ -77,7 +77,10 @@ def get_schema_audit():
             "labels": {"required": True, "cols": ["event_id", "label", "ts_ms"]},
             "alerts": {"required": True, "cols": ["id", "ts_ms"]},
             "job_history": {"required": True, "cols": ["id", "ts_ms"]},
-            "portfolio_state": {"required": True, "cols": ["ts_ms"]},
+            "portfolio_state": {
+    "required": True,
+    "cols": ["symbol", "side", "weight", "opened_ts_ms", "updated_ts_ms"],
+},
             "broker_account": {"required": True, "cols": ["ts_ms"]},
             "job_locks": {
                 "required": True,
@@ -219,6 +222,68 @@ def get_health_snapshot():
         except Exception:
             out["training"] = {"mode": "unknown", "allowed": False}
 
+        # ---------------------------
+        # Job heartbeats
+        # ---------------------------
+        try:
+            row = con.execute(
+                "SELECT job_name, MAX(heartbeat_ts_ms) FROM job_locks GROUP BY job_name"
+            ).fetchall() or []
+
+            jobs = {}
+            for job_name, hb_ts in row:
+                if not hb_ts:
+                    continue
+                age_s = (now_ms - int(hb_ts)) / 1000.0
+                jobs[job_name] = {
+                    "ok": age_s < HEALTH_JOBS_MAX_STALE_S,
+                    "age_s": round(age_s, 1),
+                    "max_age_s": HEALTH_JOBS_MAX_STALE_S,
+                }
+
+            out["jobs"] = jobs
+
+        except Exception:
+            out["jobs"] = {}
+
+        # ---------------------------
+        # Portfolio presence
+        # ---------------------------
+        try:
+            row = con.execute("SELECT COUNT(*) FROM portfolio_state").fetchone()
+            state_n = int(row[0] or 0)
+
+            _mode = os.environ.get("ENGINE_MODE", "").strip().lower() or "safe"
+
+            if _mode == "safe":
+                out["portfolio"] = {
+                    "ok": True,
+                    "positions": state_n,
+                }
+            else:
+                out["portfolio"] = {
+                    "ok": state_n > 0,
+                    "positions": state_n,
+                }
+        except Exception:
+            out["portfolio"] = {
+                "ok": False,
+                "positions": 0,
+            }
+
+        # ---------------------------
+        # Execution barrier
+        # ---------------------------
+        try:
+            from engine.runtime.execution_barrier import execution_gate_snapshot
+            snap = execution_gate_snapshot()
+            if isinstance(snap, dict):
+                out["execution_barrier"] = snap
+            else:
+                out["execution_barrier"] = {"allowed": True}
+        except Exception:
+            out["execution_barrier"] = {"allowed": False, "reason": "execution_barrier_error"}
+
         return out
 
     finally:
@@ -273,12 +338,29 @@ def run_preflight() -> Dict:
         prices = health.get("prices", {}) or {}
         prices_ok = bool(prices.get("ok"))
 
-        out["health_ok"] = prices_ok
+        # Execution barrier alignment
+        try:
+            from engine.runtime.execution_barrier import execution_gate_snapshot
+            barrier = execution_gate_snapshot()
+            barrier_ok = bool(barrier.get("allowed")) if isinstance(barrier, dict) else False
+        except Exception:
+            barrier_ok = False
+
+        out["health_ok"] = prices_ok and barrier_ok
 
         age_s = float(prices.get("age_s") or 1e9)
+
+        # In SAFE mode, tolerate stale prices at boot so auto-boot daemons can start
+        _mode = os.environ.get("ENGINE_MODE", "").strip().lower()
+        if not _mode:
+            _mode = "safe"
+
         if age_s > PREFLIGHT_PRICES_MAX_AGE_S:
-            out["ok"] = False
-            out["notes"].append(f"prices too stale: {age_s:.1f}s")
+            if _mode == "safe":
+                out["notes"].append(f"prices too stale (SAFE tolerated): {age_s:.1f}s")
+            else:
+                out["ok"] = False
+                out["notes"].append(f"prices too stale: {age_s:.1f}s")
 
     except Exception as e:
         out["ok"] = False
@@ -286,6 +368,36 @@ def run_preflight() -> Dict:
         out["notes"].append(str(e))
 
     _PREFLIGHT_CACHE = out
+    _mode = os.environ.get("ENGINE_MODE", "").strip().lower() or "safe"
+
+    # Add derived status field
+    prices_ok = bool((out.get("prices") or {}).get("ok"))
+
+    if _mode == "safe" and not prices_ok:
+        out["status"] = "WARMING_UP"
+    else:
+        out["status"] = "LIVE" if prices_ok else "DEGRADED"
+
+    try:
+        lc = _lc_get_state()
+    except Exception:
+        lc = {"state": "BOOTING", "detail": "", "first_price_ts_ms": ""}
+
+    out["lifecycle"] = lc
+
+    # Deterministic status: SAFE warms up until first tick is latched
+    mode = (os.environ.get("ENGINE_MODE", "") or "safe").strip().lower()
+    first_tick = str((lc or {}).get("first_price_ts_ms") or "").strip()
+    prices_ok = bool((out.get("prices") or {}).get("ok"))
+
+    if mode == "safe":
+        out["status"] = _LIVE if first_tick else _WARMING_UP
+        out["ok"] = True
+    else:
+        # In live/shadow: require prices_ok
+        out["status"] = _LIVE if prices_ok else _DEGRADED
+        out["ok"] = bool(prices_ok)
+
     return out
 
 

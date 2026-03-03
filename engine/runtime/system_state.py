@@ -152,12 +152,12 @@ def compute_system_state(
         return out
 
     # -------------------------------------------------------
-    # WARMING_UP (core deps not ready)
+    # WARMING_UP (prices are the hard dependency)
     # -------------------------------------------------------
-    if not (prices_ok and labels_ok and model_ok):
+    if not prices_ok:
         out["state"] = STATE_WARMING_UP
-        if not prices_ok:
-            out["reasons"].append("prices_not_ok")
+        out["reasons"].append("prices_not_ok")
+        # keep optional deps visible (informational)
         if not labels_ok:
             out["reasons"].append("labels_not_ok")
         if not model_ok:
@@ -183,6 +183,16 @@ def compute_system_state(
     )
 
     if has_price_daemon and prices_age_s <= max_age_s:
+        # If prices are good but optional deps are not, stay DEGRADED but ok=True
+        if not (labels_ok and model_ok):
+            out["state"] = STATE_DEGRADED
+            out["ok"] = True
+            if not labels_ok:
+                out["reasons"].append("labels_not_ok")
+            if not model_ok:
+                out["reasons"].append("model_not_ok")
+            return out
+
         out["state"] = STATE_LIVE
         out["ok"] = True
         return out
