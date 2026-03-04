@@ -1,0 +1,180 @@
+Ready. Click 'Start Server'.
+[ui] starting: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', 'dashboard_server.py']
+[preflight] FAILED at startup:
+  - missing tables: portfolio_bt_runs, portfolio_bt_points
+  - prices too stale for preflight: age_s=418907.1 > 300.0
+  - labels not ok
+  - model not ok
+Dashboard running at http://localhost:8000/ui/dashboard.html
+127.0.0.1 - - [02/Feb/2026 03:28:09] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 03:28:09] "GET /ui/dashboard.html HTTP/1.1" 404 -
+127.0.0.1 - - [02/Feb/2026 03:28:09] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 03:28:09] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [02/Feb/2026 03:28:13] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 03:28:13] "GET /ui/dashboard.html HTTP/1.1" 404 -
+127.0.0.1 - - [02/Feb/2026 03:28:13] "GET /api/server/status HTTP/1.1" 200 -
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 64616)
+Traceback (most recent call last):
+  File "C:\Users\dschi\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 317, in _handle_request_noblock
+    self.process_request(request, client_address)
+  File "C:\Users\dschi\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 348, in process_request
+    self.finish_request(request, client_address)
+  File "C:\Users\dschi\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "C:\Users\dschi\AppData\Local\Programs\Python\Python311\Lib\http\server.py", line 671, in __init__
+    super().__init__(*args, **kwargs)
+  File "C:\Users\dschi\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 755, in __init__
+    self.handle()
+  File "C:\Users\dschi\AppData\Local\Programs\Python\Python311\Lib\http\server.py", line 436, in handle
+    self.handle_one_request()
+  File "C:\Users\dschi\AppData\Local\Programs\Python\Python311\Lib\http\server.py", line 424, in handle_one_request
+    method()
+  File "C:\market_impact_dev\dashboard_server.py", line 3744, in do_GET
+    return self.respond_json({
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\market_impact_dev\dashboard_server.py", line 2841, in respond_json
+    self.wfile.write(data)
+  File "C:\Users\dschi\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 834, in write
+    self._sock.sendall(b)
+ConnectionAbortedError: [WinError 10053] An established connection was aborted by the software in your host machine
+----------------------------------------
+127.0.0.1 - - [02/Feb/2026 03:28:13] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 03:28:13] "GET /ui/dashboard.html HTTP/1.1" 404 -
+127.0.0.1 - - [02/Feb/2026 03:28:14] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 03:28:14] "GET /ui/dashboard.html HTTP/1.1" 404 -
+[ui] stopping...
+[ui] terminate() fallback
+[ui] server exited rc=1
+[ui] starting: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', 'dashboard_server.py']
+[preflight] FAILED at startup:
+  - missing tables: portfolio_bt_runs, portfolio_bt_points
+  - prices too stale for preflight: age_s=429659.6 > 300.0
+  - labels not ok
+  - model not ok
+Dashboard running at http://localhost:8000/ui/dashboard.html
+127.0.0.1 - - [02/Feb/2026 06:27:22] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 06:27:22] "GET /ui/dashboard.html HTTP/1.1" 404 -
+127.0.0.1 - - [02/Feb/2026 06:27:22] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 06:27:22] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [02/Feb/2026 06:27:23] "GET /api/server/status HTTP/1.1" 200 -
+127.0.0.1 - - [02/Feb/2026 06:27:25] "GET /api/server/status HTTP/1.1" 200 -
+127.0.0.1 - - [02/Feb/2026 06:27:27] "GET /api/server/status HTTP/1.1" 200 -
+127.0.0.1 - - [02/Feb/2026 06:27:29] "GET /api/server/status HTTP/1.1" 200 -
+127.0.0.1 - - [02/Feb/2026 06:27:32] "GET /api/server/status HTTP/1.1" 200 -
+127.0.0.1 - - [02/Feb/2026 06:27:34] "GET /api/server/status HTTP/1.1" 200 -
+127.0.0.1 - - [02/Feb/2026 06:27:36] "GET /api/server/status HTTP/1.1" 200 -
+127.0.0.1 - - [02/Feb/2026 06:27:36] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 06:27:36] "GET /ui/dashboard.html HTTP/1.1" 404 -
+[ui] stopping...
+[ui] terminate() fallback
+[ui] server exited rc=1
+[ui] starting: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', 'dashboard_server.py']
+Traceback (most recent call last):
+  File "C:\market_impact_dev\compute_exec_labels.py", line 165, in <module>
+    main()
+  File "C:\market_impact_dev\compute_exec_labels.py", line 99, in main
+    entry = _get_px_at_or_before(con, sym, ts_ms)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\market_impact_dev\compute_exec_labels.py", line 25, in _get_px_at_or_before
+    r = con.execute(
+        ^^^^^^^^^^^^
+sqlite3.OperationalError: no such column: px
+[size_policy] not enough samples: 0 < 200
+[preflight] FAILED at startup:
+  - missing tables: portfolio_bt_runs, portfolio_bt_points
+  - prices too stale for preflight: age_s=431299.9 > 300.0
+  - labels not ok: Command '['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', 'compute_exec_labels.py']' returned non-zero exit status 1.
+  - model not ok: Command '['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', 'train_size_policy.py']' returned non-zero exit status 1.
+Dashboard running at http://localhost:8000/dashboard.html  (or /ui/dashboard.html)
+127.0.0.1 - - [02/Feb/2026 06:54:41] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 06:54:41] "GET /ui/dashboard.html HTTP/1.1" 404 -
+[ui] stopping...
+[ui] terminate() fallback
+[ui] server exited rc=1
+[ui] starting: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', 'dashboard_server.py']
+Traceback (most recent call last):
+  File "C:\market_impact_dev\compute_exec_labels.py", line 167, in <module>
+    main()
+  File "C:\market_impact_dev\compute_exec_labels.py", line 101, in main
+    entry = _get_px_at_or_before(con, sym, ts_ms)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\market_impact_dev\compute_exec_labels.py", line 34, in _get_px_at_or_before
+    (sym, ts_ms),
+     ^^^
+NameError: name 'sym' is not defined. Did you mean: 'sum'?
+[size_policy] not enough samples: 0 < 200
+[preflight] FAILED at startup:
+  - missing tables: portfolio_bt_runs, portfolio_bt_points
+  - prices too stale for preflight: age_s=431729.2 > 300.0
+  - labels not ok: Command '['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', 'compute_exec_labels.py']' returned non-zero exit status 1.
+  - model not ok: Command '['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', 'train_size_policy.py']' returned non-zero exit status 1.
+Dashboard running at http://localhost:8000/dashboard.html  (or /ui/dashboard.html)
+127.0.0.1 - - [02/Feb/2026 07:01:51] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 07:01:51] "GET /ui/dashboard.html HTTP/1.1" 404 -
+[ui] stopping...
+[ui] terminate() fallback
+[ui] server exited rc=1
+[ui] starting: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', 'dashboard_server.py']
+[labels_exec] wrote=270 skipped=0 total=270
+Traceback (most recent call last):
+  File "C:\market_impact_dev\train_size_policy.py", line 201, in <module>
+    main()
+  File "C:\market_impact_dev\train_size_policy.py", line 166, in main
+    con.execute(
+sqlite3.OperationalError: no such table: size_policy
+[preflight] FAILED at startup:
+  - missing tables: portfolio_bt_runs, portfolio_bt_points
+  - prices too stale for preflight: age_s=432583.5 > 300.0
+  - labels bootstrapped
+  - model not ok: Command '['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', 'train_size_policy.py']' returned non-zero exit status 1.
+Dashboard running at http://localhost:8000/dashboard.html  (or /ui/dashboard.html)
+127.0.0.1 - - [02/Feb/2026 07:16:05] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 07:16:05] "GET /ui/dashboard.html HTTP/1.1" 404 -
+[ui] stopping...
+[ui] terminate() fallback
+[ui] server exited rc=1
+[ui] server not running
+[ui] server not running
+[ui] server not running
+Ready. Click 'Start Server'.
+[ui] startup: bootstrapping environment + database...
+[startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', '-c', "from engine.storage import init_db; init_db(); print('[startup] init_db ok')"]
+[startup] init_db ok
+[startup] rc=0
+[startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', '-c', "from engine.portfolio import init_portfolio_db; from engine.broker_sim import init_broker_db; from engine.alerts import init_alerts_db; from engine.validation import init_validation_db; from engine.model_v2 import init_model_db; init_portfolio_db(); init_broker_db(); init_alerts_db(); init_validation_db(); init_model_db(); print('[startup] module db init ok')"]
+[startup] module db init ok
+[startup] rc=0
+[startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', '-c', "import portfolio_backtest as p; from engine.storage import connect; con=connect(); con.executescript(p.SCHEMA); con.commit(); con.close(); print('[startup] portfolio_backtest schema ok')"]
+[startup] portfolio_backtest schema ok
+[startup] rc=0
+[startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', 'compute_exec_labels.py']
+[labels_exec] wrote=0 skipped=0 total=0
+[startup] rc=0
+[startup] running: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', 'train_size_policy.py']
+Traceback (most recent call last):
+  File "C:\market_impact_dev\train_size_policy.py", line 232, in <module>
+    main()
+  File "C:\market_impact_dev\train_size_policy.py", line 197, in main
+    con.execute(
+sqlite3.OperationalError: table size_policy has no column named lookback_days
+[startup] rc=1
+[ui] starting: ['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', '-u', 'dashboard_server.py']
+[labels_exec] wrote=0 skipped=0 total=0
+Traceback (most recent call last):
+  File "C:\market_impact_dev\train_size_policy.py", line 232, in <module>
+    main()
+  File "C:\market_impact_dev\train_size_policy.py", line 197, in main
+    con.execute(
+sqlite3.OperationalError: table size_policy has no column named lookback_days
+[preflight] FAILED at startup:
+  - tables ok
+  - prices too stale for preflight: age_s=467249.4 > 300.0
+  - labels bootstrapped
+  - model not ok: Command '['C:\\market_impact_dev\\.venv\\Scripts\\python.exe', 'train_size_policy.py']' returned non-zero exit status 1.
+Dashboard running at http://localhost:8000/dashboard.html  (or /ui/dashboard.html)
+127.0.0.1 - - [02/Feb/2026 16:53:51] code 404, message File not found
+127.0.0.1 - - [02/Feb/2026 16:53:51] "GET /ui/dashboard.html HTTP/1.1" 404 -
+[ui] stopping...
+[ui] terminate() fallback
+[ui] server exited rc=1

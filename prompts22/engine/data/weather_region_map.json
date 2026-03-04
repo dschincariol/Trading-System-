@@ -1,0 +1,23 @@
+
+{
+  "regions": {
+    "us_pop": {
+      "lat": 39.5,
+      "lon": -98.35,
+      "nws_area": "KS"
+    },
+    "us_gulf": {
+      "lat": 29.5,
+      "lon": -93.5,
+      "nws_area": "TX"
+    }
+  },
+  "symbols": {
+    "SPY": [
+      "us_pop"
+    ],
+    "OIL": [
+      "us_gulf"
+    ]
+  }
+}

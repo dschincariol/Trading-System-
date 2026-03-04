@@ -1,0 +1,643 @@
+<!-- FILE: boot/operator_ui.html -->
+<!-- REPLACE THE ENTIRE FILE WITH THIS EXACT CONTENT: -->
+
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Trading Engine Operator</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <style>
+    :root{
+      --bg:#eef1f6;
+      --card:#ffffff;
+      --text:#0f172a;
+      --muted:#64748b;
+      --primary:#2563eb;
+      --primary2:#1d4ed8;
+      --danger:#dc2626;
+      --warn:#f59e0b;
+      --ok:#16a34a;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      --shadow: 0 10px 24px rgba(2,6,23,.10);
+      --radius: 14px;
+    }
+    body{
+      margin:0; padding:32px;
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+    }
+    .topbar{
+      display:flex; align-items:flex-end; justify-content:space-between;
+      gap:16px; flex-wrap:wrap;
+    }
+    h1{ margin:0; font-size:22px; letter-spacing:.2px;}
+    .sub{ color:var(--muted); font-size:13px; margin-top:4px;}
+    .grid{
+      display:grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap:18px;
+      margin-top:18px;
+    }
+    @media(max-width:1050px){
+      .grid{ grid-template-columns:1fr; }
+    }
+    .card{
+      background:var(--card);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:18px;
+    }
+    .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    button{
+      border:0;
+      border-radius: 10px;
+      padding:10px 14px;
+      font-weight:600;
+      cursor:pointer;
+      background:var(--primary);
+      color:white;
+    }
+    button:hover{ background:var(--primary2); }
+    button.secondary{ background:#64748b; }
+    button.secondary:hover{ background:#475569; }
+    button.danger{ background:var(--danger); }
+    button.danger:hover{ filter:brightness(.95); }
+    button.ghost{
+      background:transparent; color:var(--primary);
+      border:1px solid rgba(37,99,235,.25);
+    }
+    button.ghost:hover{ background:rgba(37,99,235,.08); }
+    button.mode{
+      background:#f1f5f9;
+      color:#0f172a;
+      border:1px solid rgba(2,6,23,.10);
+      font-weight:800;
+    }
+    button.mode.active{
+      border-color: rgba(37,99,235,.55);
+      box-shadow: 0 0 0 3px rgba(37,99,235,.14);
+      background: rgba(37,99,235,.08);
+      color:#0f172a;
+    }
+    .pill{
+      display:inline-flex; align-items:center; gap:8px;
+      padding:7px 10px;
+      border-radius:999px;
+      background:#f1f5f9;
+      color:var(--muted);
+      font-size:12px;
+      font-weight:800;
+    }
+    .dot{ width:10px; height:10px; border-radius:999px; background:#94a3b8; }
+    .dot.ok{ background:var(--ok); }
+    .dot.warn{ background:var(--warn); }
+    .dot.fail{ background:var(--danger); }
+    textarea{
+      width:100%;
+      height:220px;
+      border-radius:12px;
+      border:1px solid rgba(2,6,23,.12);
+      padding:12px;
+      font-family: var(--mono);
+      font-size:12px;
+      box-sizing:border-box;
+      background:#fbfdff;
+    }
+    pre{
+      background:#0b1220;
+      color:#e5e7eb;
+      padding:12px;
+      border-radius:12px;
+      overflow:auto;
+      font-family: var(--mono);
+      font-size:12px;
+      line-height:1.35;
+      max-height:340px;
+    }
+    .kvs{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+    }
+    @media(max-width:650px){ .kvs{ grid-template-columns:1fr; } }
+    input{
+      width:100%;
+      border-radius:12px;
+      border:1px solid rgba(2,6,23,.12);
+      padding:10px 12px;
+      box-sizing:border-box;
+      font-size:13px;
+      background:#fbfdff;
+    }
+    .titleRow{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+    .muted{ color:var(--muted); font-size:12px; }
+    .issues{ margin-top:10px; }
+    .issue{
+      border-radius:12px;
+      padding:10px 12px;
+      margin-top:8px;
+      border:1px solid rgba(2,6,23,.12);
+      background:#ffffff;
+      display:flex; gap:10px; align-items:flex-start;
+    }
+    .badge{
+      font-size:11px;
+      font-weight:900;
+      padding:4px 8px;
+      border-radius:999px;
+      color:white;
+      line-height:1;
+      margin-top:1px;
+      min-width:48px;
+      text-align:center;
+    }
+    .badge.err{ background:var(--danger); }
+    .badge.warn{ background:var(--warn); }
+    .badge.info{ background:#64748b; }
+    .issueText{ font-size:13px; }
+    .hr{ height:1px; background:rgba(2,6,23,.10); margin:14px 0; }
+    a.link{ color:var(--primary); font-weight:900; text-decoration:none; }
+    a.link:hover{ text-decoration:underline; }
+
+    /* Wizard */
+    .bar{
+      width:100%;
+      height:10px;
+      background:#e2e8f0;
+      border-radius:999px;
+      overflow:hidden;
+    }
+    .bar > div{
+      height:100%;
+      width:0%;
+      background:var(--primary);
+      transition: width .25s ease;
+    }
+    .stepLine{
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px solid rgba(2,6,23,.12);
+      background:#ffffff;
+      margin-top:8px;
+    }
+    .stepLine b{ font-size:13px; }
+    .stepDetail{ color:var(--muted); font-size:12px; margin-top:3px; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+
+  <div class="topbar">
+    <div>
+      <h1>Trading Engine Operator Panel</h1>
+      <div class="sub">Start/stop, configuration validation, readiness checks, institutional validation, AutoFix recovery, and logs.</div>
+    </div>
+    <div class="row">
+      <a class="pill link" href="/api/operator/snapshot" style="display:none">Download Snapshot</a>
+      <span class="pill" id="pillStatus"><span class="dot" id="dotStatus"></span><span id="txtStatus">Loading…</span></span>
+      <span class="pill"><span class="dot" id="dotHealth"></span><span id="txtHealth">Health: unknown</span></span>
+      <span class="pill"><span class="dot" id="dotData"></span><span id="txtData">Data: unknown</span></span>
+    </div>
+  </div>
+
+  <div class="grid">
+
+    <div>
+      <div class="card">
+        <div class="titleRow">
+          <div>
+            <div style="font-weight:900; font-size:14px;">Mode + Controls</div>
+            <div class="muted" id="metaLine">—</div>
+          </div>
+          <div class="row">
+            <button class="mode active" id="modeSafe" onclick="setMode('safe')">REVIEW</button>
+            <button class="mode" id="modeShadow" onclick="setMode('shadow')">DATA</button>
+            <button class="mode" id="modeLive" onclick="setMode('live')">TRADING</button>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <button onclick="start()">Start</button>
+          <button class="secondary" onclick="stop()">Stop</button>
+          <button onclick="restart()">Restart</button>
+          <button class="ghost" onclick="runInstitutional()">Institutional Check</button>
+          <button class="ghost" onclick="repairSystem()">Repair System</button>
+          <button class="ghost" onclick="clearLastError()">Clear Error</button>
+          <a class="link" id="dashLink" href="#" target="_blank" rel="noopener">Open Dashboard</a>
+        </div>
+
+        <div class="hr"></div>
+
+        <div style="font-weight:900; font-size:14px;">Startup Wizard</div>
+        <div class="muted" id="wizardMsg">Click Start to begin. This shows progress in operator language.</div>
+        <div class="bar" style="margin-top:10px;"><div id="wizardBar"></div></div>
+        <div id="wizardSteps" style="margin-top:10px;"></div>
+
+        <div class="hr"></div>
+
+        <div style="font-weight:900; font-size:14px;">Readiness</div>
+        <div class="muted">Consolidated preflight. Fix ERR items before running TRADING.</div>
+        <div class="issues" id="readinessIssues"></div>
+
+        <div class="hr"></div>
+
+        <div style="font-weight:900; font-size:14px;">Institutional Validation</div>
+        <div class="muted">Requires: backend healthy + telemetry changing (data flowing).</div>
+        <div class="issues" id="institutionalIssues"></div>
+      </div>
+
+      <div class="card" style="margin-top:18px;">
+        <div class="titleRow">
+          <div>
+            <div style="font-weight:900; font-size:14px;">Configuration (.env)</div>
+            <div class="muted">Edits are validated and normalized (typed ports/booleans).</div>
+          </div>
+          <div class="row">
+            <button class="ghost" onclick="validateConfig()">Validate</button>
+            <button onclick="saveConfig()">Save</button>
+            <button class="danger" onclick="factoryReset()">Factory Reset</button>
+          </div>
+        </div>
+        <textarea id="configArea" spellcheck="false"></textarea>
+        <div class="muted" id="configMsg" style="margin-top:10px;"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="titleRow">
+          <div>
+            <div style="font-weight:900; font-size:14px;">Logs</div>
+            <div class="muted">Tail of runtime.log (auto-refreshed).</div>
+          </div>
+          <div class="row">
+            <button class="ghost" onclick="loadLogs()">Refresh</button>
+          </div>
+        </div>
+        <pre id="logs">(loading…)</pre>
+      </div>
+
+      <div class="card" style="margin-top:18px;">
+        <div class="titleRow">
+          <div>
+            <div style="font-weight:900; font-size:14px;">Secrets (encrypted at rest)</div>
+            <div class="muted">Keys are stored AES-256-GCM (host-derived key). Values are never shown.</div>
+          </div>
+          <div class="row">
+            <button class="ghost" onclick="loadSecrets()">Refresh</button>
+          </div>
+        </div>
+
+        <div class="kvs" style="margin-top:10px;">
+          <div>
+            <div class="muted">Existing Keys</div>
+            <div style="font-weight:900; margin-top:6px;" id="secretKeys">—</div>
+          </div>
+          <div>
+            <div class="muted">Add/Update Secret</div>
+            <input id="secretKey" placeholder="Key (e.g. IBKR_PASSWORD)"/>
+            <input id="secretValue" placeholder="Value" style="margin-top:8px;"/>
+            <div class="row" style="margin-top:10px;">
+              <button onclick="saveSecret()">Save Secret</button>
+            </div>
+            <div class="muted" id="secretsMsg" style="margin-top:10px;"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:18px;">
+        <div class="titleRow">
+          <div>
+            <div style="font-weight:900; font-size:14px;">Bootstrap Snapshot</div>
+            <div class="muted">Operator + engine bootstrap diagnostic.</div>
+          </div>
+          <div class="row">
+            <button class="ghost" onclick="loadBootstrap()">Refresh</button>
+          </div>
+        </div>
+        <pre id="bootstrap">(loading…)</pre>
+      </div>
+    </div>
+
+  </div>
+
+<script>
+let selectedMode = "safe"; // safe | shadow | live
+
+function esc(s){
+  return String(s ?? "")
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;");
+}
+
+async function jget(url){
+  const r = await fetch(url, { cache: "no-store" });
+  return await r.json();
+}
+async function jpost(url, body){
+  const r = await fetch(url, {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify(body || {})
+  });
+  return await r.json();
+}
+
+function setPill(dotEl, state){
+  dotEl.className = "dot";
+  if(state === "ok") dotEl.classList.add("ok");
+  if(state === "warn") dotEl.classList.add("warn");
+  if(state === "fail") dotEl.classList.add("fail");
+}
+
+function renderIssues(container, issues){
+  container.innerHTML = "";
+  if(!issues || issues.length === 0){
+    const el = document.createElement("div");
+    el.className = "issue";
+    el.innerHTML = `<span class="badge info">OK</span><div class="issueText">No issues detected.</div>`;
+    container.appendChild(el);
+    return;
+  }
+  for(const it of issues){
+    const el = document.createElement("div");
+    el.className = "issue";
+    const cls = it.level === "error" ? "err" : (it.level === "warn" ? "warn" : "info");
+    const code = it.code ? String(it.code) : "issue";
+    const msg = it.message ? String(it.message) : "";
+    el.innerHTML = `<span class="badge ${cls}">${it.level.toUpperCase()}</span><div class="issueText"><b>${esc(code)}</b>: ${esc(msg)}</div>`;
+    container.appendChild(el);
+  }
+}
+
+function setMode(mode){
+  selectedMode = mode;
+  document.getElementById("modeSafe").classList.toggle("active", mode === "safe");
+  document.getElementById("modeShadow").classList.toggle("active", mode === "shadow");
+  document.getElementById("modeLive").classList.toggle("active", mode === "live");
+}
+
+async function updateDashboardLink(){
+  try{
+    const cfg = await jget("/api/operator/config");
+    const host = cfg.DASHBOARD_HOST || "127.0.0.1";
+    const port = cfg.DASHBOARD_PORT || 8000;
+    document.getElementById("dashLink").href = `http://${host}:${port}/ui/dashboard.html`;
+  } catch {
+    document.getElementById("dashLink").href = "#";
+  }
+}
+
+function renderWizard(steps, ok){
+  const box = document.getElementById("wizardSteps");
+  box.innerHTML = "";
+
+  if(!steps || steps.length === 0){
+    document.getElementById("wizardBar").style.width = "0%";
+    document.getElementById("wizardMsg").innerText = "Click Start to begin.";
+    return;
+  }
+
+  let done = 0;
+  for(const s of steps){
+    if(s && s.ok) done += 1;
+  }
+  const pct = Math.round((done / steps.length) * 100);
+  document.getElementById("wizardBar").style.width = `${pct}%`;
+  document.getElementById("wizardMsg").innerText = ok ? "Startup complete." : "Startup blocked. Read the step that failed.";
+
+  for(const s of steps){
+    const el = document.createElement("div");
+    el.className = "stepLine";
+    const dot = s.ok ? "ok" : "fail";
+    const title = s.label || s.id || "step";
+    let detail = s.detail;
+    if(typeof detail === "object") detail = JSON.stringify(detail, null, 2);
+    el.innerHTML = `
+      <span class="dot ${dot}"></span>
+      <div>
+        <b>${esc(title)}</b>
+        <div class="stepDetail">${esc(detail || "")}</div>
+      </div>
+    `;
+    box.appendChild(el);
+  }
+}
+
+async function updateStatusAndReadiness(){
+  const st = await jget("/api/operator/status");
+  const rd = await jget("/api/operator/readiness");
+
+  document.getElementById("metaLine").innerText =
+    `Mode: ${st.lastMode || selectedMode} | Exit: ${st.lastExitCode ?? "N/A"} | Restarts: ${st.restartAttempts ?? 0} | Last Healthy: ${st.lastHealthyAt ?? "N/A"}`;
+
+  document.getElementById("txtStatus").innerText = `Engine: ${st.status}`;
+  setPill(document.getElementById("dotStatus"), st.status === "RUNNING" ? "ok" : (st.status === "INSTALLING" ? "warn" : "fail"));
+
+  if(rd.health && rd.health.ok){
+    document.getElementById("txtHealth").innerText = `Health: OK (${rd.health.status})`;
+    setPill(document.getElementById("dotHealth"), "ok");
+  } else if(st.status === "RUNNING"){
+    document.getElementById("txtHealth").innerText = `Health: FAIL`;
+    setPill(document.getElementById("dotHealth"), "warn");
+  } else {
+    document.getElementById("txtHealth").innerText = `Health: n/a`;
+    setPill(document.getElementById("dotHealth"), "fail");
+  }
+
+  renderIssues(document.getElementById("readinessIssues"), rd.issues || []);
+
+  if(st.status !== "RUNNING"){
+    document.getElementById("txtData").innerText = "Data: n/a";
+    setPill(document.getElementById("dotData"), "fail");
+  } else if(rd.health && rd.health.ok){
+    document.getElementById("txtData").innerText = "Data: check";
+    setPill(document.getElementById("dotData"), "warn");
+  } else {
+    document.getElementById("txtData").innerText = "Data: unknown";
+    setPill(document.getElementById("dotData"), "warn");
+  }
+}
+
+async function runInstitutional(){
+  const j = await jget("/api/operator/institutionalCheck");
+
+  const issues = [];
+  if(!j.configValid) issues.push({ level:"error", code:"CONFIG_INVALID", message:"Invalid .env (typed validation failed)" });
+  if(!j.entryExists) issues.push({ level:"error", code:"ENTRY_MISSING", message:"Missing start_system.py" });
+  if(!j.dbPathWritable) issues.push({ level:"warn", code:"DB_NOT_WRITABLE", message:"DB directory not writable" });
+  if(!j.healthOk) issues.push({ level:"error", code:"HEALTH_FAIL", message:"Backend not healthy (/api/health)" });
+  if(!j.dataFlowing) issues.push({ level:"error", code:"DATA_NOT_FLOWING", message:"Telemetry did not change (data not flowing)" });
+  for(const e of (j.errors || [])){
+    issues.push({ level:"info", code:"DETAIL", message:String(e) });
+  }
+
+  renderIssues(document.getElementById("institutionalIssues"), issues);
+
+  if(j.ok){
+    document.getElementById("txtData").innerText = "Data: FLOWING";
+    setPill(document.getElementById("dotData"), "ok");
+  } else {
+    document.getElementById("txtData").innerText = "Data: NOT READY";
+    setPill(document.getElementById("dotData"), "fail");
+  }
+}
+
+async function loadBootstrap(){
+  const b = await jget("/api/operator/bootstrapStatus");
+  const s = await jget("/api/operator/status");
+  document.getElementById("bootstrap").innerText = JSON.stringify({ bootstrap:b, state:s }, null, 2);
+}
+
+async function loadConfig(){
+  const obj = await jget("/api/operator/config");
+  const text = Object.entries(obj).map(([k,v]) => `${k}=${v}`).join("\n");
+  document.getElementById("configArea").value = text;
+  document.getElementById("configMsg").innerText = "—";
+  await updateDashboardLink();
+}
+
+async function validateConfig(){
+  const r = await jget("/api/operator/config/validate");
+  if(r.ok){
+    document.getElementById("configMsg").innerText = "Config OK (typed normalization applied on Save).";
+  } else {
+    document.getElementById("configMsg").innerText = "Config has errors. Fix and Save again.";
+  }
+}
+
+async function saveConfig(){
+  const lines = document.getElementById("configArea").value.split("\n");
+  const obj = {};
+  for(const line of lines){
+    const trimmed = line.trim();
+    if(!trimmed || trimmed.startsWith("#")) continue;
+    const idx = trimmed.indexOf("=");
+    if(idx === -1) continue;
+    const k = trimmed.slice(0, idx).trim();
+    const v = trimmed.slice(idx + 1).trim();
+    if(k) obj[k] = v;
+  }
+  const r = await jpost("/api/operator/config", obj);
+  if(r.ok){
+    document.getElementById("configMsg").innerText = "Saved OK.";
+    await loadConfig();
+  } else {
+    document.getElementById("configMsg").innerText = "Save failed (validation errors). Check readiness list.";
+  }
+  await refreshAll();
+}
+
+async function loadLogs(){
+  const r = await fetch("/api/operator/logs", { cache: "no-store" });
+  const t = await r.text();
+  document.getElementById("logs").innerText = t || "(no logs yet)";
+}
+
+async function loadSecrets(){
+  const r = await jget("/api/operator/secrets");
+  document.getElementById("secretKeys").innerText = (r.keys || []).join(", ") || "—";
+}
+
+async function saveSecret(){
+  const key = document.getElementById("secretKey").value.trim();
+  const val = document.getElementById("secretValue").value;
+  if(!key || !val){
+    document.getElementById("secretsMsg").innerText = "Provide key + value.";
+    return;
+  }
+  const r = await jpost("/api/operator/secrets", { [key]: val });
+  document.getElementById("secretKey").value = "";
+  document.getElementById("secretValue").value = "";
+  document.getElementById("secretsMsg").innerText = r.ok ? "Saved." : "Failed.";
+  await loadSecrets();
+}
+
+async function start(){
+  if(selectedMode === "live"){
+    const c = prompt("TRADING mode enables real execution.\nType TRADE to confirm:");
+    if(c !== "TRADE") return;
+  }
+
+  renderWizard([{ ok:false, label:"Starting…", detail:"sending start request" }], false);
+
+  const r = await jpost("/api/operator/start", { mode: selectedMode });
+
+  if(r && r.steps){
+    renderWizard(r.steps, !!r.ok);
+  } else {
+    renderWizard([{ ok:false, label:"Start failed", detail: JSON.stringify(r || {}, null, 2) }], false);
+  }
+
+  await refreshAll();
+}
+
+async function stop(){
+  await jpost("/api/operator/stop");
+  renderWizard([], false);
+  await refreshAll();
+}
+
+async function restart(){
+  await jpost("/api/operator/restart", { mode: selectedMode });
+  renderWizard([{ ok:false, label:"Restarting…", detail:"backend restarting" }], false);
+  await refreshAll();
+}
+
+async function repairSystem(){
+  const r = await jpost("/api/operator/autofix");
+  if(r && r.steps){
+    const steps = (r.steps || []).map((s) => ({
+      ok: !!s.ok,
+      label: s.message || s.kind || "step",
+      detail: (typeof s.details === "string") ? s.details : JSON.stringify(s.details || "", null, 2)
+    }));
+    renderWizard(steps, !!r.ok);
+    alert(r.ok ? "Repair: OK" : "Repair: PARTIAL/FAILED (see wizard steps)");
+  } else {
+    alert("Repair: FAILED");
+  }
+  await refreshAll();
+}
+
+async function clearLastError(){
+  await jpost("/api/operator/clearLastError");
+  await refreshAll();
+}
+
+async function factoryReset(){
+  if(!confirm("Factory reset deletes .env and secrets and clears operator state. Continue?")) return;
+  await jpost("/api/operator/factoryReset");
+  await refreshAll();
+  await loadConfig();
+  await loadSecrets();
+}
+
+async function refreshAll(){
+  await updateStatusAndReadiness();
+  await loadBootstrap();
+  await loadLogs();
+  await updateDashboardLink();
+}
+
+setInterval(async () => {
+  await refreshAll();
+}, 3500);
+
+(async function boot(){
+  await refreshAll();
+  await loadConfig();
+  await loadSecrets();
+  setMode(selectedMode);
+  renderWizard([], false);
+})();
+</script>
+
+</body>
+</html>
