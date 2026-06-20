@@ -67,6 +67,14 @@ import {
   hardBlockIfReadOnly
 } from "./read_only_mode.js";
 
+import {
+  getProChartsState,
+  setProChartsState,
+  applyProChartsVisibility,
+  startLiveMarketChart,
+  stopLiveMarketChart
+} from "./pro_charting.js";
+
 /* ui/dashboard.js — Market Impact Dashboard controller */
 
 // -----------------------------
@@ -2249,6 +2257,15 @@ async function loadPortfolioBacktestLatest() {
       sumBody.innerHTML = "";
       renderLineChart(cEq, []);
       renderLineChart(cDd, []);
+      try {
+        applyProChartsVisibility("proChartsCard");
+        if (getProChartsConfig().enabled) {
+          const eqPro = document.getElementById("portfolioEquityPro");
+          const ddPro = document.getElementById("portfolioDdPro");
+          if (eqPro) eqPro.innerHTML = "";
+          if (ddPro) ddPro.innerHTML = "";
+        }
+      } catch {}
       return;
     }
 
@@ -2278,19 +2295,37 @@ for (const p of pts) {
   if (d < maxDd) maxDd = d;
 }
 
-    // Render charts
-    renderLineChart(cEq, equity, {
-      topLabel: "equity",
-      fmtY: (v) => Number(v).toFixed(3),
-      stroke: "#2ea043",
-    });
+    // Render charts (basic canvas OR pro engine)
+    try { applyProChartsVisibility("proChartsCard"); } catch {}
+      } catch (e) {
+        // Fallback to basic if pro engine fails to load
+        renderLineChart(cEq, equity, {
+          topLabel: "equity",
+          fmtY: (v) => Number(v).toFixed(3),
+          stroke: "#2ea043",
+        });
 
-    renderLineChart(cDd, dd, {
-      topLabel: "drawdown",
-      fmtY: (v) => _fmtPct(v),
-      stroke: "#ff6b6b",
-      yMax: 0, // drawdown top at 0%
-    });
+        renderLineChart(cDd, dd, {
+          topLabel: "drawdown",
+          fmtY: (v) => _fmtPct(v),
+          stroke: "#ff6b6b",
+          yMax: 0, // drawdown top at 0%
+        });
+      }
+    } else {
+      renderLineChart(cEq, equity, {
+        topLabel: "equity",
+        fmtY: (v) => Number(v).toFixed(3),
+        stroke: "#2ea043",
+      });
+
+      renderLineChart(cDd, dd, {
+        topLabel: "drawdown",
+        fmtY: (v) => _fmtPct(v),
+        stroke: "#ff6b6b",
+        yMax: 0, // drawdown top at 0%
+      });
+    }
 
     // Summary table
     // We keep this permissive because your metrics_json schema may evolve.
@@ -2340,6 +2375,12 @@ sumBody.insertAdjacentHTML("beforeend", `
     sumBody.innerHTML = "";
     renderLineChart(cEq, []);
     renderLineChart(cDd, []);
+    try {
+      const eqPro = document.getElementById("portfolioEquityPro");
+      const ddPro = document.getElementById("portfolioDdPro");
+      if (eqPro) eqPro.innerHTML = "";
+      if (ddPro) ddPro.innerHTML = "";
+    } catch {}
   }
 }
 
@@ -2933,6 +2974,52 @@ function wireCollapsibles() {
   });
 }
 
+// -----------------------------
+// Pro Charting (Live Market)
+// -----------------------------
+function _applyProChartsUI() {
+  const st = getProChartsState();
+
+  const card = document.getElementById("proChartsCard");
+  if (card) card.style.display = st.enabled ? "block" : "none";
+
+  const meta = document.getElementById("proChartsMeta");
+  if (meta) meta.textContent = st.enabled ? "enabled" : "disabled";
+
+  const cb = document.getElementById("proChartsEnable");
+  if (cb) cb.checked = !!st.enabled;
+
+  const selTf = document.getElementById("proChartsTf");
+  if (selTf) selTf.value = st.tf || "1m";
+
+  const selType = document.getElementById("proChartsType");
+  if (selType) selType.value = st.type || "candle";
+
+  applyProChartsVisibility("proChartsCard");
+}
+
+async function _refreshProCharts() {
+  const st = getProChartsState();
+  _applyProChartsUI();
+  if (!st.enabled) {
+    stopLiveMarketChart();
+    return;
+  }
+
+  const sym = (document.getElementById("globalSymbol")?.value || "").trim().toUpperCase();
+  if (!sym) {
+    stopLiveMarketChart();
+    return;
+  }
+
+  await startLiveMarketChart({
+    containerId: "liveMarketChart",
+    symbol: sym,
+    tf: st.tf,
+    type: st.type
+  });
+}
+
 /* -----------------------------
    Boot (single authoritative entrypoint)
 ----------------------------- */
@@ -3019,10 +3106,48 @@ function wireUI() {
   // -----------------------------
   // Unified Snapshot Button
   // -----------------------------
-  const btnCopySnapshot = document.getElementById("btnCopySnapshot");
-  if (btnCopySnapshot) {
-    btnCopySnapshot.addEventListener("click", copySnapshotBundle);
-  }
+const btnCopySnapshot = document.getElementById("btnCopySnapshot");
+if (btnCopySnapshot) {
+  btnCopySnapshot.addEventListener("click", copySnapshotBundle);
+}
+
+// -----------------------------
+// Pro Charts controls
+// -----------------------------
+const cbPro = document.getElementById("proChartsEnable");
+if (cbPro && !cbPro._bound) {
+  cbPro._bound = true;
+  cbPro.addEventListener("change", async () => {
+    setProChartsState({ enabled: !!cbPro.checked });
+    await _refreshProCharts();
+  });
+}
+
+const selTf = document.getElementById("proChartsTf");
+if (selTf && !selTf._bound) {
+  selTf._bound = true;
+  selTf.addEventListener("change", async () => {
+    setProChartsState({ tf: String(selTf.value || "1m") });
+    await _refreshProCharts();
+  });
+}
+
+const selType = document.getElementById("proChartsType");
+if (selType && !selType._bound) {
+  selType._bound = true;
+  selType.addEventListener("change", async () => {
+    setProChartsState({ type: String(selType.value || "candle") });
+    await _refreshProCharts();
+  });
+}
+
+const sym = document.getElementById("globalSymbol");
+if (sym && !sym._proChartBound) {
+  sym._proChartBound = true;
+  sym.addEventListener("change", async () => {
+    await _refreshProCharts();
+  });
+}
 }
 
 // ============================================================
@@ -3053,16 +3178,25 @@ async function buildSnapshotBundle() {
     console_tail: []
   };
 
+  const OPERATOR_BASE =
+    window.OPERATOR_BASE ||
+    "http://127.0.0.1:4001";
+
   for (const ep of endpoints) {
     try {
-      const res = await fetch(ep, { cache: "no-store" });
+      const isOperator = ep.startsWith("/api/operator");
+      const url = isOperator ? (OPERATOR_BASE + ep) : ep;
+
+      const res = await fetch(url, { cache: "no-store" });
+
       let json = null;
-try {
-  const txt = await res.text();
-  json = txt ? JSON.parse(txt) : null;
-} catch {
-  json = null;
-}
+      try {
+        const txt = await res.text();
+        json = txt ? JSON.parse(txt) : null;
+      } catch {
+        json = null;
+      }
+
       bundle.endpoints[ep] = {
         ok: res.ok,
         status: res.status,
@@ -3131,6 +3265,10 @@ refresh().then(async () => {
   } catch {
     setStage("ERROR");
   }
+
+  try {
+    await _refreshProCharts();
+  } catch {}
 });
 
   // Auto voice summary (CRIT alerts)

@@ -32,6 +32,7 @@ from engine.execution.trade_attribution_ledger import upsert_from_latest_pnl_att
 from engine.execution.kill_switch import execution_allowed
 from engine.runtime.risk_state import get_state, set_state
 from engine.execution_microstructure import record_open_order
+from engine.execution.deployable_capital import compute_deployable_equity
 
 
 BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets").strip()
@@ -261,6 +262,16 @@ def apply_latest_portfolio_orders_live(
 
         acct = get_account()
         eq = float(acct.get("equity") or 0.0)
+        bp = float(acct.get("buying_power") or 0.0)
+        cash = float(acct.get("cash") or 0.0)
+
+        eq = float(
+            compute_deployable_equity(
+                {"equity": float(eq), "buying_power": float(bp), "cash": float(cash)},
+                default_equity=float(eq),
+            )
+            or 0.0
+        )
         if eq <= 0:
             return {"ok": False, "status": "nonpositive_equity"}
 

@@ -799,7 +799,7 @@ tbody tr:hover td{
   </style>
 
   <!-- Small theme overrides (degraded pulse, exec-blocked accent, etc.) -->
-  <link rel="stylesheet" href="/ui/dashboard_theme.css">
+  <link rel="stylesheet" href="/ui/terminal/dashboard_theme.css">
 
 </head>
 
@@ -822,6 +822,7 @@ tbody tr:hover td{
       <div class="appSubtitle">Ops console • health • drift • alerts • backtests</div>
     </div>
     <div class="appRight">
+      <a class="btn" href="/ui/terminbal/terminal.html" title="Open Trading Terminal">⚡ Terminal</a>
       <span class="pill dim">UI: <span class="mono">/ui/dashboard.html</span></span>
       <span class="pill dim">API: <span class="mono">/api/*</span></span>
     </div>
@@ -829,16 +830,22 @@ tbody tr:hover td{
 
   <!-- Bloomberg-style Telemetry Strip -->
   <div id="telemetryStrip" class="telemetryStrip">
-    <span id="tNav">NAV —</span>
-    <span id="tReturn">RET —</span>
-    <span id="tDD">DD —</span>
-    <span id="tSharpe">Sharpe —</span>
-    <span id="tCalmar">Calmar —</span>
-    <span id="tStress">Stress —</span>
-    <span id="tPromotion">Promo —</span>
-    <span id="tCpu">CPU —</span>
-    <span id="tRam">RAM —</span>
-    <span id="tDb">DB —</span>
+    <span id="tNav">Net Asset Value —</span>
+    <span id="tReturn">Total Return —</span>
+    <span id="tDD" title="Maximum Drawdown is the largest peak-to-trough decline in portfolio value. It represents the worst historical loss period. Lower is safer.">
+Maximum Drawdown —
+</span>
+    <span id="tSharpe" title="Sharpe Ratio measures return per unit of volatility. Higher means better risk-adjusted performance. A value above 1 is generally strong.">
+Sharpe Ratio —
+</span>
+    <span id="tCalmar" title="Calmar Ratio compares total return to maximum drawdown. It measures performance relative to worst historical loss. Higher is safer.">
+Calmar Ratio —
+</span>
+    <span id="tStress">Market Stress Level —</span>
+    <span id="tPromotion">Model Promotion Status —</span>
+    <span id="tCpu">CPU Usage —</span>
+    <span id="tDb">Database Status —</span>
+    <span id="tRam">Memory Usage —</span>
 
   </div>
 
@@ -889,12 +896,24 @@ tbody tr:hover td{
   <div id="decisionBar" class="decisionBar">
     <div class="decisionRow">
       <div class="decisionLeft">
-        <span id="pillSystem" class="pill clickable dim" role="button" tabindex="0">SYSTEM: —</span>
-        <span id="pillCrit" class="pill clickable dim">CRIT: —</span>
-        <span id="pillWarn" class="pill clickable dim">WARN: —</span>
-        <span id="pillData" class="pill clickable dim">Data: —</span>
-        <span id="pillModel" class="pill clickable dim">Model: —</span>
-        <span id="pillExec" class="pill clickable dim">Exec: —</span>
+        <span id="pillSystem" class="pill clickable dim" role="button" tabindex="0">
+Overall System Condition —
+</span>
+        <span id="pillCrit" class="pill clickable dim">
+Immediate Attention Required —
+</span>
+        <span id="pillWarn" class="pill clickable dim">
+Issues To Monitor —
+</span>
+        <span id="pillData" class="pill clickable dim">
+Market Data Reliability —
+</span>
+        <span id="pillModel" class="pill clickable dim">
+Prediction Model Stability —
+</span>
+        <span id="pillExec" class="pill clickable dim">
+Trade Execution Integrity —
+</span>
       </div>
 
       <div class="decisionRight">
@@ -933,11 +952,43 @@ tbody tr:hover td{
         <option value="CRIT">Severity: CRIT only</option>
       </select>
 
-      <input id="globalSymbol" class="input" placeholder="Symbol filter (e.g. BTC)" style="min-width:220px;" />
-      <label class="pill dim" style="gap:8px;">
-        <input id="globalChangedOnly" type="checkbox" />
-        changed only
+<input id="globalSymbol" class="input" placeholder="Symbol filter (e.g. BTC)" style="min-width:220px;" />
+
+<label class="pill dim" style="gap:8px;">
+  <input id="proChartsEnable" type="checkbox" />
+  pro charts
+</label>
+
+<select id="proChartsTf" title="Candle timeframe" style="min-width:90px;">
+  <option value="1m">1m</option>
+  <option value="5m">5m</option>
+  <option value="15m">15m</option>
+  <option value="1h">1h</option>
+</select>
+
+<select id="proChartsType" title="Chart type" style="min-width:110px;">
+  <option value="candle" selected>Candles</option>
+  <option value="line">Line</option>
+  <option value="bar">OHLC Bar</option>
+  <option value="area">Area</option>
+</select>
+
+<label class="pill dim" style="gap:8px;">
+  <input id="globalChangedOnly" type="checkbox" />
+  changed only
+</label>
+
+      <!-- Pro Charts (optional) -->
+      <label class="pill dim" style="gap:8px;" title="Enable professional charting engine">
+        <input id="proChartsEnabled" type="checkbox" />
+        pro charts
       </label>
+      <select id="proChartsEngine" title="Chart engine (applies when pro charts is enabled)">
+        <option value="lightweight" selected>Lightweight</option>
+        <option value="echarts">ECharts</option>
+        <option value="chartjs">Chart.js</option>
+      </select>
+
       <span id="globalHint" class="pill dim">Tip: click a pill to jump</span>
     </div>
 
@@ -965,9 +1016,9 @@ tbody tr:hover td{
     <div class="card collapsible">
       <h2>💰 Live PnL</h2>
       <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:8px;">
-        <span id="pnlTotal" class="pill dim">Total: —</span>
-        <span id="pnlUnrealized" class="pill dim">Unrealized: —</span>
-        <span id="pnlRealized" class="pill dim">Realized: —</span>
+        <span id="pnlTotal" class="pill dim">Total Portfolio Profit / Loss —</span>
+        <span id="pnlUnrealized" class="pill dim">Unrealized Profit / Loss (Open Positions) —</span>
+        <span id="pnlRealized" class="pill dim">Realized Profit / Loss (Closed Trades) —</span>
       </div>
     </div>
 
@@ -1030,9 +1081,9 @@ tbody tr:hover td{
     <div class="card collapsible">
       <h2>🩺 System Health</h2>
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin:8px 0;">
-        <span class="pill dim" id="healthPrices">prices: —</span>
-        <span class="pill dim" id="healthLabels">labels: —</span>
-        <span class="pill dim" id="healthModel">model: —</span>
+        <span class="pill dim" id="healthPrices">Price Data Freshness —</span>
+        <span class="pill dim" id="healthLabels">Label Generation Status —</span>
+        <span class="pill dim" id="healthModel">Active Model Health —</span>
       </div>
       <div id="healthStatus" class="status"></div>
       <pre id="healthDetails" class="mono"></pre>
@@ -1054,7 +1105,11 @@ tbody tr:hover td{
 
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin:10px 0;">
         <span class="pill dim">Score:</span>
-        <span id="marketStressBadge" class="pill dim">loading</span>
+        <span id="marketStressBadge"
+      class="pill dim"
+      title="Market Stress Level combines volatility, credit spreads, and rates signals into a unified risk score. Higher stress suggests elevated systemic risk.">
+loading
+</span>
         <span class="pill dim">Updated:</span>
         <span id="marketStressUpdated" class="pill dim mono">—</span>
       </div>
@@ -1065,7 +1120,7 @@ tbody tr:hover td{
             <tr>
               <th>Metric</th>
               <th>Value</th>
-              <th>Z</th>
+              <th>Standardized Z-Score</th>
             </tr>
           </thead>
           <tbody id="marketStressBody"></tbody>
@@ -1076,7 +1131,11 @@ tbody tr:hover td{
 
 <div style="margin-top:8px;">
   <span class="pill dim">Model confidence:</span>
-  <span id="confidenceBadge" class="pill dim">—</span>
+  <span id="confidenceBadge"
+      class="pill dim"
+      title="Model confidence reflects how certain the prediction system is about its current forecast. Higher confidence generally allows larger position sizing.">
+—
+</span>
 </div>
 
 <pre id="marketStressRaw" class="mono" style="margin-top:10px; max-height:260px; overflow:auto;">(loading...)</pre>
@@ -1100,7 +1159,7 @@ tbody tr:hover td{
         <button class="btn expertAction" id="btnTogglePromotions">Toggle Promotions</button>
         <button class="btn expertAction" id="btnRollbackChampion">Rollback Champion</button>
         <button class="btn" id="btnWhyNotPromoted">Why not promoted?</button>
-        <span class="pill dim" id="promotionPill">promotion: ?</span>
+        <span class="pill dim" id="promotionPill">Model Promotion Eligibility —</span>
       </div>
       <pre class="mono small" id="promotionReason"></pre>
     </div>
@@ -1135,12 +1194,12 @@ tbody tr:hover td{
             <thead>
               <tr>
                 <th>Time</th>
-                <th>Sev</th>
+                <th>Prediction Horizon</th>
                 <th>Symbol</th>
-                <th>H</th>
-                <th>z</th>
-                <th>Conf</th>
-                <th>Event</th>
+                <th>Prediction Horizon</th>
+                <th>Standardized Z-Score</th>
+                <th>Model Confidence</th>
+                <th>Event Description</th>
                 <th>Age</th>
                 <th>Why</th>
               </tr>
@@ -1168,7 +1227,7 @@ tbody tr:hover td{
                 <th>Horizon</th>
                 <th>Relevance</th>
                 <th>Mean |z|</th>
-                <th>n</th>
+                <th>Number of Observations</th>
               </tr>
             </thead>
             <tbody id="relevanceTableBody"></tbody>
@@ -1195,7 +1254,7 @@ tbody tr:hover td{
             <tr>
               <th>Bucket</th>
               <th>Conf Range</th>
-              <th>N</th>
+              <th>Number of Observations</th>
               <th>Mean Net Ret</th>
               <th>Std Net Ret</th>
               <th>Factor</th>
@@ -1222,7 +1281,7 @@ tbody tr:hover td{
             <tr>
               <th>Stage</th>
               <th>Kind</th>
-              <th>RMSE</th>
+              <th>Root Mean Square Error (RMSE)</th>
               <th>Dir Acc</th>
               <th>n_eval</th>
               <th>Eval Ts</th>
@@ -1244,11 +1303,11 @@ tbody tr:hover td{
           <thead>
             <tr>
               <th>Symbol</th>
-              <th>H</th>
-              <th>MAE</th>
-              <th>RMSE</th>
-              <th>n</th>
-              <th>Updated</th>
+              <th>Prediction Horizon</th>
+              <th>Mean Absolute Error (MAE)</th>
+              <th>Root Mean Square Error (RMSE)</th>
+              <th>Number of Observations</th>
+              <th>Last Updated</th>
             </tr>
           </thead>
           <tbody id="validation"></tbody>
@@ -1264,8 +1323,8 @@ tbody tr:hover td{
           <thead>
             <tr>
               <th>Horizon (s)</th>
-              <th>N</th>
-              <th>RMSE</th>
+              <th>Number of Observations</th>
+              <th>Root Mean Square Error (RMSE)</th>
               <th>Directional</th>
             </tr>
           </thead>
@@ -1283,13 +1342,13 @@ tbody tr:hover td{
           <thead>
             <tr>
               <th>Symbol</th>
-              <th>H</th>
-              <th>N</th>
-              <th>RMSE</th>
-              <th>Base RMSE</th>
-              <th>Dir</th>
-              <th>Base Dir</th>
-              <th>Pass</th>
+              <th>Prediction Horizon</th>
+              <th>Number of Observations</th>
+              <th>Root Mean Square Error (RMSE)</th>
+              <th>Baseline Model RMSE</th>
+              <th>Temporal Directional Accuracy</th>
+              <th>Baseline Directional Accuracy</th>
+              <th>Promotion Gate Passed?</th>
               <th>Why</th>
             </tr>
           </thead>
@@ -1351,7 +1410,7 @@ tbody tr:hover td{
               <th>Input Dim</th>
               <th>Weights</th>
               <th>Metrics</th>
-              <th>Updated</th>
+              <th>Last Updated</th>
             </tr>
           </thead>
           <tbody id="temporalModels"></tbody>
@@ -1385,9 +1444,9 @@ tbody tr:hover td{
               <th>Strategy</th>
               <th>Window (d)</th>
               <th>Net Calmar</th>
-              <th>Sharpe</th>
+              <th>Sharpe Ratio</th>
               <th>Turnover</th>
-              <th>Updated</th>
+              <th>Last Updated</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -1403,15 +1462,15 @@ tbody tr:hover td{
           <thead>
             <tr>
               <th>Symbol</th>
-              <th>H</th>
-              <th>R²</th>
-              <th>DirAcc</th>
-              <th>ECE</th>
-              <th>AvgConf</th>
-              <th>p50 |e|</th>
-              <th>p90 |e|</th>
-              <th>n</th>
-              <th>Updated</th>
+              <th>Prediction Horizon</th>
+              <th>R² (Explained Variance)</th>
+              <th>Directional Accuracy</th>
+              <th>Expected Calibration Error</th>
+              <th>Average Confidence</th>
+              <th>Median Absolute Error</th>
+              <th>90th Percentile Absolute Error</th>
+              <th>Number of Observations</th>
+              <th>Last Updated</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -1442,10 +1501,10 @@ tbody tr:hover td{
     <table>
       <thead>
         <tr>
-          <th>Confidence</th>
-          <th>Trades</th>
-          <th>Avg Cost</th>
-          <th>Severity</th>
+          <th>Prediction Confidence Level</th>
+          <th>Total Trades</th>
+          <th>Average Execution Cost</th>
+          <th>Cost Severity</th>
         </tr>
       </thead>
       <tbody id="execByConfBody"></tbody>
@@ -1469,7 +1528,7 @@ tbody tr:hover td{
               <th>Side</th>
               <th>Weight</th>
               <th>Opened</th>
-              <th>Updated</th>
+              <th>Last Updated</th>
             </tr>
           </thead>
           <tbody id="portfolioStateBody"></tbody>
@@ -1501,10 +1560,12 @@ tbody tr:hover td{
         <div style="flex:1 1 360px; min-width:320px;">
           <div class="small" style="margin:0 0 6px;">Equity Curve</div>
           <canvas id="portfolioEquityCanvas" width="900" height="220" style="width:100%; height:220px; border:1px solid #30363d; border-radius:10px; background:#0a0d12;"></canvas>
+          <div id="portfolioEquityPro" class="proChart" style="display:none; width:100%; height:220px; border:1px solid #30363d; border-radius:10px; background:#0a0d12;"></div>
         </div>
         <div style="flex:1 1 360px; min-width:320px;">
           <div class="small" style="margin:0 0 6px;">Drawdown</div>
           <canvas id="portfolioDdCanvas" width="900" height="220" style="width:100%; height:220px; border:1px solid #30363d; border-radius:10px; background:#0a0d12;"></canvas>
+          <div id="portfolioDdPro" class="proChart" style="display:none; width:100%; height:220px; border:1px solid #30363d; border-radius:10px; background:#0a0d12;"></div>
         </div>
       </div>
 
@@ -1514,16 +1575,25 @@ tbody tr:hover td{
           <thead>
             <tr>
               <th>Window</th>
-              <th>Return</th>
-              <th>Max DD</th>
-              <th>Sharpe</th>
-              <th>Trades</th>
+              <th>Total Return</th>
+              <th>Maximum Drawdown</th>
+              <th>Sharpe Ratio</th>
+              <th>Total Trades</th>
             </tr>
           </thead>
-          <tbody id="portfolioBtSummaryBody"></tbody>
-        </table>
-      </div>
-    </div>
+      <tbody id="portfolioBtSummaryBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Pro Charting (toggle: "pro charts") -->
+<div class="card collapsible" id="proChartsCard" style="display:none;">
+  <h2>📊 Live Market Chart <span id="proChartsMeta" class="pill dim" style="margin-left:8px;">disabled</span></h2>
+  <div class="small" style="margin:6px 0 10px;">
+    Uses Polygon feed via backend DB: price_quotes_raw(provider=polygon_ws). Symbol is from the top filter.
+  </div>
+  <div id="liveMarketChart" style="width:100%; height:420px; border:1px solid #30363d; border-radius:10px; background:#0a0d12;"></div>
+</div>
 
     <!-- Job History + Trends panels (dashboard.js expects these IDs) -->
     <div class="card collapsible">
@@ -1549,9 +1619,9 @@ tbody tr:hover td{
   </div>
 
   <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
-    <span id="ksAutoPipeline" class="pill dim">auto_pipeline: —</span>
-    <span id="ksAutoChallenger" class="pill dim">auto_challenger: —</span>
-    <span id="ksAutoSizePolicy" class="pill dim">auto_size_policy: —</span>
+    <span id="ksAutoPipeline" class="pill dim">Automatic Pipeline Execution —</span>
+    <span id="ksAutoChallenger" class="pill dim">Automatic Challenger Training —</span>
+    <span id="ksAutoSizePolicy" class="pill dim">Automatic Position Size Learning —</span>
   </div>
 
   <pre id="systemStateText" class="mono small"></pre>
@@ -1614,29 +1684,29 @@ tbody tr:hover td{
       <div class="drawerSection decisionFrame">
         <div class="dfTop">
           <div class="dfPosture">
-            <span class="dfLabel small">Recommended posture</span>
+            <span class="dfLabel small">Recommended operating stance</span>
             <div id="drawerPosture" class="postureBadge">—</div>
           </div>
 
           <div class="dfRight">
             <div class="dfRow">
-              <span class="dfLabel small">Decision confidence</span>
+              <span class="dfLabel small">System confidence in this recommendation</span>
               <span id="drawerDecisionConfidence" class="pill dim">—</span>
             </div>
             <div class="dfRow">
-              <span class="dfLabel small">Safe to ignore?</span>
+              <span class="dfLabel small">Can this safely be ignored for now?</span>
               <span id="drawerSafeIgnore" class="pill dim">—</span>
             </div>
           </div>
         </div>
 
         <div class="dfBlock">
-          <div class="dfLabel small">If nothing changes, what happens next?</div>
+          <div class="dfLabel small">If no action is taken, what is the expected outcome?</div>
           <div id="drawerNoChange" class="small"></div>
         </div>
 
         <div class="dfBlock">
-          <div class="dfLabel small">Why this posture</div>
+          <div class="dfLabel small">Why this operating stance is recommended</div>
           <div id="drawerWhyPosture" class="small"></div>
         </div>
       </div>

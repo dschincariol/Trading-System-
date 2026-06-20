@@ -16,6 +16,7 @@ ROUTE_SPECS_SYSTEM = [
     ("GET",  "/api/system/state",         "api_get_system_state"),
     ("GET",  "/api/health",               "api_get_health"),
     ("GET",  "/api/readiness",            "api_get_readiness"),
+    ("GET",  "/api/allocator/status",     "api_get_allocator_status"),
     ("GET",  "/api/telemetry",            "api_get_telemetry"),
     ("GET",  "/api/training_status", "api_get_training_status"),
     ("GET",  "/api/server/status",        "api_get_server_status"),
@@ -56,6 +57,9 @@ def api_get_system_state(_parsed, ctx):
 
     try:
         kill_switches = ctx["API_HANDLERS"]["api_get_kill_switches"](_parsed, ctx)
+        # Normalize shape: api_get_kill_switches returns {"ok": True, "data": {...}}
+        if isinstance(kill_switches, dict) and isinstance(kill_switches.get("data"), dict):
+            kill_switches = kill_switches["data"]
     except Exception:
         kill_switches = {}
 
@@ -168,39 +172,12 @@ from engine.runtime.system_state import compute_system_state
 from engine.runtime.health import get_health_snapshot
 
 
-def api_get_execution_barrier(_parsed, ctx):
+def api_get_execution_barrier(_parsed, _ctx=None):
     try:
-        health = get_health_snapshot()
-    except Exception:
-        health = {}
-
-    try:
-        jobs = ctx["JOBS"].list_jobs()
-    except Exception:
-        jobs = []
-
-    try:
-        kill = ctx["API_HANDLERS"]["api_get_kill_switches"](_parsed, ctx)
-    except Exception:
-        kill = {}
-
-    state = compute_system_state(
-        health=health,
-        jobs=jobs,
-        kill_switches=kill,
-    )
-
-    decision = execution_barrier_decide(
-        system_state=state,
-        kill_switches=kill,
-        execution_degraded=False,  # wire real flag if you track one
-        portfolio_risk_gate=None,
-    )
-
-    return {
-        "ok": True,
-        "allowed": decision.allowed,
-        "reason": decision.reason,
-        "detail": decision.detail,
-        "state": state.get("state"),
-    }
+        from engine.runtime.execution_barrier import execution_gate_snapshot
+        snap = execution_gate_snapshot()
+        if not isinstance(snap, dict):
+            return {"ok": True, "allowed": True, "reason": "unknown_snapshot_format"}
+        return {"ok": True, **snap}
+    except Exception as e:
+        return {"ok": True, "allowed": False, "reason": f"execution_barrier_error: {e}"}

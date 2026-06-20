@@ -38,6 +38,7 @@ from engine.execution.kill_switch import execution_allowed
 from engine.runtime.risk_state import get_state, set_state
 from engine.execution_ledger import log_submit, log_fill
 from engine.alpha_lifecycle_engine import apply_alpha_lifecycle
+from engine.execution.deployable_capital import compute_deployable_equity_from_env
 
 # Execution gate (fail-closed)
 try:
@@ -316,7 +317,7 @@ def apply_latest_portfolio_orders_live(
         if not allow0:
             return {"ok": False, "status": "blocked_kill_switch", "broker": "ibkr"}
 
-        eq = float(os.environ.get("IBKR_EQUITY_USD", "0") or 0.0)
+        eq = float(compute_deployable_equity_from_env("IBKR", default_equity=0.0) or 0.0)
         if eq <= 0:
             return {"ok": False, "status": "missing_equity", "broker": "ibkr"}
 

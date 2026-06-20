@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from engine.runtime.storage import connect
 from engine.execution.trade_attribution_ledger import upsert_from_latest_pnl_attribution_snapshot
+from engine.execution.deployable_capital import compute_deployable_equity
 
 # -----------------------------
 # Small numeric guards
@@ -554,6 +555,15 @@ def apply_new_portfolio_orders(
         acct = _read_account(con)
         cash = float(acct.get("cash") or 0.0)
         equity = float(_equity(con, ts_ms) or 0.0)
+
+        # conservative deployable base (allows testing leverage constraints even in sim)
+        equity = float(
+            compute_deployable_equity(
+                {"equity": float(equity), "cash": float(cash), "buying_power": float(equity)},
+                default_equity=float(equity),
+            )
+            or 0.0
+        )
 
         # guard: sizing needs a positive reference; if equity <= 0, do not trade
         if not _is_finite(equity) or equity <= 0.0:

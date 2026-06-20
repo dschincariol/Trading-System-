@@ -14,6 +14,8 @@ from engine.api.api_read_advanced import (
     get_model_diagnostics,
     get_temporal_models,
     get_latest_portfolio_backtest,
+    get_portfolio_snapshot,
+    get_portfolio_snapshot,
     get_execution_metrics_by_symbol,
     get_execution_cost_by_confidence,
     get_social_features,
@@ -43,6 +45,30 @@ def api_get_temporal_models(parsed, ctx):
 
 def api_get_latest_portfolio_backtest(_parsed, _ctx=None):
     return get_latest_portfolio_backtest()
+
+
+def api_get_portfolio(parsed, _ctx=None):
+    qs = _qs(parsed)
+    limit_state = int(qs.get("limit_state", "200") or "200")
+    intents_window_ms = int(qs.get("intents_window_ms", "2500") or "2500")
+    intents_max_rows = int(qs.get("intents_max_rows", "5000") or "5000")
+    return get_portfolio_snapshot(
+        limit_state=limit_state,
+        intents_window_ms=intents_window_ms,
+        intents_max_rows=intents_max_rows,
+    )
+
+
+def api_get_portfolio(parsed, _ctx=None):
+    qs = _qs(parsed)
+    limit_state = int(qs.get("limit_state", "200") or "200")
+    intents_window_ms = int(qs.get("intents_window_ms", "2500") or "2500")
+    intents_max_rows = int(qs.get("intents_max_rows", "5000") or "5000")
+    return get_portfolio_snapshot(
+        limit_state=limit_state,
+        intents_window_ms=intents_window_ms,
+        intents_max_rows=intents_max_rows,
+    )
 
 def api_get_execution_metrics_by_symbol(parsed, _ctx=None):
     qs = _qs(parsed)

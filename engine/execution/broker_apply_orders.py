@@ -29,6 +29,7 @@ from engine.execution.kill_switch import execution_allowed
 from engine.position_reconcile import pre_live_position_reconcile
 from engine.adaptive_order_slicer import AdaptiveOrderSlicer
 from engine.strategy.portfolio_risk_gate import apply_execution_risk_governor
+from engine.runtime.risk_state import get_state
 from engine.rules_engine import evaluate_rules
 from engine.execution.execution_mode import get_execution_mode
 from engine.strategy.regime_stack import compute_regime_vector, regime_compatibility, regime_model_version
@@ -346,6 +347,33 @@ def main() -> int:
             evaluate_rules()
         except Exception:
             pass
+
+        # Portfolio Risk Engine hard-block (fail-closed)
+        try:
+            if str(get_state("portfolio_risk_block", "0") or "0").strip() == "1":
+                details = str(get_state("portfolio_risk_info", "") or "")
+                _print(
+                    {
+                        "status": "blocked",
+                        "layer": "portfolio_risk_engine",
+                        "reason": "portfolio_risk_block",
+                        "portfolio_risk_info": details,
+                        "ts_ms": _now_ms(),
+                        "dur_ms": _now_ms() - started_ms,
+                    }
+                )
+                return 0
+        except Exception as e:
+            _print(
+                {
+                    "status": "blocked",
+                    "layer": "portfolio_risk_engine_exception",
+                    "reason": str(e),
+                    "ts_ms": _now_ms(),
+                    "dur_ms": _now_ms() - started_ms,
+                }
+            )
+            return 0
 
         mode_state = get_execution_mode() or {}
         mode = str(mode_state.get("mode") or "").lower().strip()

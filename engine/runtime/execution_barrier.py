@@ -9,7 +9,6 @@ class ExecBarrierDecision:
     reason: str
     detail: Dict[str, Any]
 
-
 def execution_barrier_decide(
     system_state: Dict[str, Any],
     kill_switches: Optional[Dict[str, Any]],
@@ -23,7 +22,7 @@ def execution_barrier_decide(
     st = str(system_state.get("state") or "")
     ok = bool(system_state.get("ok", False))
 
-    if not ok:
+    if not ok and st not in ("DEGRADED",):
         return ExecBarrierDecision(False, "system_state_not_ok", {"state": st})
 
     if st not in ("LIVE", "DEGRADED"):
@@ -48,3 +47,53 @@ def execution_barrier_decide(
             return ExecBarrierDecision(False, "portfolio_risk_gate_block", portfolio_risk_gate)
 
     return ExecBarrierDecision(True, "ok", {"state": st})
+
+# -------------------------------------------------------------------
+# Snapshot adapter for health / API layer
+# -------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Snapshot adapter for health / API layer
+# -------------------------------------------------------------------
+
+def execution_gate_snapshot(
+    system_state: Optional[Dict[str, Any]] = None,
+    kill_switches: Optional[Dict[str, Any]] = None,
+    execution_degraded: bool = False,
+    portfolio_risk_gate: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Backward-compatible snapshot wrapper expected by API layer.
+    Must never raise.
+    """
+
+    try:
+        # If system_state not provided, allow warm-up phase
+        if not system_state:
+            return {
+                "allowed": False,
+                "reason": "warming_up",
+                "detail": {},
+                "ok": True,
+            }
+
+        decision = execution_barrier_decide(
+            system_state=system_state,
+            kill_switches=kill_switches,
+            execution_degraded=execution_degraded,
+            portfolio_risk_gate=portfolio_risk_gate,
+        )
+
+        return {
+            "allowed": bool(decision.allowed),
+            "reason": decision.reason,
+            "detail": decision.detail,
+            "ok": True,
+        }
+
+    except Exception as e:
+        return {
+            "allowed": False,
+            "reason": f"execution_barrier_error: {e}",
+            "detail": {},
+            "ok": True,
+        }

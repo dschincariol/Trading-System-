@@ -22,6 +22,40 @@ const net = require("net");
 const { spawn, spawnSync } = require("child_process");
 
 const app = express();
+
+/* -------------------------------------------------
+   CORS (UI runs on :8000, Operator on :4001)
+------------------------------------------------- */
+app.use((req, res, next) => {
+  const env = readEnv();
+  const allowed = String(env.OPERATOR_ALLOWED_ORIGIN || "http://127.0.0.1:8000").trim();
+
+  // Security headers (safe defaults for local/prod)
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+  // HSTS only in production + https
+  if (PRODUCTION_MODE && req.secure) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
+  // CSP (operator serves JSON APIs; keep restrictive)
+  res.setHeader("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+
+  // CORS (strict single origin)
+  res.setHeader("Access-Control-Allow-Origin", allowed);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With"
+  );
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 app.use(express.json({ limit: "1mb" }));
 
 const ROOT = path.join(__dirname, "..");
@@ -208,13 +242,13 @@ const ENV_SPEC = [
   { key: "IBKR_PORT", type: "int", required: false, min: 1, max: 65535, default: 7497 },
   { key: "IBKR_CLIENT_ID", type: "int", required: false, min: 0, max: 999999, default: 101 },
 
-  // Boot behavior
-  { key: "AUTO_BOOT_DAEMONS", type: "bool", required: false, default: false },
+  // Boot behavior (deterministic)
+  { key: "AUTO_BOOT_DAEMONS", type: "bool", required: false, default: true },
   { key: "AUTO_BOOT_TARGETS", type: "string", required: false, default: "" },
 
-  // Operator behavior
   { key: "OPERATOR_AUTORESTART", type: "bool", required: false, default: true },
-  { key: "OPERATOR_HEALTH_URL", type: "string", required: false, default: "" }
+  { key: "OPERATOR_HEALTH_URL", type: "string", required: false, default: "" },
+  { key: "OPERATOR_ALLOWED_ORIGIN", type: "string", required: false, default: "http://127.0.0.1:8000" }
 ];
 
 function validateAndSanitizeEnv(envObj) {
@@ -272,15 +306,46 @@ function validateAndSanitizeEnv(envObj) {
 }
 
 function ensureEnvFile() {
-  if (fs.existsSync(ENV_PATH)) return;
-
-  const base = {};
-  for (const spec of ENV_SPEC) {
-    if (spec.default !== undefined) base[spec.key] = String(spec.default);
+  if (!fs.existsSync(ENV_PATH)) {
+    const base = {};
+    for (const spec of ENV_SPEC) {
+      if (spec.default !== undefined) base[spec.key] = String(spec.default);
+    }
+    atomicWrite(ENV_PATH, serializeEnv(base));
   }
-  atomicWrite(ENV_PATH, serializeEnv(base));
-}
 
+  // Ensure dashboard token exists (non-technical hardening)
+  try {
+    const envNow = readEnv();
+    const tok = String(envNow.DASHBOARD_API_TOKEN || "").trim();
+    if (!tok) {
+      const secrets = loadSecrets();
+      let token = "";
+
+      // reuse existing token if present
+      try {
+        if (secrets && secrets.dashboard_api_token_enc) {
+          token = String(decrypt(secrets.dashboard_api_token_enc) || "").trim();
+        }
+      } catch {}
+
+      // generate new token if needed
+      if (!token) {
+        token = crypto.randomBytes(24).toString("hex");
+        try {
+          secrets.dashboard_api_token_enc = encrypt(token);
+          saveSecrets(secrets);
+        } catch {}
+      }
+
+      envNow.DASHBOARD_API_TOKEN = token;
+      const { sanitized, issues } = validateAndSanitizeEnv(envNow);
+      if (!issues.some((i) => i.level === "error")) {
+        atomicWrite(ENV_PATH, serializeEnv(sanitized));
+      }
+    }
+  } catch {}
+}
 function writeEnv(obj) {
   const { sanitized, issues } = validateAndSanitizeEnv(obj);
   if (issues.some((i) => i.level === "error")) {
@@ -368,10 +433,11 @@ function startEngine(mode = "safe") {
   const m = String(mode || "safe").toLowerCase().trim();
   const finalMode = (m === "live" || m === "shadow") ? m : "safe";
 
-  // safe: UI only, no jobs
-  // shadow/live: auto boot daemons
-  sanitized.AUTO_BOOT_DAEMONS = (finalMode === "safe") ? "false" : "true";
-  sanitized.EXECUTION_MODE = finalMode; // if your backend/UI uses it
+  // Deterministic non-technical boot:
+  // - ALWAYS boot data daemons (prices) even in SAFE
+  // - SAFE means "no execution", not "no data"
+  sanitized.AUTO_BOOT_DAEMONS = "true";
+  sanitized.EXECUTION_MODE = finalMode; // safe|shadow|live
   sanitized.OPERATOR_MODE = finalMode;  // reserved
 
   atomicWrite(ENV_PATH, serializeEnv(sanitized));
@@ -408,50 +474,37 @@ function startEngine(mode = "safe") {
   if (child.stdout) child.stdout.pipe(logStream);
   if (child.stderr) child.stderr.pipe(logStream);
 
-  child.on("exit", (code) => {
+  child.on("exit", (code, signal) => {
     state.lastExitCode = code;
     saveState();
     child = null;
+
+    // Do NOT auto-restart on clean exit
+    if (code === 0) {
+      return;
+    }
 
     const envNow = readEnv();
     const ar = normalizeBool(envNow.OPERATOR_AUTORESTART);
     const autoRestartEnabled = ar === null ? true : ar;
 
-    const now = Date.now();
-    if (!state._restartWindowStart) {
-      state._restartWindowStart = now;
-      state._restartCountWindow = 0;
+    if (!autoRestartEnabled) {
+      return;
     }
 
-    // Reset window if older than 10 minutes
-    if (now - state._restartWindowStart > 10 * 60 * 1000) {
-      state._restartWindowStart = now;
-      state._restartCountWindow = 0;
-    }
+    state.restartAttempts = (state.restartAttempts || 0) + 1;
+    saveState();
 
-    if (autoRestartEnabled && code !== 0) {
-      state._restartCountWindow += 1;
-      state.restartAttempts = (state.restartAttempts || 0) + 1;
+    setLastError("ENGINE_CRASH", "Engine exited unexpectedly", {
+      code,
+      signal
+    });
 
-if (state._restartCountWindow > 5) {
-
-  // Institutional downgrade
-  state.lastMode = "safe";
-  saveState();
-
-  setLastError(
-    "CRASH_LOOP_DETECTED",
-    "Engine crash loop detected. Downgraded to SAFE mode. Manual promotion required."
-  );
-
-  return;
-}
-
-      setLastError("ENGINE_CRASH", "Engine exited unexpectedly", { code });
-      saveState();
-
-      setTimeout(() => startEngine(state.lastMode || "safe"), 3000);
-    }
+    setTimeout(() => {
+      if (!child) {
+        startEngine(state.lastMode || "safe");
+      }
+    }, 3000);
   });
 
   clearLastError();
@@ -498,7 +551,7 @@ function emergencyStop() {
 // Health + Readiness (backend integration)
 // --------------------------------------------------
 
-function httpGetJson(url, timeoutMs = 8000) {
+function httpGetJson(url, timeoutMs = 20000) {
   return new Promise((resolve) => {
     try {
       const lib = url.startsWith("https://") ? https : http;
@@ -1240,18 +1293,63 @@ app.post("/api/operator/start", async (req, res) => {
   }
   steps[steps.length - 1] = { id: "spawn", ok: true, label: "Launching backend", detail: `started (${mode})` };
 
-  // Wait for health
-  steps.push({ id: "health", ok: false, label: "Waiting for health", detail: "polling /api/health" });
-  let healthy = false;
-  let lastHealth = null;
-  for (let i = 0; i < 10; i++) {
-    await sleep(1000);
-    lastHealth = await verifyHealth();
-    if (lastHealth.ok) {
-      healthy = true;
-      break;
-    }
+// Wait for backend socket bind first
+steps.push({ id: "bind_wait", ok: false, label: "Waiting for backend bind", detail: "checking port" });
+
+const envObjBind = readEnv();
+const bindPort = Number(envObjBind.DASHBOARD_PORT || 8000);
+const bindHost = _normalizeDashHostForLoopback(envObjBind.DASHBOARD_HOST || "127.0.0.1");
+
+let bound = false;
+for (let i = 0; i < 15; i++) {
+  await sleep(500);
+  const portFree = await checkPortAvailable(bindPort, bindHost);
+  if (!portFree) {
+    bound = true;
+    break;
   }
+}
+
+if (!bound) {
+  steps[steps.length - 1] = { id: "bind_wait", ok: false, label: "Waiting for backend bind", detail: "port never bound" };
+  setLastError("BIND_TIMEOUT", "Backend never bound to port");
+  return res.json({ ok: false, status: "BIND_TIMEOUT", steps });
+}
+
+steps[steps.length - 1] = { id: "bind_wait", ok: true, label: "Waiting for backend bind", detail: "port bound" };
+
+// Now poll health
+steps.push({ id: "health", ok: false, label: "Waiting for health", detail: "polling /api/health" });
+
+let healthy = false;
+let lastHealth = null;
+
+for (let i = 0; i < 120; i++) {
+  // 0-10s: 1s cadence, then 2s cadence to reduce load
+  await sleep(i < 10 ? 1000 : 2000);
+
+  lastHealth = await verifyHealth();
+
+  // Any 2xx JSON response = server is up; SAFE mode tolerates warmup
+  if (lastHealth && lastHealth.ok === true) {
+    healthy = true;
+    break;
+  }
+}
+
+if (!healthy) {
+  if (lastHealth && lastHealth.body && lastHealth.body.status === "WARMING_UP") {
+    // SAFE warmup is not a failure
+    steps[steps.length - 1] = { id: "health", ok: true, label: "Warming up", detail: "Waiting for first price tick" };
+    return res.json({ ok: true, status: "WARMING_UP", steps });
+  }
+
+  steps[steps.length - 1] = { id: "health", ok: false, label: "Waiting for health", detail: lastHealth || "not healthy" };
+  setLastError("BOOT_HEALTH_FAIL", "Backend did not become healthy");
+  return res.json({ ok: false, status: "UNHEALTHY", steps });
+}
+
+steps[steps.length - 1] = { id: "health", ok: true, label: "Waiting for health", detail: "healthy" };
 
   if (!healthy) {
     steps[steps.length - 1] = { id: "health", ok: false, label: "Waiting for health", detail: lastHealth || "not healthy" };
@@ -1273,21 +1371,60 @@ app.post("/api/operator/start", async (req, res) => {
   }
   steps[steps.length - 1] = { id: "telemetry", ok: true, label: "Checking telemetry", detail: "telemetry responding" };
 
-  // Ensure Polygon stream automatically (direct call)
+// ------------------------------------------------------------
+// FULL AUTO BOOTSTRAP (prices + pipeline + stream)
+// ------------------------------------------------------------
 try {
-  await sleep(500);
+  const envObj2 = readEnv();
+  const base2 = dashBaseUrlFromEnv(envObj2);
+
+  // 1️⃣ Ensure poll_prices running
   await new Promise((resolve) => {
-    http.request(
-      {
-        host: OPERATOR_BIND_HOST,
-        port: OPERATOR_PORT,
-        path: "/api/operator/ensure_polygon_stream",
-        method: "POST"
-      },
+  const lib = base2.startsWith("https") ? https : http;
+  const req2 = lib.request(
+    `${base2}/api/jobs/start?name=poll_prices`,
+    { method: "POST" },
+    () => resolve()
+  );
+  req2.on("error", () => resolve());
+  req2.end();
+});
+
+  // Small warm delay
+  await sleep(1500);
+
+  // 2️⃣ Ensure Polygon stream running
+  await new Promise((resolve) => {
+  const lib = base2.startsWith("https") ? https : http;
+  const req2 = lib.request(
+    `${base2}/api/jobs/start?name=stream_prices_polygon_ws`,
+    { method: "POST" },
+    () => resolve()
+  );
+  req2.on("error", () => resolve());
+  req2.end();
+});
+
+  // Small warm delay
+  await sleep(2000);
+
+  // 3️⃣ Trigger full pipeline (POST required)
+  await new Promise((resolve) => {
+    const lib = base2.startsWith("https") ? https : http;
+
+    const req2 = lib.request(
+      `${base2}/api/pipeline/run`,
+      { method: "POST" },
       () => resolve()
-    ).on("error", () => resolve()).end();
+    );
+
+    req2.on("error", () => resolve());
+    req2.end();
   });
+
 } catch {}
+
+
 
 return res.json({ ok: true, status: "RUNNING", mode, steps });
 });
@@ -1428,8 +1565,11 @@ app.get("/api/operator/db_schema", async (req, res) => {
       return res.json({ ok: false, error: "sqlite3_not_installed", details: String(e) });
     }
 
-    const dbPath = process.env.DB_PATH || "./data/trading.db";
-    const db = new sqlite3.Database(dbPath);
+    const envObj = readEnv();
+    const { sanitized } = validateAndSanitizeEnv(envObj);
+    const { resolvedDb } = resolveDbPathFromSanitized(sanitized);
+
+    const db = new sqlite3.Database(resolvedDb);
 
     db.all("SELECT name FROM sqlite_master WHERE type='table'", [], (err, rows) => {
       if (err) {
@@ -1450,37 +1590,61 @@ app.get("/", (req, res) => {
 });
 
 // --------------------------------------------
-// Background Watchdog (Institutional Hardened)
+// Background Watchdog (Production Hardened)
 // --------------------------------------------
 let _healthFailCount = 0;
+let _crashLoopDetected = false;
 
 setInterval(async () => {
   try {
-
     if (status() !== "RUNNING") {
       _healthFailCount = 0;
       return;
     }
 
+    // NEVER watchdog-restart in SAFE mode
+    if ((state.lastMode || "safe") === "safe") {
+      _healthFailCount = 0;
+      return;
+    }
+
     const readiness = await getReadiness();
+    const health = readiness.health;
 
-    // ---------------------------------
-    // HEALTH DEBOUNCE (3 strikes)
-    // ---------------------------------
-    if (!readiness.health || !readiness.health.ok) {
+    const startedAt = state.lastStartAt ? new Date(state.lastStartAt).getTime() : 0;
+    const now = Date.now();
+    const inStartupGrace = startedAt && (now - startedAt < 15000);
 
+    const hardFailure =
+      !health ||
+      health.ok !== true;
+
+    if (!inStartupGrace && hardFailure) {
       _healthFailCount++;
 
-      if (_healthFailCount >= 3) {
+      if (_healthFailCount >= 5) {
+        state.restartAttempts = (state.restartAttempts || 0) + 1;
+
+        if (state.restartAttempts >= 5) {
+          _crashLoopDetected = true;
+          setLastError(
+            "CRASH_LOOP_DETECTED",
+            "Crash loop detected. Locked to SAFE mode."
+          );
+          stopEngine();
+          state.lastMode = "safe";
+          saveState();
+          return;
+        }
 
         setLastError(
           "HEALTH_DEBOUNCED_FAIL",
-          "Health failed 3 consecutive checks. Restarting engine."
+          "Backend unreachable 5 consecutive checks. Restarting."
         );
 
         stopEngine();
-        await sleep(1500);
-        startEngine(state.lastMode || "safe");
+        await sleep(2000);
+        startEngine(state.lastMode || "shadow");
 
         _healthFailCount = 0;
       }
@@ -1488,49 +1652,18 @@ setInterval(async () => {
       return;
     }
 
-    // Health OK
-    _healthFailCount = 0;
+  if (health && health.ok === true) {
+      _healthFailCount = 0;
+      state.restartAttempts = 0;
+      saveState();
+  }
 
-    // ---------------------------------
-    // ENSURE STREAM RUNNING
-    // ---------------------------------
-    await new Promise((resolve) => {
-      http.request(
-        {
-          host: OPERATOR_BIND_HOST,
-          port: OPERATOR_PORT,
-          path: "/api/operator/ensure_polygon_stream",
-          method: "POST"
-        },
-        () => resolve()
-      )
-        .on("error", () => resolve())
-        .end();
+  } catch (e) {
+    setLastError("WATCHDOG_EXCEPTION", "Watchdog error", {
+      message: String(e?.message || e || "watchdog_error")
     });
-
-    // ---------------------------------
-    // TARGETED STREAM RESTART (no engine restart)
-    // ---------------------------------
-    const envObj = readEnv();
-    const base = dashBaseUrlFromEnv(envObj);
-    const jobsRes = await httpGetJson(`${base}/api/jobs`);
-
-    if (jobsRes.ok && jobsRes.json && Array.isArray(jobsRes.json.jobs)) {
-
-      const stream = jobsRes.json.jobs.find(
-        j => j.name === "stream_prices_polygon_ws"
-      );
-
-      if (stream && stream.running === false) {
-        await httpGetJson(`${base}/api/jobs/start?name=stream_prices_polygon_ws`);
-      }
-    }
-
-  } catch {}
-
-}, 5000);
-
-
+  }
+}, 8000);
 // --------------------------------------------------
 // START OPERATOR SERVER
 // --------------------------------------------------

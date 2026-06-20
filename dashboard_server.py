@@ -25,6 +25,7 @@ import os
 import sys
 import threading
 import time
+import sqlite3
 
 # ------------------------------------------------------------------
 # Ensure imports work no matter what the working directory is.
@@ -47,7 +48,11 @@ try:
 except Exception:
     pass
 
-from engine.runtime.config_schema import load_runtime_config, ConfigError
+try:
+    from engine.runtime.config_schema import load_runtime_config, ConfigError
+except Exception:
+    load_runtime_config = None
+    ConfigError = Exception
 
 from engine.runtime.logging import get_logger
 log = get_logger("dashboard")
@@ -60,6 +65,49 @@ try:
     os.chdir(_BASE_DIR)
 except Exception:
     pass
+
+# ------------------------------------------------------------------
+# DB HEALTH
+# ------------------------------------------------------------------
+from engine.runtime.storage import DB_PATH
+
+def _db_health_snapshot():
+    result = {
+        "ok": True,
+        "db_path": str(DB_PATH),
+        "size_bytes": 0,
+        "wal_bytes": 0,
+        "integrity": "unknown",
+        "error": None,
+    }
+
+    try:
+        if DB_PATH.exists():
+            result["size_bytes"] = DB_PATH.stat().st_size
+            wal_path = DB_PATH.with_suffix(DB_PATH.suffix + "-wal")
+            if wal_path.exists():
+                result["wal_bytes"] = wal_path.stat().st_size
+
+        con = sqlite3.connect(str(DB_PATH), timeout=5)
+        try:
+            row = con.execute("PRAGMA quick_check;").fetchone()
+            if row:
+                result["integrity"] = str(row[0])
+                if str(row[0]).lower() != "ok":
+                    result["ok"] = False
+        finally:
+            con.close()
+
+    except Exception as e:
+        result["ok"] = False
+        result["error"] = str(e)
+
+    return result
+
+def api_get_db_health(_parsed, _ctx=None):
+    return _db_health_snapshot()
+
+
 
 # API-layer only access (no direct dev_core access from dashboard)
 from engine.api.internal_access import (
@@ -107,10 +155,24 @@ from engine.runtime.lifecycle import (
     mark_shutdown,
 )
 
-from engine.runtime.lifecycle import (
-    start_lifecycle_monitor,
-    mark_shutdown,
-)
+try:
+    from engine.runtime.lifecycle_state import (
+        set_state,
+        mark_clean_shutdown,
+        mark_crash_shutdown,
+        BOOTING,
+        LIVE,
+        DEGRADED,
+        SHUTTING_DOWN,
+    )
+except Exception:
+    set_state = None
+    mark_clean_shutdown = None
+    mark_crash_shutdown = None
+    BOOTING = "BOOTING"
+    LIVE = "LIVE"
+    DEGRADED = "DEGRADED"
+    SHUTTING_DOWN = "SHUTTING_DOWN"
 
 # ------------------------------------------------------------------
 # Jobs API handlers (branch-safe import)
@@ -123,9 +185,9 @@ from engine.api.api_jobs import (
     api_post_job_start,
     api_post_job_stop,
 )
-# -------------            -- ------------------------------------------------------
+# ------------------------------------------------------
 # CONFIG (auto-restart guards)
-# -------------            -- ------------------------------------------------------
+# ------------------------------------------------------
 from engine.runtime.config import (
     AUTO_RESTART_DAEMONS,
     DAEMON_RESTART_BASE_DELAY_MS,
@@ -236,9 +298,9 @@ def api_post_repair_schema(_parsed, _body=None, _ctx=None):
     except Exception as e:
         return {"ok": False, "error": str(e)}
     
-# -------------            -- ------------------------------------------------------
+# ------------------------------------------------------
 # CRIT notifications (email / webhook)
-# -------------            -- ------------------------------------------------------
+# ------------------------------------------------------
 EQ_CRIT_EMAIL_TO = os.environ.get("EQ_CRIT_EMAIL_TO", "")   # comma-separated
 EQ_CRIT_EMAIL_FROM = os.environ.get("EQ_CRIT_EMAIL_FROM", "alerts@localhost")
 EQ_CRIT_SMTP_HOST = os.environ.get("EQ_CRIT_SMTP_HOST", "")
@@ -247,9 +309,9 @@ EQ_CRIT_SMTP_PORT = int(os.environ.get("EQ_CRIT_SMTP_PORT", "25"))
 EQ_CRIT_WEBHOOK_URL = os.environ.get("EQ_CRIT_WEBHOOK_URL", "")
 EQ_CRIT_WEBHOOK_TIMEOUT_S = float(os.environ.get("EQ_CRIT_WEBHOOK_TIMEOUT_S", "4.0"))
 
-# -------------            -- ------------------------------------------------------
+# ------------------------------------------------------
 # Broker ↔ Backtest equity reconciliation thresholds (NEW)
-# -------------            -- ------------------------------------------------------
+# ------------------------------------------------------
 EQ_DIFF_WARN_PCT = float(os.environ.get("EQ_DIFF_WARN_PCT", "0.01"))   # 1%
 EQ_DIFF_CRIT_PCT = float(os.environ.get("EQ_DIFF_CRIT_PCT", "0.03"))   # 3%
 EQ_DIFF_WARN_ABS = float(os.environ.get("EQ_DIFF_WARN_ABS", "50"))
@@ -269,9 +331,9 @@ EQ_DRIFT_SUSTAINED_MIN_CRIT = int(os.environ.get("EQ_DRIFT_SUSTAINED_MIN_CRIT", 
 # Job history retention
 JOB_HISTORY_MAX_ROWS = int(os.environ.get("JOB_HISTORY_MAX_ROWS", "5000"))
 
-# -------------            -- ------------------------------------------------------
+# ------------------------------------------------------
 # RELEVANCE STATS CONFIG (NEW)
-# -------------            -- ------------------------------------------------------
+# ------------------------------------------------------
 
 ENABLE_RELEVANCE_STATS = os.environ.get("ENABLE_RELEVANCE_STATS", "1") == "1"
 RELEVANCE_STATS_CACHE_TTL_S = int(os.environ.get("RELEVANCE_STATS_CACHE_TTL_S", "60"))
@@ -319,7 +381,7 @@ DASHBOARD_API_TOKEN = os.environ.get("DASHBOARD_API_TOKEN", "").strip()
 SERVER_STARTED_AT_MS = int(time.time() * 1000)
 CRASH_LOG_PATH = os.environ.get("CRASH_LOG_PATH", os.path.join(_BASE_DIR, "logs", "crash_analytics.jsonl"))
 
-def _write_crash_analytics(exit_code):
+def _write_crash_analytics(exit_code, err: str = "", tb: str = ""):
     try:
         os.makedirs(os.path.dirname(CRASH_LOG_PATH), exist_ok=True)
     except Exception:
@@ -330,6 +392,8 @@ def _write_crash_analytics(exit_code):
             "ts_ms": int(time.time() * 1000),
             "exit_code": int(exit_code),
             "uptime_s": int((int(time.time() * 1000) - SERVER_STARTED_AT_MS) / 1000),
+            "error": str(err or ""),
+            "traceback": str(tb or ""),
         }
         with open(CRASH_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload) + "\n")
@@ -351,7 +415,24 @@ def _env_bool(key: str, default: bool = False) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
 
 # Default ON for production-safe deterministic boot
-AUTO_BOOT_DAEMONS = _env_bool("AUTO_BOOT_DAEMONS", True)
+# Force deterministic auto-boot in shadow/live
+_mode = os.environ.get("ENGINE_MODE", "").strip().lower()
+if not _mode:
+    _mode = "safe"
+    os.environ["ENGINE_MODE"] = _mode  # Treat missing/blank ENGINE_MODE as SAFE so operator boot is deterministic
+if not _mode:
+    _mode = "safe"
+
+# Deterministic boot policy:
+# - Always auto-boot in live/shadow/safe
+# - In dev: allow AUTO_BOOT_DAEMONS=0 to disable
+if _mode in ("shadow", "live", "safe"):
+    AUTO_BOOT_DAEMONS = True
+elif _mode in ("dev", "development"):
+    AUTO_BOOT_DAEMONS = _env_bool("AUTO_BOOT_DAEMONS", True)
+else:
+    # Unknown mode -> default ON unless explicitly disabled
+    AUTO_BOOT_DAEMONS = _env_bool("AUTO_BOOT_DAEMONS", True)
 
 AUTO_BOOT_TARGETS = [
     x.strip() for x in os.environ.get("AUTO_BOOT_TARGETS", "").split(",")
@@ -359,8 +440,9 @@ AUTO_BOOT_TARGETS = [
 ]
 
 # If no explicit targets provided, default to price feed WS
-if AUTO_BOOT_DAEMONS and not AUTO_BOOT_TARGETS:
-    AUTO_BOOT_TARGETS = ["stream_prices_polygon_ws"]
+if AUTO_BOOT_DAEMONS:
+    if not AUTO_BOOT_TARGETS:
+        AUTO_BOOT_TARGETS = ["stream_prices_polygon_ws"]
 
 _HTTPD = None  # set in run_server()
 
@@ -409,7 +491,7 @@ def api_post_server_shutdown(_parsed, _body=None, _ctx=None):
 
     return {"ok": True}
 
-#------------            -- ------------------------------------------------------
+# ------------------------------------------------------
 # DIAGNOSTICS / METRICS
 
 # -------------            -- ------------------------------------------------------
@@ -464,11 +546,12 @@ try:
 except Exception:
     ROUTE_SPECS_OPS = []
 
-ROUTE_SPECS = (
-    list(ROUTE_SPECS_SYSTEM)
-    + list(ROUTE_SPECS_JOBS)
-    + list(ROUTE_SPECS_OPS)
-)
+try:
+    from engine.api.api_market import ROUTE_SPECS_MARKET
+except Exception:
+    ROUTE_SPECS_MARKET = []
+
+# (optional) terminal route modules are consolidated via ROUTE_SPECS_TERMINAL_ALL below
 
 # -------------------------------------------------------------------
 # FALLBACK ROUTES (UI hard-dep)
@@ -478,8 +561,15 @@ ROUTE_SPECS = (
 _FALLBACK_ROUTE_SPECS = [
     # SYSTEM
     {"method": "GET",  "path": "/api/health",           "handler": "api_get_health"},
+    {"method": "GET",  "path": "/api/db/health",        "handler": "api_get_db_health"},
     {"method": "GET",  "path": "/api/system/state",     "handler": "api_get_system_state"},
     {"method": "GET",  "path": "/api/system/readiness", "handler": "api_get_readiness"},
+
+    # OPERATOR (required by ui/dashboard.js snapshot bundle)
+    {"method": "GET",  "path": "/api/operator/status",     "handler": "api_get_system_state"},
+    {"method": "GET",  "path": "/api/operator/bootstrap",  "handler": "api_get_readiness"},
+    {"method": "GET",  "path": "/api/operator/readiness",  "handler": "api_get_readiness"},
+
     {"method": "GET",  "path": "/api/telemetry",        "handler": "api_get_telemetry"},
     {"method": "GET",  "path": "/api/training_status",  "handler": "api_get_training_status"},
     {"method": "GET",  "path": "/api/pnl",              "handler": "api_get_pnl"},
@@ -538,35 +628,72 @@ _FALLBACK_ROUTE_SPECS = [
     {"method": "GET",  "path": "/api/model_metrics",                  "handler": "api_get_model_metrics"},
     {"method": "GET",  "path": "/api/execution_overlays",             "handler": "api_get_execution_overlays"},
     {"method": "GET",  "path": "/api/crash_analytics",                "handler": "api_get_crash_analytics"},
+
+    # MARKET (live candles from Polygon feed via DB)
+    {"method": "GET",  "path": "/api/market/candles",                 "handler": "api_get_market_candles"},
+    {"method": "GET",  "path": "/api/market/stream",                  "handler": "api_get_market_stream"},
+
+    # TERMINAL
+    {"method": "GET",  "path": "/api/terminal/watchlist",             "handler": "api_get_terminal_watchlist"},
+    {"method": "GET",  "path": "/api/terminal/snapshot",              "handler": "api_get_terminal_snapshot"},
+    {"method": "GET",  "path": "/api/terminal/positions",             "handler": "api_get_terminal_positions"},
+    {"method": "GET",  "path": "/api/terminal/orders",                "handler": "api_get_terminal_orders"},
+    {"method": "GET",  "path": "/api/terminal/fills",                 "handler": "api_get_terminal_fills"},
+    {"method": "GET",  "path": "/api/terminal/equity",                "handler": "api_get_terminal_equity"},
+    {"method": "GET",  "path": "/api/terminal/markers",               "handler": "api_get_terminal_markers"},
 ]
-# De-dup (method,path) while preserving earlier specs
+
+# -------------------------------------------------------------------
+# FORCE-MERGE ALL ROUTES (SYSTEM + JOBS + OPS + FALLBACK)
+# - Always keep first occurrence of (method,path)
+# - Always normalize to dict {method,path,handler}
+# -------------------------------------------------------------------
+
+# Load terminal routes if module exists
+try:
+    from engine.terminal.api import ROUTE_SPECS_TERMINAL_ALL
+    _terminal_routes = list(ROUTE_SPECS_TERMINAL_ALL)
+except Exception:
+    _terminal_routes = []
+
+ROUTE_SPECS = (
+    list(ROUTE_SPECS_SYSTEM)
+    + list(ROUTE_SPECS_JOBS)
+    + list(ROUTE_SPECS_OPS)
+    + list(ROUTE_SPECS_MARKET)
+    + list(_terminal_routes)
+    + list(_FALLBACK_ROUTE_SPECS)
+)
+
 _seen = set()
-_merged = []
+_out = []
 
-for r in (ROUTE_SPECS + _FALLBACK_ROUTE_SPECS):
-
-    # dict style
+for r in ROUTE_SPECS:
     if isinstance(r, dict):
         method = str(r.get("method", "")).upper()
         path = str(r.get("path", ""))
-
-    # tuple style (method, path, handler)
-    elif isinstance(r, tuple) and len(r) >= 2:
+        handler = r.get("handler")
+    elif isinstance(r, tuple) and len(r) >= 3:
         method = str(r[0]).upper()
         path = str(r[1])
-
+        handler = r[2]
     else:
         continue
 
-    key = (method, path)
+    if not method or not path:
+        continue
 
+    key = (method, path)
     if key in _seen:
         continue
 
     _seen.add(key)
-    _merged.append(r)
+    _out.append({"method": method, "path": path, "handler": handler})
 
-ROUTE_SPECS = _merged
+ROUTE_SPECS = _out
+
+# ROUTE_SPECS is already de-duped above into dict form; keep as-is here.
+ROUTE_SPECS = ROUTE_SPECS
 
 # ---------------------------------------------------
 # NORMALIZE ROUTE SPECS (tuple -> dict)
@@ -591,7 +718,7 @@ for r in ROUTE_SPECS:
 
 ROUTE_SPECS = _normalized
 
-def api_get_kill_switches(parsed):
+def api_get_kill_switches(parsed, ctx=None):
     if not _api_get_kill_switches_impl:
         return {"ok": False, "error": "kill_switches_unavailable"}
     # Some callers pass None (lifecycle monitor). Provide a minimal parsed shim.
@@ -599,7 +726,12 @@ def api_get_kill_switches(parsed):
         class _P:  # tiny shim
             query = ""
         parsed = _P()
-    return _api_get_kill_switches_impl(parsed, {})
+
+    # Prefer passing ctx if the impl supports it
+    try:
+        return _api_get_kill_switches_impl(parsed, ctx)
+    except TypeError:
+        return _api_get_kill_switches_impl(parsed, {})
 
 
 def api_get_job_log(parsed, body=None, ctx=None):
@@ -717,7 +849,23 @@ except Exception:
 # Optional (missing in this repo): keep names defined so API_HANDLERS can reference them safely.
 api_get_market_stress = _unavailable("api_get_market_stress")
 api_get_market_stress_history = _unavailable("api_get_market_stress_history")
-api_get_portfolio = _unavailable("api_get_portfolio")
+
+try:
+    from engine.api.api_dashboard_reads import api_get_portfolio as _impl_api_get_portfolio
+except Exception:
+    _impl_api_get_portfolio = None
+
+def api_get_portfolio(parsed, _ctx=None):
+    if _impl_api_get_portfolio:
+        try:
+            return _impl_api_get_portfolio(parsed, {})
+        except TypeError:
+            try:
+                return _impl_api_get_portfolio(parsed)
+            except TypeError:
+                return _impl_api_get_portfolio()
+    return {"ok": True, "meta": {"ready": False, "reason": "portfolio_unavailable"}, "state": [], "orders": []}
+
 api_get_broker = _unavailable("api_get_broker")
 api_get_strategy_status = _unavailable("api_get_strategy_status")
 api_get_strategy_metrics = _unavailable("api_get_strategy_metrics")
@@ -738,6 +886,43 @@ from engine.api.api_system import (
     api_get_execution_barrier,
 )
 
+try:
+    from engine.api.api_market import (
+        api_get_market_candles,
+        api_get_market_stream,
+    )
+except Exception:
+    api_get_market_candles = _unavailable("api_get_market_candles")
+    api_get_market_stream = _unavailable("api_get_market_stream")
+
+try:
+    from engine.terminal.api.api_terminal import (
+        api_get_terminal_watchlist,
+        api_get_terminal_snapshot,
+        api_get_terminal_positions,
+        api_get_terminal_orders,
+        api_get_terminal_fills,
+        api_get_terminal_equity,
+        api_get_terminal_markers,
+    )
+except Exception:
+    api_get_terminal_watchlist = _unavailable("api_get_terminal_watchlist")
+    api_get_terminal_snapshot = _unavailable("api_get_terminal_snapshot")
+    api_get_terminal_positions = _unavailable("api_get_terminal_positions")
+    api_get_terminal_orders = _unavailable("api_get_terminal_orders")
+    api_get_terminal_fills = _unavailable("api_get_terminal_fills")
+    api_get_terminal_equity = _unavailable("api_get_terminal_equity")
+    api_get_terminal_markers = _unavailable("api_get_terminal_markers")
+
+try:
+    from engine.terminal.api.api_terminal_orders import (
+        api_post_terminal_order,
+        api_post_terminal_flatten,
+    )
+except Exception:
+    api_post_terminal_order = _unavailable("api_post_terminal_order")
+    api_post_terminal_flatten = _unavailable("api_post_terminal_flatten")
+
 # ---- SCHEMA REPAIR (Operator controlled) ----
 _repair_schema_run = None
 
@@ -750,6 +935,8 @@ except Exception:
         from engine.runtime.jobs.repair_schema import run as _repair_schema_run
     except Exception:
         _repair_schema_run = None
+
+
 
 def api_get_pnl(_parsed, _ctx=None):
     try:
@@ -896,6 +1083,13 @@ def api_get_crash_analytics(parsed, _ctx=None):
     except Exception as e:
         return {"ok": False, "error": str(e), "path": CRASH_LOG_PATH}
 
+def api_post_self_heal(_parsed, _body=None, _ctx=None):
+    try:
+        from engine.runtime.self_heal import run_self_heal
+        result = run_self_heal()
+        return {"ok": True, "result": result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 API_HANDLERS = {
     # SYSTEM
@@ -906,8 +1100,10 @@ API_HANDLERS = {
     "api_get_telemetry": api_get_telemetry,
     "api_get_pnl": api_get_pnl,
     "api_post_repair_schema": api_post_repair_schema,
+    "api_post_self_heal": api_post_self_heal,
     "api_get_execution_barrier": api_get_execution_barrier,
-
+    "api_get_db_health": api_get_db_health,
+    
     # UI console lifecycle
     "api_get_server_status": api_get_server_status,
     "api_get_training_status": api_get_training_status,
@@ -951,6 +1147,19 @@ API_HANDLERS = {
     "api_get_execution_overlays": api_get_execution_overlays,
     "api_get_crash_analytics": api_get_crash_analytics,
 
+    # MARKET
+    "api_get_market_candles": api_get_market_candles,
+    "api_get_market_stream": api_get_market_stream,
+
+    # TERMINAL
+    "api_get_terminal_watchlist": api_get_terminal_watchlist,
+    "api_get_terminal_snapshot": api_get_terminal_snapshot,
+    "api_get_terminal_positions": api_get_terminal_positions,
+    "api_get_terminal_orders": api_get_terminal_orders,
+    "api_get_terminal_fills": api_get_terminal_fills,
+    "api_get_terminal_equity": api_get_terminal_equity,
+    "api_get_terminal_markers": api_get_terminal_markers,
+
     # MISSING OPS / EXECUTION / PORTFOLIO (kept for compatibility; safe stubs if absent)
     "api_get_market_stress": api_get_market_stress,
     "api_get_market_stress_history": api_get_market_stress_history,
@@ -965,17 +1174,28 @@ API_HANDLERS = {
     "api_get_promotion_status": api_get_promotion_status,
 }
 
-# -------------            -- ------------------------------------------------------
+# ------------------------------------------------------
 # SERVER
-# -------------            -- ------------------------------------------------------
+# ------------------------------------------------------
 def run_server():
     global _HTTPD
+
+    try:
+        if set_state:
+            set_state(BOOTING, "dashboard_server_start")
+    except Exception:
+        pass
 
     # ---------------------------------------------------
     # RUNTIME BOOTSTRAP (DB + coordination tables)
     # ---------------------------------------------------
-    boot = bootstrap_runtime(log=log)
-    if not boot.get("ok"):
+    try:
+        boot = bootstrap_runtime()
+    except Exception as e:
+        log.exception("bootstrap_runtime_exception")
+        raise
+
+    if not isinstance(boot, dict) or not boot.get("ok"):
         raise RuntimeError(f"bootstrap_runtime failed: {boot}")
 
     # ---------------------------------------------------
@@ -1027,6 +1247,11 @@ def run_server():
     # ---------------------------------------------------
     v = SUPERVISOR.validate_graph(strict=True)
     if not v.get("ok"):
+        try:
+            if set_state:
+                set_state(DEGRADED, "invalid_dependency_graph")
+        except Exception:
+            pass
         raise RuntimeError(f"invalid_dependency_graph: {list(v.get('errors') or [])}")
 
     if not ALLOWED_JOBS:
@@ -1052,10 +1277,16 @@ def run_server():
 
         return ordered
 
+    if _mode == "safe":
+        AUTO_BOOT_DAEMONS = True
+
     if not AUTO_BOOT_DAEMONS:
         log.info("AUTO_BOOT_DAEMONS=0 -> skipping job auto-boot (UI only)")
     else:
         targets = list(AUTO_BOOT_TARGETS) if AUTO_BOOT_TARGETS else _default_daemon_targets()
+
+        if not targets:
+            targets = ["stream_prices_polygon_ws"]
 
         log.info("SUPERVISOR deterministic_start targets: %s", targets)
 
@@ -1068,9 +1299,41 @@ def run_server():
         log.info("SUPERVISOR boot result: %s", result)
 
         if not result.get("ok"):
-            raise RuntimeError(f"auto_boot_failed: {result}")
+            if _mode == "safe":
+                log.error("auto_boot_failed (SAFE) - continuing without daemon boot: %s", result)
+            else:
+                raise RuntimeError(f"auto_boot_failed: {result}")
 
-        if AUTO_PIPELINE:
+        # Ensure at least one price daemon is running
+        price_running = any(
+            j.get("name") in ("poll_prices", "stream_prices_polygon_ws", "stream_prices_ibkr")
+            and j.get("running")
+            for j in SUPERVISOR.list_jobs()
+        )
+
+        if not price_running:
+            log.warning("No price daemon running after boot — forcing start")
+            try:
+                if set_state:
+                    set_state(DEGRADED, "no_price_daemon_running")
+            except Exception:
+                pass
+            try:
+                SUPERVISOR.deterministic_start(
+                    ["stream_prices_polygon_ws"],
+                    include_deps=True,
+                    strict=False,
+                )
+            except Exception as e:
+                log.error("forced_price_start_failed: %s", e)
+
+        try:
+            if set_state:
+                set_state(LIVE, "supervisor_boot_complete")
+        except Exception:
+            pass
+        
+        if AUTO_PIPELINE and _mode != "safe":
             log.info("auto_pipeline enabled interval_s=%s", AUTO_PIPELINE_INTERVAL_S)
             threading.Thread(target=ORCHESTRATOR.auto_pipeline_loop, daemon=True).start()
 
@@ -1109,6 +1372,13 @@ def run_server():
             # mark shutdown FIRST so all mutating endpoints can fail-closed
             try:
                 mark_shutdown()
+            except Exception:
+                pass
+            try:
+                if mark_clean_shutdown:
+                    mark_clean_shutdown()
+                elif set_state:
+                    set_state(SHUTTING_DOWN, "clean_shutdown")
             except Exception:
                 pass
             try:
@@ -1160,7 +1430,19 @@ def stop_server():
 if __name__ == "__main__":
     try:
         run_server()
-    except Exception:
-        _write_crash_analytics(exit_code=1)
+    except Exception as e:
+        try:
+            if mark_crash_shutdown:
+                mark_crash_shutdown(str(e))
+            elif set_state:
+                set_state(DEGRADED, "dashboard_crash")
+        except Exception:
+            pass
+
+        try:
+            import traceback as _tb
+            _write_crash_analytics(exit_code=1, err=str(e), tb=_tb.format_exc())
+        except Exception:
+            _write_crash_analytics(exit_code=1)
         log.exception("dashboard_server crashed")
         raise
